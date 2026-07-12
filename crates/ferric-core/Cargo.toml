@@ -1,0 +1,25 @@
+[package]
+name = "ferric-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+uuid = { workspace = true }
+similar = { workspace = true }
+serde_yaml = { workspace = true }
+sqlformat = { workspace = true }
+fancy-regex = { workspace = true }
+rsa = { workspace = true }
+rand = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+des = { workspace = true }
+md-5 = { workspace = true }
+base64 = { workspace = true }
+smcrypto = { workspace = true }
