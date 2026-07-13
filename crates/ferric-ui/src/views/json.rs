@@ -3,7 +3,7 @@
 use crate::tool::{Shared, Tool, ToolMeta};
 use crate::{icons, widgets};
 use egui::{
-    vec2, Align2, Color32, FontId, Frame, Margin, RichText, Rounding, ScrollArea, Sense,
+    vec2, Align2, Color32, FontId, Frame, Margin, RichText, Rounding, ScrollArea, Sense, Stroke,
     TextWrapMode, Ui,
 };
 use ferric_core::json::{self, Indent};
@@ -204,6 +204,10 @@ impl Tool for JsonTool {
         false // 工具条在顶栏、就地编辑，无需描述行
     }
 
+    fn full_bleed(&self) -> bool {
+        true // 标题左对齐，编辑区铺满整个内容区
+    }
+
     fn header_actions(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
         self.toolbar_row(ui, &theme, shared);
@@ -211,37 +215,60 @@ impl Tool for JsonTool {
 
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
-        ui.add_space(4.0);
 
-        // 编辑区铺满剩余高度：预留 4 上距 + 4 空隙 + 状态行(~20) + 极小余量，底部只留一行描述。
-        let editor_h = (shared.content_height - 40.0).max(160.0);
-
-        if self.tree {
-            match serde_json::from_str::<Value>(&self.input) {
-                Ok(v) => {
-                    fold_view(ui, &theme, &v, &mut self.collapsed, editor_h);
-                }
-                Err(e) => {
-                    self.ok = false;
-                    ui.colored_label(theme.danger, format!("无法解析为 JSON：{e}"));
-                }
-            }
-        } else {
-            widgets::code_area_fill(ui, "json-in", &mut self.input, editor_h);
-        }
-
-        ui.add_space(5.0);
-        ui.horizontal(|ui| {
-            widgets::status_line(ui, &theme, self.ok, &self.status);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!("{} 字符", self.input.chars().count()))
-                        .size(11.0)
-                        .family(egui::FontFamily::Monospace)
-                        .color(theme.faint),
-                );
+        // 底部固定一行状态条（自带顶部分割线），其余空间 100% 交给编辑区。
+        egui::TopBottomPanel::bottom("json-status-bar")
+            .exact_height(30.0)
+            .frame(Frame::none().inner_margin(Margin::symmetric(24.0, 0.0)))
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                // 分割线：状态条顶边（横贯整个内容区宽度）
+                let rect = ui.max_rect();
+                let full = egui::Rangef::new(rect.left() - 24.0, rect.right() + 24.0);
+                ui.painter().hline(full, rect.top(), Stroke::new(1.0, theme.border));
+                // 整条 30px 高度内垂直居中，图标与文字内联（不嵌套 horizontal，避免对齐偏差）
+                ui.horizontal_centered(|ui| {
+                    let (glyph, color) = if self.ok {
+                        (icons::CIRCLE_CHECK, theme.ok)
+                    } else {
+                        (icons::CIRCLE_ALERT, theme.danger)
+                    };
+                    ui.label(icons::text(glyph, 13.0, color));
+                    ui.label(RichText::new(&self.status).size(11.5).color(color));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{} 字符", self.input.chars().count()))
+                                .size(11.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme.faint),
+                        );
+                    });
+                });
             });
-        });
+
+        egui::CentralPanel::default()
+            .frame(Frame::none().inner_margin(Margin {
+                left: 24.0,
+                right: 24.0,
+                top: 10.0,
+                bottom: 10.0,
+            }))
+            .show_inside(ui, |ui| {
+                let editor_h = ui.available_height();
+                if self.tree {
+                    match serde_json::from_str::<Value>(&self.input) {
+                        Ok(v) => {
+                            fold_view(ui, &theme, &v, &mut self.collapsed, editor_h);
+                        }
+                        Err(e) => {
+                            self.ok = false;
+                            ui.colored_label(theme.danger, format!("无法解析为 JSON：{e}"));
+                        }
+                    }
+                } else {
+                    widgets::code_area_seamless(ui, &theme, "json-in", &mut self.input, editor_h);
+                }
+            });
     }
 
     fn save_draft(&self) -> Option<String> {

@@ -64,6 +64,11 @@ pub trait Tool {
         true
     }
 
+    /// 是否铺满内容区（标题左对齐、内容不按 1080 列居中）。默认按列居中。
+    fn full_bleed(&self) -> bool {
+        false
+    }
+
     /// 在顶栏标题右侧渲染的工具专属操作（如 JSON 工具条）。默认无。
     fn header_actions(&mut self, _ui: &mut egui::Ui, _shared: &mut Shared) {}
 

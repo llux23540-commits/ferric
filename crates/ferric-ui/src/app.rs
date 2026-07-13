@@ -319,7 +319,10 @@ impl FerricApp {
         let meta = self.tools[self.active].meta();
         let id = meta.id;
         let is_fav = self.favorites.contains(id);
-        let (side, _) = content_metrics(ui.available_width());
+        let (mut side, _) = content_metrics(ui.available_width());
+        if self.tools[self.active].full_bleed() {
+            side = 24.0; // 铺满模式：标题贴左，不随居中列缩进
+        }
         ui.horizontal_centered(|ui| {
             ui.add_space(side);
             ui.label(
@@ -371,6 +374,13 @@ impl FerricApp {
         let theme = self.shared.theme;
         let i = self.active;
         let meta = self.tools[i].meta();
+
+        // 铺满模式：整个内容区（宽 100% × 高 100%）直接交给工具，
+        // 工具内部用面板自行划分（如 JSON：底部状态条 + 其余全是编辑区）。
+        if self.tools[i].full_bleed() {
+            self.tools[i].ui(ui, &mut self.shared);
+            return;
+        }
 
         let (side, colw) = content_metrics(ui.available_width());
 

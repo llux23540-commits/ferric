@@ -426,6 +426,78 @@ pub fn code_area_fill(ui: &mut Ui, id: &str, text: &mut String, height: f32) -> 
     resp
 }
 
+/// 无边框贴底编辑区：透明背景直接融入主题背景（亮/暗自动跟随），
+/// 文字用主题前景色（清晰可读），不画卡片框与聚焦环，铺满给定高度，超长时内部滚动。
+pub fn code_area_seamless(
+    ui: &mut Ui,
+    theme: &Theme,
+    id: &str,
+    text: &mut String,
+    height: f32,
+) -> Response {
+    let inner_h = height.max(60.0);
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
+    let rows = (inner_h / row_h).floor().max(3.0) as usize;
+    let mut out = ScrollArea::vertical()
+        .id_salt(format!("{id}-sc"))
+        .max_height(inner_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                TextEdit::multiline(text)
+                    .id_salt(id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(rows)
+                    .code_editor()
+                    .text_color(theme.fg)
+                    .frame(false),
+            )
+        });
+    let resp = out.inner;
+
+    // 拖选超出可视区上/下边缘时自动滚动（egui 原生不支持）：
+    // 超出距离越大滚得越快（约每秒 10 倍超出距离），选区随内容滚动持续扩展。
+    // 注意不能用 resp.dragged()：指针一离开编辑区它就变 false（egui 行为），
+    // 改用「编辑器有焦点 + 左键按住」判定拖选中。
+    let selecting =
+        ui.input(|i| i.pointer.primary_down()) && (resp.dragged() || resp.has_focus());
+    if selecting {
+        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+            let view = out.inner_rect;
+            let overshoot = if pos.y < view.top() {
+                pos.y - view.top()
+            } else if pos.y > view.bottom() {
+                pos.y - view.bottom()
+            } else {
+                0.0
+            };
+            if overshoot != 0.0 {
+                let dt = ui.input(|i| i.stable_dt).min(0.1);
+                // 速度随超出距离增大，保底 60px/s
+                let speed = overshoot.signum() * (overshoot.abs() * 10.0).max(60.0);
+                let max_off = (out.content_size.y - view.height()).max(0.0);
+                let new_y = (out.state.offset.y + speed * dt).clamp(0.0, max_off);
+                if (new_y - out.state.offset.y).abs() > f32::EPSILON {
+                    out.state.offset.y = new_y;
+                    out.state.store(ui.ctx(), out.id);
+                }
+                ui.ctx().request_repaint(); // 指针不动也要持续滚
+            }
+        }
+    }
+    // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
+    if resp.gained_focus() {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), resp.id) {
+            let end = egui::text::CCursor::new(text.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), resp.id);
+        }
+    }
+    resp
+}
+
 /// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。返回复制点击。
 pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usize) -> bool {
     let mut copied = false;
