@@ -62,6 +62,7 @@ pub const UPLOAD: char = '\u{e19e}';
 pub const FILE: char = '\u{e0c0}';
 pub const PLUS: char = '\u{e13d}';
 pub const ARROW_RIGHT_LEFT: char = '\u{e417}';
+pub const ARROW_UP_A_Z: char = '\u{e41a}';
 pub const HASH: char = '\u{e0ef}';
 pub const CLIPBOARD_COPY: char = '\u{e225}';
 pub const GRIP_VERTICAL: char = '\u{e0eb}';
