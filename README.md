@@ -40,6 +40,19 @@ cargo test                  # 核心逻辑单测
 cargo clippy --all-targets  # 静态检查
 ```
 
+### 打包发行版
+
+打包配置在 `crates/ferric-app/Cargo.toml` 的 `[package.metadata.packager]`（cargo-packager）。
+
+```sh
+cargo install cargo-packager --locked
+cargo build --release -p ferric-app
+cargo packager --release --formats nsis   # Windows 安装包；macOS 用 dmg，Linux 用 deb / appimage
+```
+
+产物输出到 `target/release/`，如 `ferric_<版本>_x64-setup.exe`；
+免安装便携版直接分发 `target/release/ferric.exe` 即可（单二进制，无外部依赖）。
+
 ### Windows on ARM64 说明
 
 本仓库默认针对 `aarch64-pc-windows-msvc`（原生）。原生构建需安装
