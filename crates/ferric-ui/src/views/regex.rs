@@ -87,7 +87,7 @@ impl Tool for RegexTool {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.pattern)
                             .frame(false)
-                            .desired_width(ui.available_width() - 120.0)
+                            .desired_width((ui.available_width() - 120.0).max(80.0))
                             .hint_text(r"正则表达式，如 (\w+)@(\w+\.\w+)")
                             .font(egui::TextStyle::Monospace),
                     );

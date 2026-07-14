@@ -110,13 +110,15 @@ impl Tool for TimestampTool {
                                 .hint_text("搜索时区…"),
                         );
                         let f = self.tz_filter.to_lowercase();
-                        for z in chrono_tz::TZ_VARIANTS
-                            .iter()
-                            .filter(|z| f.is_empty() || z.name().to_lowercase().contains(&f))
-                            .take(300)
-                        {
-                            ui.selectable_value(&mut self.tz, *z, z.name());
-                        }
+                        // 全量列出（约 590 个），超长部分靠下拉内滚动，不截断。
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            for z in chrono_tz::TZ_VARIANTS
+                                .iter()
+                                .filter(|z| f.is_empty() || z.name().to_lowercase().contains(&f))
+                            {
+                                ui.selectable_value(&mut self.tz, *z, z.name());
+                            }
+                        });
                     });
             });
             ui.add_space(6.0);
@@ -147,7 +149,15 @@ impl Tool for TimestampTool {
                         };
                     }
                 });
-                widgets::field_label(&mut cols[1], &theme, "转换后的时间");
+                cols[1].horizontal(|ui| {
+                    widgets::field_label(ui, &theme, "转换后的时间");
+                    if !self.ts_output.is_empty()
+                        && !self.ts_output.starts_with("错误")
+                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                    {
+                        shared.copy(ui.ctx(), self.ts_output.clone());
+                    }
+                });
                 cols[1].add_space(6.0);
                 readonly_field(&mut cols[1], &theme, &self.ts_output, "转换后的时间");
             });

@@ -155,7 +155,7 @@ impl FerricApp {
                 ui.painter().hline(
                     ui.max_rect().x_range(),
                     ui.max_rect().top(),
-                    Stroke::new(1.0, theme.border),
+                    Stroke::new(1.0_f32, theme.border),
                 );
                 ui.add_space(10.0);
                 // 品牌一行
@@ -366,7 +366,7 @@ impl FerricApp {
         ui.painter().hline(
             ui.max_rect().x_range(),
             ui.max_rect().bottom(),
-            Stroke::new(1.0, theme.border),
+            Stroke::new(1.0_f32, theme.border),
         );
     }
 
@@ -433,7 +433,7 @@ impl FerricApp {
             .frame(
                 Frame::none()
                     .fill(theme.bg)
-                    .stroke(Stroke::new(1.0, theme.border_2))
+                    .stroke(Stroke::new(1.0_f32, theme.border_2))
                     .rounding(Rounding::same(14.0))
                     .inner_margin(Margin::same(18.0)),
             )
@@ -469,14 +469,17 @@ impl FerricApp {
                 ui.horizontal(|ui| {
                     widgets::field_label(ui, &theme, "本地数据");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::ghost_button(ui, &theme, "清除收藏与偏好").clicked() {
+                        if widgets::ghost_button(ui, &theme, "清除收藏与工具草稿").clicked() {
                             self.favorites.clear();
+                            // 草稿在 save() 时由工具状态重建，重置工具即清除草稿。
+                            self.tools = views::registry();
+                            self.shared.toast("已清除收藏与全部工具草稿");
                         }
                     });
                 });
                 ui.add_space(10.0);
                 ui.label(
-                    RichText::new("Ferric v0.4.2 · 全部数据仅存于本机，不上传")
+                    RichText::new(concat!("Ferric v", env!("CARGO_PKG_VERSION"), " · 全部数据仅存于本机，不上传"))
                         .family(FontFamily::Monospace)
                         .size(11.0)
                         .color(theme.faint),
@@ -600,7 +603,7 @@ impl eframe::App for FerricApp {
                     ui.painter().vline(
                         ui.max_rect().right() + 12.0,
                         ui.max_rect().y_range(),
-                        Stroke::new(1.0, theme.border),
+                        Stroke::new(1.0_f32, theme.border),
                     );
                     self.rail_ui(ui);
                 });

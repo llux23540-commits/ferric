@@ -17,6 +17,7 @@ pub struct RsaTool {
     pub_pem: String,
     priv_pem: String,
     status: String,
+    ok: bool,
     busy: bool,
     rx: Option<Receiver<Result<(String, String), String>>>,
 }
@@ -28,6 +29,7 @@ impl Default for RsaTool {
             pub_pem: String::new(),
             priv_pem: String::new(),
             status: "就绪".to_owned(),
+            ok: true,
             busy: false,
             rx: None,
         };
@@ -55,11 +57,13 @@ impl RsaTool {
                     self.pub_pem = p;
                     self.priv_pem = s;
                     self.status = "已生成".to_owned();
+                    self.ok = true;
                     self.busy = false;
                     self.rx = None;
                 }
                 Ok(Err(e)) => {
-                    self.status = format!("失败：{e}");
+                    self.status = format!("生成失败：{e}");
+                    self.ok = false;
                     self.busy = false;
                     self.rx = None;
                 }
@@ -67,6 +71,8 @@ impl RsaTool {
                     ui.ctx().request_repaint(); // 继续轮询
                 }
                 Err(_) => {
+                    self.status = "生成线程意外中断".to_owned();
+                    self.ok = false;
                     self.busy = false;
                     self.rx = None;
                 }
@@ -103,8 +109,11 @@ impl Tool for RsaTool {
                     self.regen();
                 }
             });
+            ui.add_space(6.0);
             if self.busy {
-                ui.label(RichText::new("生成中…").size(12.0).color(theme.muted));
+                ui.label(RichText::new(&self.status).size(12.0).color(theme.muted));
+            } else {
+                widgets::status_line(ui, &theme, self.ok, &self.status);
             }
         });
         ui.add_space(16.0);

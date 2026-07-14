@@ -1,4 +1,4 @@
-//! 加密 / 解密文本视图（AES / TripleDES / RC4，OpenSSL 盐格式）。
+//! 加密 / 解密文本视图（AES / TripleDES / Rabbit / RC4，OpenSSL 盐格式）。
 
 use crate::tool::{Shared, Tool, ToolMeta};
 use crate::{icons, widgets};
@@ -19,10 +19,14 @@ pub struct CryptoTool {
     enc_key: String,
     enc_out: String,
     enc_algo: Algo,
+    enc_ok: bool,
+    enc_status: String,
     dec_text: String,
     dec_key: String,
     dec_out: String,
     dec_algo: Algo,
+    dec_ok: bool,
+    dec_status: String,
 }
 
 impl Default for CryptoTool {
@@ -32,10 +36,14 @@ impl Default for CryptoTool {
             enc_key: String::new(),
             enc_out: String::new(),
             enc_algo: Algo::Aes,
+            enc_ok: true,
+            enc_status: "就绪".to_owned(),
             dec_text: String::new(),
             dec_key: String::new(),
             dec_out: String::new(),
             dec_algo: Algo::Aes,
+            dec_ok: true,
+            dec_status: "就绪".to_owned(),
         }
     }
 }
@@ -85,12 +93,24 @@ impl Tool for CryptoTool {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if widgets::primary_icon(ui, &theme, icons::LOCK, "加密").clicked() {
-                    self.enc_out = crypto::encrypt(self.enc_algo, &self.enc_text, &self.enc_key)
-                        .unwrap_or_else(|e| format!("错误：{e}"));
+                    match crypto::encrypt(self.enc_algo, &self.enc_text, &self.enc_key) {
+                        Ok(ct) => {
+                            self.enc_out = ct;
+                            self.enc_ok = true;
+                            self.enc_status = "已加密".to_owned();
+                        }
+                        Err(e) => {
+                            self.enc_out.clear();
+                            self.enc_ok = false;
+                            self.enc_status = format!("加密失败：{e}");
+                        }
+                    }
                 }
                 if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
                     shared.copy(ui.ctx(), self.enc_out.clone());
                 }
+                ui.add_space(6.0);
+                widgets::status_line(ui, &theme, self.enc_ok, &self.enc_status);
             });
             ui.add_space(8.0);
             widgets::field_label(ui, &theme, "您的加密文本");
@@ -119,12 +139,24 @@ impl Tool for CryptoTool {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if widgets::primary_icon(ui, &theme, icons::KEY, "解密").clicked() {
-                    self.dec_out = crypto::decrypt(self.dec_algo, &self.dec_text, &self.dec_key)
-                        .unwrap_or_else(|e| format!("错误：{e}"));
+                    match crypto::decrypt(self.dec_algo, &self.dec_text, &self.dec_key) {
+                        Ok(pt) => {
+                            self.dec_out = pt;
+                            self.dec_ok = true;
+                            self.dec_status = "已解密".to_owned();
+                        }
+                        Err(e) => {
+                            self.dec_out.clear();
+                            self.dec_ok = false;
+                            self.dec_status = format!("解密失败：{e}");
+                        }
+                    }
                 }
                 if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
                     shared.copy(ui.ctx(), self.dec_out.clone());
                 }
+                ui.add_space(6.0);
+                widgets::status_line(ui, &theme, self.dec_ok, &self.dec_status);
             });
             ui.add_space(8.0);
             widgets::field_label(ui, &theme, "您的解密文本");

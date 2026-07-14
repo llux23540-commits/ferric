@@ -23,10 +23,14 @@ pub struct GmTool {
     enc_key: String,
     enc_out: String,
     enc_algo: EncAlgo,
+    enc_ok: bool,
+    enc_status: String,
     dec_text: String,
     dec_key: String,
     dec_out: String,
     dec_algo: DecAlgo,
+    dec_ok: bool,
+    dec_status: String,
 }
 
 impl Default for GmTool {
@@ -38,10 +42,14 @@ impl Default for GmTool {
             enc_key: String::new(),
             enc_out: String::new(),
             enc_algo: EncAlgo::Sm4,
+            enc_ok: true,
+            enc_status: "就绪".to_owned(),
             dec_text: String::new(),
             dec_key: String::new(),
             dec_out: String::new(),
             dec_algo: DecAlgo::Sm4,
+            dec_ok: true,
+            dec_status: "就绪".to_owned(),
         }
     }
 }
@@ -99,7 +107,15 @@ impl Tool for GmTool {
                 widgets::code_area(&mut cols[0], "gm-enc-text", &mut self.enc_text, true, 5);
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
-                cols[1].add(TextEdit::singleline(&mut self.enc_key).desired_width(f32::INFINITY).hint_text("SM4 口令 / SM2 公钥"));
+                let hint = match self.enc_algo {
+                    EncAlgo::Sm4 => "SM4 口令",
+                    EncAlgo::Sm2 => "SM2 公钥（留空则用上方密钥对）",
+                    EncAlgo::Sm3 => "SM3 摘要无需密钥",
+                };
+                cols[1].add_enabled(
+                    self.enc_algo != EncAlgo::Sm3,
+                    TextEdit::singleline(&mut self.enc_key).desired_width(f32::INFINITY).hint_text(hint),
+                );
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "国密算法");
                 cols[1].add_space(4.0);
@@ -112,19 +128,32 @@ impl Tool for GmTool {
                     });
             });
             ui.add_space(10.0);
-            let key_for_enc = if self.enc_algo == EncAlgo::Sm2 {
+            // SM2 优先用本卡输入的公钥，留空才回落到卡1生成的密钥对。
+            let key_for_enc = if self.enc_algo == EncAlgo::Sm2 && self.enc_key.trim().is_empty() {
                 self.pub_key.clone()
             } else {
                 self.enc_key.clone()
             };
             ui.horizontal(|ui| {
                 if widgets::primary_icon(ui, &theme, icons::LOCK, "加密 / 摘要").clicked() {
-                    self.enc_out = gm::encrypt(self.enc_algo, &self.enc_text, &key_for_enc)
-                        .unwrap_or_else(|e| format!("错误：{e}"));
+                    match gm::encrypt(self.enc_algo, &self.enc_text, &key_for_enc) {
+                        Ok(out) => {
+                            self.enc_out = out;
+                            self.enc_ok = true;
+                            self.enc_status = "完成".to_owned();
+                        }
+                        Err(e) => {
+                            self.enc_out.clear();
+                            self.enc_ok = false;
+                            self.enc_status = format!("失败：{e}");
+                        }
+                    }
                 }
                 if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
                     shared.copy(ui.ctx(), self.enc_out.clone());
                 }
+                ui.add_space(6.0);
+                widgets::status_line(ui, &theme, self.enc_ok, &self.enc_status);
             });
             ui.add_space(8.0);
             widgets::field_label(ui, &theme, "加密 / 摘要结果（hex）");
@@ -143,7 +172,11 @@ impl Tool for GmTool {
                 widgets::code_area(&mut cols[0], "gm-dec-text", &mut self.dec_text, true, 5);
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
-                cols[1].add(TextEdit::singleline(&mut self.dec_key).desired_width(f32::INFINITY).hint_text("SM4 口令 / SM2 私钥"));
+                let hint = match self.dec_algo {
+                    DecAlgo::Sm4 => "SM4 口令",
+                    DecAlgo::Sm2 => "SM2 私钥（留空则用上方密钥对）",
+                };
+                cols[1].add(TextEdit::singleline(&mut self.dec_key).desired_width(f32::INFINITY).hint_text(hint));
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "国密算法");
                 cols[1].add_space(4.0);
@@ -156,19 +189,32 @@ impl Tool for GmTool {
                     });
             });
             ui.add_space(10.0);
-            let key_for_dec = if self.dec_algo == DecAlgo::Sm2 {
+            // SM2 优先用本卡输入的私钥，留空才回落到卡1生成的密钥对。
+            let key_for_dec = if self.dec_algo == DecAlgo::Sm2 && self.dec_key.trim().is_empty() {
                 self.priv_key.clone()
             } else {
                 self.dec_key.clone()
             };
             ui.horizontal(|ui| {
                 if widgets::primary_icon(ui, &theme, icons::KEY, "解密").clicked() {
-                    self.dec_out = gm::decrypt(self.dec_algo, &self.dec_text, &key_for_dec)
-                        .unwrap_or_else(|e| format!("错误：{e}"));
+                    match gm::decrypt(self.dec_algo, &self.dec_text, &key_for_dec) {
+                        Ok(out) => {
+                            self.dec_out = out;
+                            self.dec_ok = true;
+                            self.dec_status = "已解密".to_owned();
+                        }
+                        Err(e) => {
+                            self.dec_out.clear();
+                            self.dec_ok = false;
+                            self.dec_status = format!("解密失败：{e}");
+                        }
+                    }
                 }
                 if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
                     shared.copy(ui.ctx(), self.dec_out.clone());
                 }
+                ui.add_space(6.0);
+                widgets::status_line(ui, &theme, self.dec_ok, &self.dec_status);
             });
             ui.add_space(8.0);
             widgets::field_label(ui, &theme, "您的解密文本");

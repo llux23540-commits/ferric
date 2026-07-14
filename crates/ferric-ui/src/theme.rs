@@ -118,7 +118,7 @@ impl Theme {
         v.faint_bg_color = self.code_bg;
         v.hyperlink_color = self.accent;
         v.selection.bg_fill = self.accent.gamma_multiply(0.35);
-        v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.selection.stroke = Stroke::new(1.0_f32, self.accent);
 
         // 去掉控件的自动描边（按钮/输入/下拉不再有硬边），靠底色区分。
         v.widgets.noninteractive.bg_stroke = Stroke::NONE;
@@ -130,7 +130,7 @@ impl Theme {
         v.widgets.hovered.bg_stroke = Stroke::NONE;
         v.widgets.active.bg_fill = self.accent_soft;
         v.widgets.active.weak_bg_fill = self.accent_soft;
-        v.widgets.active.bg_stroke = Stroke::new(1.5, self.accent); // 仅聚焦时显示主色环
+        v.widgets.active.bg_stroke = Stroke::new(1.5_f32, self.accent); // 仅聚焦时显示主色环
         v.widgets.open.bg_stroke = Stroke::NONE;
         v.widgets.open.bg_fill = self.code_bg;
 
@@ -148,7 +148,7 @@ impl Theme {
         }
         v.menu_rounding = Rounding::same(10.0);
         v.window_rounding = Rounding::same(12.0);
-        v.window_stroke = Stroke::new(1.0, self.border_2);
+        v.window_stroke = Stroke::new(1.0_f32, self.border_2);
         v.window_fill = self.bg;
         v.popup_shadow = egui::epaint::Shadow {
             offset: egui::vec2(0.0, 6.0),

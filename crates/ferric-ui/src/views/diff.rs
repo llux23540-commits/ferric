@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 struct DiffDraft {
     left: String,
     right: String,
+    #[serde(default)]
+    left_name: String,
+    #[serde(default)]
+    right_name: String,
 }
 
 pub struct DiffTool {
@@ -32,38 +36,43 @@ impl Default for DiffTool {
 
 impl DiffTool {
     /// 处理拖入的文件：按指针水平位置决定落到左 / 右侧。
-    fn handle_drops(&mut self, ui: &Ui) {
+    fn handle_drops(&mut self, ui: &Ui, shared: &mut crate::tool::Shared) {
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
         }
-        let center_x = ui.ctx().screen_rect().center().x;
+        // 以内容区（而非整个窗口）的中线分左右，避免侧栏偏移导致误判。
+        let center_x = ui.max_rect().center().x;
         let pointer_x = ui
             .ctx()
             .input(|i| i.pointer.hover_pos().map(|p| p.x))
             .unwrap_or(center_x);
         for file in dropped {
             if let Some(path) = &file.path {
-                if let Ok(text) = std::fs::read_to_string(path) {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    if pointer_x < center_x {
-                        self.left = text;
-                        self.left_name = name;
-                    } else {
-                        self.right = text;
-                        self.right_name = name;
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        if pointer_x < center_x {
+                            self.left = text;
+                            self.left_name = name;
+                        } else {
+                            self.right = text;
+                            self.right_name = name;
+                        }
                     }
+                    Err(e) => shared.toast(format!("读取文件失败：{e}")),
                 }
             }
         }
     }
 }
 
-fn pick_file() -> Option<(String, String)> {
-    let path = rfd::FileDialog::new()
+/// 选择并读取文件。`Ok(None)` 表示用户取消；读取失败返回 `Err(原因)`。
+fn pick_file() -> Result<Option<(String, String)>, String> {
+    let Some(path) = rfd::FileDialog::new()
         .add_filter(
             "文本",
             &[
@@ -71,10 +80,16 @@ fn pick_file() -> Option<(String, String)> {
                 "sql", "rs", "toml",
             ],
         )
-        .pick_file()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    Some((name, text))
+        .pick_file()
+    else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(Some((name, text)))
 }
 
 fn row_style(tag: Tag, theme: &Theme) -> (Color32, Color32, Color32, &'static str) {
@@ -93,6 +108,7 @@ impl DiffTool {
         name: &mut String,
         text: &mut String,
         id: &str,
+        shared: &mut crate::tool::Shared,
     ) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).size(12.5).color(theme.fg_soft));
@@ -103,9 +119,13 @@ impl DiffTool {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::subtle_button(ui, theme, Some(icons::FOLDER_OPEN), "载入文件").clicked() {
-                    if let Some((n, t)) = pick_file() {
-                        *text = t;
-                        *name = n;
+                    match pick_file() {
+                        Ok(Some((n, t))) => {
+                            *text = t;
+                            *name = n;
+                        }
+                        Ok(None) => {}
+                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
                     }
                 }
                 if !name.is_empty() {
@@ -132,7 +152,7 @@ impl crate::tool::Tool for DiffTool {
 
     fn ui(&mut self, ui: &mut Ui, shared: &mut crate::tool::Shared) {
         let theme = shared.theme;
-        self.handle_drops(ui);
+        self.handle_drops(ui, shared);
 
         ui.label(
             RichText::new("逐行比较两段内容 —— 每一侧都可以粘贴文本、载入文件，或直接把文件拖进输入框。")
@@ -143,8 +163,8 @@ impl crate::tool::Tool for DiffTool {
 
         // 双栏编辑器
         ui.columns(2, |cols| {
-            Self::column(&mut cols[0], &theme, "左侧 · 原始", &mut self.left_name, &mut self.left, "diff-l");
-            Self::column(&mut cols[1], &theme, "右侧 · 修改后", &mut self.right_name, &mut self.right, "diff-r");
+            Self::column(&mut cols[0], &theme, "左侧 · 原始", &mut self.left_name, &mut self.left, "diff-l", shared);
+            Self::column(&mut cols[1], &theme, "右侧 · 修改后", &mut self.right_name, &mut self.right, "diff-r", shared);
         });
 
         ui.add_space(14.0);
@@ -220,6 +240,8 @@ impl crate::tool::Tool for DiffTool {
         serde_json::to_string(&DiffDraft {
             left: self.left.clone(),
             right: self.right.clone(),
+            left_name: self.left_name.clone(),
+            right_name: self.right_name.clone(),
         })
         .ok()
     }
@@ -228,6 +250,8 @@ impl crate::tool::Tool for DiffTool {
         if let Ok(d) = serde_json::from_str::<DiffDraft>(data) {
             self.left = d.left;
             self.right = d.right;
+            self.left_name = d.left_name;
+            self.right_name = d.right_name;
         }
     }
 }
@@ -239,7 +263,7 @@ fn legend_swatch(ui: &mut Ui, theme: &Theme, color: Color32, label: &str) {
         rect,
         egui::Rounding::same(3.0),
         color,
-        Stroke::new(1.0, theme.border_2),
+        Stroke::new(1.0_f32, theme.border_2),
     );
     ui.add_space(8.0);
 }

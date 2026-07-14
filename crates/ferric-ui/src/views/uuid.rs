@@ -33,6 +33,8 @@ pub struct UuidTool {
     nohyphen: bool,
     as_json: bool,
     output: String,
+    ok: bool,
+    status: String,
     history: Vec<HistEntry>,
     counter: u32,
 }
@@ -49,6 +51,8 @@ impl Default for UuidTool {
             nohyphen: false,
             as_json: false,
             output: String::new(),
+            ok: true,
+            status: "就绪".to_owned(),
             history: Vec::new(),
             counter: 0,
         };
@@ -72,9 +76,25 @@ impl UuidTool {
     }
 
     fn regen(&mut self) {
-        self.output = idgen::generate_string(&self.opts());
+        // 生成失败（如无效自定义命名空间）时不覆盖输出、不记历史，只报状态。
+        match idgen::generate(&self.opts()) {
+            Ok(items) => {
+                self.output = if self.as_json {
+                    serde_json::to_string_pretty(&items).unwrap_or_default()
+                } else {
+                    items.join("\n")
+                };
+                self.ok = true;
+                self.status = format!("已生成 {} 条", items.len());
+            }
+            Err(e) => {
+                self.ok = false;
+                self.status = format!("生成失败：{e}");
+                return;
+            }
+        }
         self.counter = self.counter.wrapping_add(1);
-        // 记入历史（最近 3 次）
+        // 记入历史：history[0] 是当前这次，其后保留最近 3 次
         let label = format!("{} · {} 个 · #{}", self.kind.label(), self.count.clamp(1, 1000), self.counter);
         self.history.insert(
             0,
@@ -83,7 +103,7 @@ impl UuidTool {
                 body: self.output.clone(),
             },
         );
-        self.history.truncate(3);
+        self.history.truncate(4);
     }
 }
 
@@ -202,13 +222,10 @@ impl Tool for UuidTool {
                 let out = self.output.clone();
                 shared.copy(ui.ctx(), out);
             }
+            ui.add_space(6.0);
+            widgets::status_line(ui, &theme, self.ok, &self.status);
         });
         ui.add_space(8.0);
-        ui.label(
-            RichText::new(format!("{} 条结果", self.output.lines().count()))
-                .size(12.0)
-                .color(theme.muted),
-        );
         ui.add_space(4.0);
         widgets::code_area(ui, "uuid-out", &mut self.output, false, 10);
 

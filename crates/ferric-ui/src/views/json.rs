@@ -225,7 +225,7 @@ impl Tool for JsonTool {
                 // 分割线：状态条顶边（横贯整个内容区宽度）
                 let rect = ui.max_rect();
                 let full = egui::Rangef::new(rect.left() - 24.0, rect.right() + 24.0);
-                ui.painter().hline(full, rect.top(), Stroke::new(1.0, theme.border));
+                ui.painter().hline(full, rect.top(), Stroke::new(1.0_f32, theme.border));
                 // 整条 30px 高度内垂直居中，图标与文字内联（不嵌套 horizontal，避免对齐偏差）
                 ui.horizontal_centered(|ui| {
                     let (glyph, color) = if self.ok {
@@ -542,10 +542,12 @@ mod tests {
 
     #[test]
     fn draft_roundtrip() {
-        let mut a = JsonTool::default();
-        a.input = "{\"x\":1}".to_owned();
-        a.indent = Indent::Tab;
-        a.sort = true;
+        let a = JsonTool {
+            input: "{\"x\":1}".to_owned(),
+            indent: Indent::Tab,
+            sort: true,
+            ..Default::default()
+        };
         let s = a.save_draft().expect("save");
 
         let mut b = JsonTool::default();

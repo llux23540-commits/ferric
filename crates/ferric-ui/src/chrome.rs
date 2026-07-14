@@ -134,6 +134,6 @@ pub fn title_bar_content(ui: &mut Ui, theme: &Theme) {
     ui.painter().hline(
         rect.x_range(),
         rect.bottom(),
-        egui::Stroke::new(1.0, theme.border),
+        egui::Stroke::new(1.0_f32, theme.border),
     );
 }
