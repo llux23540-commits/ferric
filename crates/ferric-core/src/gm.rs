@@ -64,8 +64,10 @@ pub fn encrypt(algo: EncAlgo, text: &str, key: &str) -> Result<String, String> {
             guard(move || sm4::CryptSM4ECB::new(&k).encrypt_ecb_hex(text.as_bytes()))
         }
         EncAlgo::Sm2 => {
-            let pk = key.trim().trim_start_matches("04").to_string();
-            if !sm2::pubkey_valid(&format!("04{pk}")) && pk.len() != 128 {
+            // pubkey_valid / Encrypt::new 都同时接受 130（04 前缀）与 128 hex，
+            // 不要自行剥前缀——trim_start_matches 会把坐标本身的前导 04 一并剥掉。
+            let pk = key.trim().to_string();
+            if !sm2::pubkey_valid(&pk) {
                 return Err("SM2 公钥无效（应为 04 开头 130 hex）".into());
             }
             guard(move || sm2::Encrypt::new(&pk).encrypt_hex(text.as_bytes()))
@@ -120,5 +122,20 @@ mod tests {
         let ct = encrypt(EncAlgo::Sm2, "国密 SM2", &pk).unwrap();
         let pt = decrypt(DecAlgo::Sm2, &ct, &sk).unwrap();
         assert_eq!(pt, "国密 SM2");
+    }
+
+    /// 128 hex（无 04 前缀）的公钥形式同样可用。
+    #[test]
+    fn sm2_accepts_bare_128_pubkey() {
+        let (pk, sk) = gen_sm2_keypair();
+        let ct = encrypt(EncAlgo::Sm2, "bare", &pk[2..]).unwrap();
+        assert_eq!(decrypt(DecAlgo::Sm2, &ct, &sk).unwrap(), "bare");
+    }
+
+    /// 长度恰好 128 但内容非法的公钥必须被拒绝（曾有校验逃逸）。
+    #[test]
+    fn sm2_rejects_invalid_128_pubkey() {
+        let bad = format!("zz{}", "1".repeat(126));
+        assert!(encrypt(EncAlgo::Sm2, "x", &bad).is_err());
     }
 }
