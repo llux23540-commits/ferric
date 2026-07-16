@@ -637,6 +637,7 @@ fn content_metrics(avail: f32) -> (f32, f32) {
 fn group_icon(group: &str) -> char {
     match group {
         "JSON" => icons::CODE,
+        "对比" => icons::GIT_COMPARE,
         "转换" => icons::CLOCK,
         "SQL" => icons::DATABASE,
         "生成" => icons::CREDIT_CARD,

@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }
+similar = { workspace = true }
 serde_yaml = { workspace = true }
 sqlformat = { workspace = true }
 fancy-regex = { workspace = true }

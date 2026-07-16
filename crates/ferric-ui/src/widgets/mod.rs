@@ -323,6 +323,176 @@ pub fn code_area(
     out.inner
 }
 
+/// code_bg 卡片面板：标题头（左标题 + 右侧自定义内容）+ 任意主体内容，
+/// SQL 格式化 / JSON→YAML / 对比等页面的统一版式。
+pub fn panel(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    trailing: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui),
+) {
+    Frame::none()
+        .fill(theme.code_bg)
+        .rounding(Rounding::same(12.0))
+        .show(ui, |ui| {
+            Frame::none()
+                .inner_margin(Margin::symmetric(14.0, 8.0))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(title)
+                                .size(11.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme.faint),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
+                    });
+                });
+            Frame::none().inner_margin(Margin::same(4.0)).show(ui, body);
+        });
+}
+
+/// 差异行样式：`segs` 拼起来应等于该行文本；不一致（如输入后的一帧延迟）时该行退回无样式。
+#[derive(Clone)]
+pub struct DiffLineStyle {
+    /// 整行底色（TRANSPARENT = 无）。
+    pub bg: Color32,
+    /// emph 片段的字符级标记背景。
+    pub mark: Color32,
+    pub segs: Vec<ferric_core::diff::Seg>,
+}
+
+impl DiffLineStyle {
+    fn matches(&self, line: &str) -> bool {
+        let mut rest = line;
+        for s in &self.segs {
+            match rest.strip_prefix(s.text.as_str()) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        }
+        rest.is_empty()
+    }
+}
+
+/// 等宽多行编辑框（外观同 [`code_area`]），按 `line_styles` 就地渲染 diff 高亮：
+/// 改动行整行底色横向铺满（折行的续行同底色），emph 片段画字符级标记。
+pub fn code_area_diff(
+    ui: &mut Ui,
+    theme: &Theme,
+    id: &str,
+    text: &mut String,
+    rows: usize,
+    line_styles: &[DiffLineStyle],
+) -> Response {
+    let fill = ui.visuals().extreme_bg_color;
+    let border = ui.visuals().window_stroke; // border_2，很浅
+    let accent = ui.visuals().hyperlink_color; // = accent
+    let fg = theme.fg;
+    let out = Frame::none()
+        .fill(fill)
+        .stroke(border)
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(16.0, 12.0))
+        .show(ui, |ui| {
+            // 行底色占位：先占一个绘制槽，TextEdit 画完后回填，保证底色在文字下方。
+            let bg_idx = ui.painter().add(egui::Shape::Noop);
+
+            let mut layouter = |ui: &Ui, buf: &str, wrap_width: f32| {
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                let plain = egui::TextFormat {
+                    font_id: font_id.clone(),
+                    color: fg,
+                    ..Default::default()
+                };
+                let mut job = egui::text::LayoutJob::default();
+                job.wrap.max_width = wrap_width;
+                let lines: Vec<&str> = buf.split('\n').collect();
+                for (i, line) in lines.iter().enumerate() {
+                    match line_styles.get(i).filter(|s| s.matches(line)) {
+                        Some(style) => {
+                            for seg in &style.segs {
+                                let mut fmt = plain.clone();
+                                if seg.emph {
+                                    fmt.background = style.mark;
+                                }
+                                job.append(&seg.text, 0.0, fmt);
+                            }
+                        }
+                        None => job.append(line, 0.0, plain.clone()),
+                    }
+                    if i + 1 < lines.len() {
+                        job.append("\n", 0.0, plain.clone());
+                    }
+                }
+                ui.fonts(|f| f.layout_job(job))
+            };
+
+            let edit = TextEdit::multiline(text)
+                .id_salt(id)
+                .desired_width(f32::INFINITY)
+                .desired_rows(rows)
+                .code_editor()
+                .frame(false)
+                .layouter(&mut layouter)
+                .show(ui);
+
+            // 回填整行底色：按 galley 视觉行映射逻辑行（同 code_area_seamless 的行号逻辑）。
+            let inner = ui.max_rect();
+            let cur_lines: Vec<&str> = text.split('\n').collect();
+            let mut shapes = Vec::new();
+            let mut logical = 0usize;
+            for grow in edit.galley.rows.iter() {
+                let styled = line_styles
+                    .get(logical)
+                    .filter(|s| s.bg != Color32::TRANSPARENT)
+                    .filter(|s| {
+                        cur_lines
+                            .get(logical)
+                            .copied()
+                            .is_some_and(|l| s.matches(l))
+                    });
+                if let Some(style) = styled {
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(inner.left(), edit.galley_pos.y + grow.rect.min.y),
+                        egui::pos2(inner.right(), edit.galley_pos.y + grow.rect.max.y),
+                    );
+                    shapes.push(egui::Shape::rect_filled(
+                        rect.expand2(vec2(6.0, 0.0)),
+                        Rounding::same(3.0),
+                        style.bg,
+                    ));
+                }
+                if grow.ends_with_newline {
+                    logical += 1;
+                }
+            }
+            ui.painter().set(bg_idx, egui::Shape::Vec(shapes));
+            edit.response
+        });
+    // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
+    if out.inner.gained_focus() {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
+            let end = egui::text::CCursor::new(text.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), out.inner.id);
+        }
+    }
+    // 聚焦时显示主色环
+    if out.inner.has_focus() {
+        ui.painter().rect_stroke(
+            out.response.rect,
+            Rounding::same(10.0),
+            Stroke::new(1.5_f32, accent),
+        );
+    }
+    out.inner
+}
+
 /// 无边框贴底编辑区：透明背景直接融入主题背景（亮/暗自动跟随），
 /// 文字用主题前景色（清晰可读），不画卡片框与聚焦环，铺满给定高度，超长时内部滚动。
 /// 左侧带行号栏：按 galley 实际布局逐「逻辑行」编号，折行的续行不编号。
