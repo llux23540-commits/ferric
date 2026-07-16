@@ -68,8 +68,14 @@ struct Rabbit {
 }
 
 const RABBIT_A: [u32; 8] = [
-    0x4D34_D34D, 0xD34D_34D3, 0x34D3_4D34, 0x4D34_D34D,
-    0xD34D_34D3, 0x34D3_4D34, 0x4D34_D34D, 0xD34D_34D3,
+    0x4D34_D34D,
+    0xD34D_34D3,
+    0x34D3_4D34,
+    0x4D34_D34D,
+    0xD34D_34D3,
+    0x34D3_4D34,
+    0x4D34_D34D,
+    0xD34D_34D3,
 ];
 
 impl Rabbit {
@@ -133,13 +139,21 @@ impl Rabbit {
             *g = (sq ^ (sq >> 32)) as u32;
         }
         let x = &mut self.x;
-        x[0] = g[0].wrapping_add(g[7].rotate_left(16)).wrapping_add(g[6].rotate_left(16));
+        x[0] = g[0]
+            .wrapping_add(g[7].rotate_left(16))
+            .wrapping_add(g[6].rotate_left(16));
         x[1] = g[1].wrapping_add(g[0].rotate_left(8)).wrapping_add(g[7]);
-        x[2] = g[2].wrapping_add(g[1].rotate_left(16)).wrapping_add(g[0].rotate_left(16));
+        x[2] = g[2]
+            .wrapping_add(g[1].rotate_left(16))
+            .wrapping_add(g[0].rotate_left(16));
         x[3] = g[3].wrapping_add(g[2].rotate_left(8)).wrapping_add(g[1]);
-        x[4] = g[4].wrapping_add(g[3].rotate_left(16)).wrapping_add(g[2].rotate_left(16));
+        x[4] = g[4]
+            .wrapping_add(g[3].rotate_left(16))
+            .wrapping_add(g[2].rotate_left(16));
         x[5] = g[5].wrapping_add(g[4].rotate_left(8)).wrapping_add(g[3]);
-        x[6] = g[6].wrapping_add(g[5].rotate_left(16)).wrapping_add(g[4].rotate_left(16));
+        x[6] = g[6]
+            .wrapping_add(g[5].rotate_left(16))
+            .wrapping_add(g[4].rotate_left(16));
         x[7] = g[7].wrapping_add(g[6].rotate_left(8)).wrapping_add(g[5]);
     }
 
@@ -188,9 +202,7 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut s: Vec<u8> = (0..=255).collect();
     let mut j: u8 = 0;
     for i in 0..256 {
-        j = j
-            .wrapping_add(s[i])
-            .wrapping_add(key[i % key.len().max(1)]);
+        j = j.wrapping_add(s[i]).wrapping_add(key[i % key.len().max(1)]);
         s.swap(i, j as usize);
     }
     let mut out = Vec::with_capacity(data.len());

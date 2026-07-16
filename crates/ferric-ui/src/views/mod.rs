@@ -1,7 +1,6 @@
 //! 工具视图集合与注册表。
 
 mod crypto;
-mod diff;
 mod gm;
 mod json;
 mod regex;
@@ -17,7 +16,6 @@ use crate::tool::Tool;
 pub fn registry() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(json::JsonTool::default()),
-        Box::new(diff::DiffTool::default()),
         Box::new(timestamp::TimestampTool::default()),
         Box::new(yaml::YamlTool::default()),
         Box::new(sql::SqlTool::default()),

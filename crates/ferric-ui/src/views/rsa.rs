@@ -105,7 +105,9 @@ impl Tool for RsaTool {
             ui.add_space(10.0);
             let enabled = !self.busy;
             ui.add_enabled_ui(enabled, |ui| {
-                if widgets::subtle_button(ui, &theme, Some(icons::REFRESH_CW), "刷新密钥对").clicked() {
+                if widgets::subtle_button(ui, &theme, Some(icons::REFRESH_CW), "刷新密钥对")
+                    .clicked()
+                {
                     self.regen();
                 }
             });

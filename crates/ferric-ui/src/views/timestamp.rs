@@ -85,16 +85,27 @@ impl Tool for TimestampTool {
                         .color(theme.fg),
                 );
                 ui.add_space(10.0);
-                if widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked() {
+                if widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                {
                     shared.copy(ui.ctx(), now.to_string());
                 }
             });
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                if widgets::pill_toggle(ui, &theme, self.precision == Precision::Seconds, "10 位（秒级）") {
+                if widgets::pill_toggle(
+                    ui,
+                    &theme,
+                    self.precision == Precision::Seconds,
+                    "10 位（秒级）",
+                ) {
                     self.precision = Precision::Seconds;
                 }
-                if widgets::pill_toggle(ui, &theme, self.precision == Precision::Millis, "13 位（毫秒级）") {
+                if widgets::pill_toggle(
+                    ui,
+                    &theme,
+                    self.precision == Precision::Millis,
+                    "13 位（毫秒级）",
+                ) {
                     self.precision = Precision::Millis;
                 }
                 ui.add_space(14.0);
@@ -111,14 +122,15 @@ impl Tool for TimestampTool {
                         );
                         let f = self.tz_filter.to_lowercase();
                         // 全量列出（约 590 个），超长部分靠下拉内滚动，不截断。
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for z in chrono_tz::TZ_VARIANTS
-                                .iter()
-                                .filter(|z| f.is_empty() || z.name().to_lowercase().contains(&f))
-                            {
-                                ui.selectable_value(&mut self.tz, *z, z.name());
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for z in chrono_tz::TZ_VARIANTS.iter().filter(|z| {
+                                    f.is_empty() || z.name().to_lowercase().contains(&f)
+                                }) {
+                                    ui.selectable_value(&mut self.tz, *z, z.name());
+                                }
+                            });
                     });
             });
             ui.add_space(6.0);
@@ -153,7 +165,8 @@ impl Tool for TimestampTool {
                     widgets::field_label(ui, &theme, "转换后的时间");
                     if !self.ts_output.is_empty()
                         && !self.ts_output.starts_with("错误")
-                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
+                            .clicked()
                     {
                         shared.copy(ui.ctx(), self.ts_output.clone());
                     }
@@ -185,7 +198,8 @@ impl Tool for TimestampTool {
                     widgets::field_label(ui, &theme, "转换后的时间戳");
                     if !self.date_output.is_empty()
                         && !self.date_output.starts_with("错误")
-                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
+                            .clicked()
                     {
                         shared.copy(ui.ctx(), self.date_output.clone());
                     }

@@ -27,7 +27,11 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, toasts: Vec::new(), content_height: 0.0 }
+        Self {
+            theme,
+            toasts: Vec::new(),
+            content_height: 0.0,
+        }
     }
 
     /// 弹一条提示。
@@ -51,7 +55,10 @@ pub struct Toast {
 
 impl Toast {
     fn new(msg: String) -> Self {
-        Self { msg, frames_left: 120 }
+        Self {
+            msg,
+            frames_left: 120,
+        }
     }
 }
 

@@ -13,7 +13,12 @@ pub enum IdKind {
 }
 
 impl IdKind {
-    pub const ALL: [IdKind; 4] = [IdKind::UuidV4, IdKind::UuidV7, IdKind::UuidV5, IdKind::UuidV6];
+    pub const ALL: [IdKind; 4] = [
+        IdKind::UuidV4,
+        IdKind::UuidV7,
+        IdKind::UuidV5,
+        IdKind::UuidV6,
+    ];
 
     /// 段控标签。
     pub fn label(self) -> &'static str {

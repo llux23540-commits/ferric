@@ -25,7 +25,7 @@ pub const LUCIDE_FAMILY: &str = "lucide";
 /// 各平台常见的中文字体候选路径（按优先级）。
 #[cfg(target_os = "windows")]
 const CANDIDATES: &[&str] = &[
-    r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑
+    r"C:\Windows\Fonts\msyh.ttc", // 微软雅黑
     r"C:\Windows\Fonts\msyh.ttf",
     r"C:\Windows\Fonts\simhei.ttf", // 黑体
     r"C:\Windows\Fonts\simsun.ttc", // 宋体
@@ -92,9 +92,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     named(&mut fonts, UI_SEMIBOLD, "pjs-semi", has_cjk);
     named(&mut fonts, UI_BOLD, "pjs-bold", has_cjk);
     named(&mut fonts, MONO_MEDIUM, "jbm-med", has_cjk);
-    fonts
-        .families
-        .insert(FontFamily::Name(LUCIDE_FAMILY.into()), vec!["lucide".into()]);
+    fonts.families.insert(
+        FontFamily::Name(LUCIDE_FAMILY.into()),
+        vec!["lucide".into()],
+    );
 
     ctx.set_fonts(fonts);
 }
@@ -116,9 +117,7 @@ fn named(fonts: &mut FontDefinitions, name: &str, primary: &str, has_cjk: bool) 
     if has_cjk {
         v.push("cjk".to_string());
     }
-    fonts
-        .families
-        .insert(FontFamily::Name(name.into()), v);
+    fonts.families.insert(FontFamily::Name(name.into()), v);
 }
 
 fn load_first_cjk() -> Option<Vec<u8>> {

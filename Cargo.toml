@@ -26,7 +26,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "v5", "v6", "v7"] }
-similar = { version = "2", features = ["inline"] }
 rfd = "0.14"
 serde_yaml = "0.9"
 sqlformat = "0.2"

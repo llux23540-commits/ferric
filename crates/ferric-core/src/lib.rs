@@ -4,7 +4,6 @@
 //! 调用这些函数并渲染结果。
 
 pub mod crypto;
-pub mod diff;
 pub mod gm;
 pub mod idgen;
 pub mod json;

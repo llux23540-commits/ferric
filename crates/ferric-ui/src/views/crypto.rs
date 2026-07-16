@@ -75,7 +75,12 @@ impl Tool for CryptoTool {
 
         // 加密卡片
         widgets::card(ui, &theme, |ui| {
-            ui.label(egui::RichText::new("加密").size(15.0).strong().color(theme.fg));
+            ui.label(
+                egui::RichText::new("加密")
+                    .size(15.0)
+                    .strong()
+                    .color(theme.fg),
+            );
             ui.add_space(8.0);
             ui.columns(2, |cols| {
                 widgets::field_label(&mut cols[0], &theme, "您的文本");
@@ -84,7 +89,11 @@ impl Tool for CryptoTool {
 
                 widgets::field_label(&mut cols[1], &theme, "您的密钥");
                 cols[1].add_space(4.0);
-                cols[1].add(TextEdit::singleline(&mut self.enc_key).desired_width(f32::INFINITY).hint_text("密钥"));
+                cols[1].add(
+                    TextEdit::singleline(&mut self.enc_key)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("密钥"),
+                );
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "加密算法");
                 cols[1].add_space(4.0);
@@ -121,7 +130,12 @@ impl Tool for CryptoTool {
 
         // 解密卡片
         widgets::card(ui, &theme, |ui| {
-            ui.label(egui::RichText::new("解密").size(15.0).strong().color(theme.fg));
+            ui.label(
+                egui::RichText::new("解密")
+                    .size(15.0)
+                    .strong()
+                    .color(theme.fg),
+            );
             ui.add_space(8.0);
             ui.columns(2, |cols| {
                 widgets::field_label(&mut cols[0], &theme, "您的加密文本");
@@ -130,7 +144,11 @@ impl Tool for CryptoTool {
 
                 widgets::field_label(&mut cols[1], &theme, "您的密钥");
                 cols[1].add_space(4.0);
-                cols[1].add(TextEdit::singleline(&mut self.dec_key).desired_width(f32::INFINITY).hint_text("密钥"));
+                cols[1].add(
+                    TextEdit::singleline(&mut self.dec_key)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("密钥"),
+                );
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "加密算法");
                 cols[1].add_space(4.0);

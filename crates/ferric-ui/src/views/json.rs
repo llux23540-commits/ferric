@@ -107,83 +107,126 @@ impl JsonTool {
 
     fn toolbar_row(&mut self, ui: &mut Ui, theme: &crate::theme::Theme, shared: &mut Shared) {
         ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
-                    let (indent, sort) = (self.indent, self.sort);
-                    if widgets::tb_icon_btn(ui, theme, icons::ALIGN_LEFT, false, false, "格式化 / 美化").clicked() {
-                        self.run_op(|s| json::format(s, indent, sort), "已格式化 · JSON 有效");
+            ui.spacing_mut().item_spacing = egui::vec2(3.0, 2.0);
+            let (indent, sort) = (self.indent, self.sort);
+            if widgets::tb_icon_btn(ui, theme, icons::ALIGN_LEFT, false, false, "格式化 / 美化")
+                .clicked()
+            {
+                self.run_op(|s| json::format(s, indent, sort), "已格式化 · JSON 有效");
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::WRAP_TEXT, false, false, "压缩为单行")
+                .clicked()
+            {
+                self.run_op(json::minify, "已压缩为单行");
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::CIRCLE_CHECK, false, false, "校验语法")
+                .clicked()
+            {
+                match json::validate(&self.input) {
+                    Ok(_) => {
+                        self.ok = true;
+                        self.status = "JSON 有效".to_owned();
                     }
-                    if widgets::tb_icon_btn(ui, theme, icons::WRAP_TEXT, false, false, "压缩为单行").clicked() {
-                        self.run_op(json::minify, "已压缩为单行");
+                    Err(e) => {
+                        self.ok = false;
+                        self.status = format!("解析失败：{e}");
                     }
-                    if widgets::tb_icon_btn(ui, theme, icons::CIRCLE_CHECK, false, false, "校验语法").clicked() {
-                        match json::validate(&self.input) {
-                            Ok(_) => {
-                                self.ok = true;
-                                self.status = "JSON 有效".to_owned();
-                            }
-                            Err(e) => {
-                                self.ok = false;
-                                self.status = format!("解析失败：{e}");
-                            }
-                        }
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::QUOTE, false, false, "转义为 JSON 字符串").clicked() {
-                        let out = json::escape(&self.input);
-                        self.replace(out, "已转义为 JSON 字符串");
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::CODE, false, false, "去除转义").clicked() {
-                        self.run_op(json::unescape, "已去除转义");
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::ERASER, false, false, "去除全部空白").clicked() {
-                        self.run_op(json::minify, "已去除全部空白");
-                    }
-                    widgets::tb_sep(ui, theme);
-                    if widgets::tb_icon_btn(ui, theme, icons::UNDO_2, false, false, "撤销").clicked() {
-                        self.undo();
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::REDO_2, false, false, "重做").clicked() {
-                        self.redo();
-                    }
-                    widgets::tb_sep(ui, theme);
-                    // 缩进：2 / 4 / Tab（图标式按钮，取代药丸段控）
-                    let (is2, is4, is_tab) = match self.indent {
-                        Indent::Two => (true, false, false),
-                        Indent::Four => (false, true, false),
-                        Indent::Tab => (false, false, true),
-                    };
-                    if widgets::tb_text_btn(ui, theme, "2", is2, "缩进 2 空格（立即重排）").clicked() {
-                        self.set_indent(Indent::Two);
-                    }
-                    if widgets::tb_text_btn(ui, theme, "4", is4, "缩进 4 空格（立即重排）").clicked() {
-                        self.set_indent(Indent::Four);
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::INDENT_INCREASE, is_tab, false, "Tab 缩进（立即重排）").clicked() {
-                        self.set_indent(Indent::Tab);
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::ARROW_UP_A_Z, self.sort, false, "键名排序 A→Z").clicked() {
-                        self.sort = !self.sort;
-                    }
-                    widgets::tb_sep(ui, theme);
-                    if widgets::tb_icon_btn(ui, theme, icons::LIST_TREE, self.tree, false, "折叠视图（点箭头收起/展开）").clicked() {
-                        self.tree = !self.tree;
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
-                        let out = self.input.clone();
-                        shared.copy(ui.ctx(), out);
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::FILE_DOWN, false, false, "下载 .json").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("data.json")
-                            .add_filter("JSON", &["json"])
-                            .save_file()
-                        {
-                            let _ = std::fs::write(path, &self.input);
-                            shared.toast("已保存");
-                        }
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::TRASH_2, false, false, "清空输入").clicked() {
-                        self.replace(String::new(), "已清空");
-                    }
+                }
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::QUOTE, false, false, "转义为 JSON 字符串")
+                .clicked()
+            {
+                let out = json::escape(&self.input);
+                self.replace(out, "已转义为 JSON 字符串");
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::CODE, false, false, "去除转义").clicked()
+            {
+                self.run_op(json::unescape, "已去除转义");
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::ERASER, false, false, "去除全部空白")
+                .clicked()
+            {
+                self.run_op(json::minify, "已去除全部空白");
+            }
+            widgets::tb_sep(ui, theme);
+            if widgets::tb_icon_btn(ui, theme, icons::UNDO_2, false, false, "撤销").clicked() {
+                self.undo();
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::REDO_2, false, false, "重做").clicked() {
+                self.redo();
+            }
+            widgets::tb_sep(ui, theme);
+            // 缩进：2 / 4 / Tab（图标式按钮，取代药丸段控）
+            let (is2, is4, is_tab) = match self.indent {
+                Indent::Two => (true, false, false),
+                Indent::Four => (false, true, false),
+                Indent::Tab => (false, false, true),
+            };
+            if widgets::tb_text_btn(ui, theme, "2", is2, "缩进 2 空格（立即重排）").clicked()
+            {
+                self.set_indent(Indent::Two);
+            }
+            if widgets::tb_text_btn(ui, theme, "4", is4, "缩进 4 空格（立即重排）").clicked()
+            {
+                self.set_indent(Indent::Four);
+            }
+            if widgets::tb_icon_btn(
+                ui,
+                theme,
+                icons::INDENT_INCREASE,
+                is_tab,
+                false,
+                "Tab 缩进（立即重排）",
+            )
+            .clicked()
+            {
+                self.set_indent(Indent::Tab);
+            }
+            if widgets::tb_icon_btn(
+                ui,
+                theme,
+                icons::ARROW_UP_A_Z,
+                self.sort,
+                false,
+                "键名排序 A→Z",
+            )
+            .clicked()
+            {
+                self.sort = !self.sort;
+            }
+            widgets::tb_sep(ui, theme);
+            if widgets::tb_icon_btn(
+                ui,
+                theme,
+                icons::LIST_TREE,
+                self.tree,
+                false,
+                "折叠视图（点箭头收起/展开）",
+            )
+            .clicked()
+            {
+                self.tree = !self.tree;
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
+                let out = self.input.clone();
+                shared.copy(ui.ctx(), out);
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::FILE_DOWN, false, false, "下载 .json")
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("data.json")
+                    .add_filter("JSON", &["json"])
+                    .save_file()
+                {
+                    let _ = std::fs::write(path, &self.input);
+                    shared.toast("已保存");
+                }
+            }
+            if widgets::tb_icon_btn(ui, theme, icons::TRASH_2, false, false, "清空输入").clicked()
+            {
+                self.replace(String::new(), "已清空");
+            }
         });
     }
 }
@@ -225,7 +268,8 @@ impl Tool for JsonTool {
                 // 分割线：状态条顶边（横贯整个内容区宽度）
                 let rect = ui.max_rect();
                 let full = egui::Rangef::new(rect.left() - 24.0, rect.right() + 24.0);
-                ui.painter().hline(full, rect.top(), Stroke::new(1.0_f32, theme.border));
+                ui.painter()
+                    .hline(full, rect.top(), Stroke::new(1.0_f32, theme.border));
                 // 整条 30px 高度内垂直居中，图标与文字内联（不嵌套 horizontal，避免对齐偏差）
                 ui.horizontal_centered(|ui| {
                     let (glyph, color) = if self.ok {
@@ -384,14 +428,32 @@ fn build_rows(
         Value::Object(map) if !map.is_empty() => {
             if collapsed.contains(&path) {
                 segs.push((format!("{{ … }}{trailing}"), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(true), path, segs });
+                out.push(FoldRow {
+                    indent,
+                    fold: Some(true),
+                    path,
+                    segs,
+                });
             } else {
                 segs.push(("{".to_owned(), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(false), path: path.clone(), segs });
+                out.push(FoldRow {
+                    indent,
+                    fold: Some(false),
+                    path: path.clone(),
+                    segs,
+                });
                 let n = map.len();
                 for (i, (k, v)) in map.iter().enumerate() {
                     let tc = if i + 1 < n { "," } else { "" };
-                    build_rows(v, Some(k), format!("{path}/{k}"), indent + 1, tc, collapsed, out);
+                    build_rows(
+                        v,
+                        Some(k),
+                        format!("{path}/{k}"),
+                        indent + 1,
+                        tc,
+                        collapsed,
+                        out,
+                    );
                 }
                 out.push(FoldRow {
                     indent,
@@ -404,14 +466,32 @@ fn build_rows(
         Value::Array(arr) if !arr.is_empty() => {
             if collapsed.contains(&path) {
                 segs.push((format!("[ … ]{trailing}"), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(true), path, segs });
+                out.push(FoldRow {
+                    indent,
+                    fold: Some(true),
+                    path,
+                    segs,
+                });
             } else {
                 segs.push(("[".to_owned(), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(false), path: path.clone(), segs });
+                out.push(FoldRow {
+                    indent,
+                    fold: Some(false),
+                    path: path.clone(),
+                    segs,
+                });
                 let n = arr.len();
                 for (i, v) in arr.iter().enumerate() {
                     let tc = if i + 1 < n { "," } else { "" };
-                    build_rows(v, None, format!("{path}/{i}"), indent + 1, tc, collapsed, out);
+                    build_rows(
+                        v,
+                        None,
+                        format!("{path}/{i}"),
+                        indent + 1,
+                        tc,
+                        collapsed,
+                        out,
+                    );
                 }
                 out.push(FoldRow {
                     indent,
@@ -423,27 +503,57 @@ fn build_rows(
         }
         Value::Object(_) => {
             segs.push((format!("{{}}{trailing}"), Col::Punct));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
         Value::Array(_) => {
             segs.push((format!("[]{trailing}"), Col::Punct));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
         Value::String(s) => {
             segs.push((format!("\"{s}\"{trailing}"), Col::Str));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
         Value::Number(n) => {
             segs.push((format!("{n}{trailing}"), Col::Num));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
         Value::Bool(b) => {
             segs.push((format!("{b}{trailing}"), Col::Bool));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
         Value::Null => {
             segs.push((format!("null{trailing}"), Col::Null));
-            out.push(FoldRow { indent, fold: None, path, segs });
+            out.push(FoldRow {
+                indent,
+                fold: None,
+                path,
+                segs,
+            });
         }
     }
 }
@@ -500,7 +610,11 @@ fn fold_view(
                                 } else {
                                     icons::CHEVRON_DOWN
                                 };
-                                let acol = if aresp.hovered() { theme.fg } else { theme.muted };
+                                let acol = if aresp.hovered() {
+                                    theme.fg
+                                } else {
+                                    theme.muted
+                                };
                                 ui.painter().text(
                                     arect.center(),
                                     Align2::CENTER_CENTER,
@@ -518,7 +632,9 @@ fn fold_view(
                             for (t, c) in &row.segs {
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(t).font(font.clone()).color(seg_color(*c, theme)),
+                                        RichText::new(t)
+                                            .font(font.clone())
+                                            .color(seg_color(*c, theme)),
                                     )
                                     .wrap_mode(TextWrapMode::Extend)
                                     .selectable(true),

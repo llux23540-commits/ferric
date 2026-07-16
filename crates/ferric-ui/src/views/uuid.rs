@@ -95,7 +95,12 @@ impl UuidTool {
         }
         self.counter = self.counter.wrapping_add(1);
         // 记入历史：history[0] 是当前这次，其后保留最近 3 次
-        let label = format!("{} · {} 个 · #{}", self.kind.label(), self.count.clamp(1, 1000), self.counter);
+        let label = format!(
+            "{} · {} 个 · #{}",
+            self.kind.label(),
+            self.count.clamp(1, 1000),
+            self.counter
+        );
         self.history.insert(
             0,
             HistEntry {
@@ -126,7 +131,10 @@ impl Tool for UuidTool {
         widgets::field_label(ui, &theme, "版本");
         ui.add_space(4.0);
         let labels: Vec<&str> = IdKind::ALL.iter().map(|k| k.label()).collect();
-        let cur = IdKind::ALL.iter().position(|k| *k == self.kind).unwrap_or(0);
+        let cur = IdKind::ALL
+            .iter()
+            .position(|k| *k == self.kind)
+            .unwrap_or(0);
         ui.horizontal(|ui| {
             if let Some(n) = widgets::seg(ui, &theme, &labels, cur) {
                 self.kind = IdKind::ALL[n];
@@ -249,16 +257,28 @@ impl Tool for UuidTool {
             for (label, body) in hist {
                 widgets::card(ui, &theme, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&label).size(11.5).color(theme.muted).monospace());
+                        ui.label(
+                            RichText::new(&label)
+                                .size(11.5)
+                                .color(theme.muted)
+                                .monospace(),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
+                            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制")
+                                .clicked()
+                            {
                                 shared.copy(ui.ctx(), body.clone());
                             }
                         });
                     });
                     ui.add_space(4.0);
                     let preview: String = body.lines().take(3).collect::<Vec<_>>().join("\n");
-                    ui.label(RichText::new(preview).size(12.0).monospace().color(theme.fg_soft));
+                    ui.label(
+                        RichText::new(preview)
+                            .size(12.0)
+                            .monospace()
+                            .color(theme.fg_soft),
+                    );
                 });
                 ui.add_space(8.0);
             }

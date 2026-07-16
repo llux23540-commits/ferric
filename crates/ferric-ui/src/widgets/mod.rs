@@ -50,7 +50,11 @@ fn btn(ui: &mut Ui, theme: &Theme, icon: Option<char>, text: &str, v: Variant) -
         Variant::Subtle => (Color32::TRANSPARENT, Stroke::NONE, theme.muted),
     };
     let desired = vec2(0.0, 38.0);
-    let padding = if matches!(v, Variant::Subtle) { 12.0 } else { 16.0 };
+    let padding = if matches!(v, Variant::Subtle) {
+        12.0
+    } else {
+        16.0
+    };
 
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = vec2(padding, 8.0);
@@ -100,7 +104,11 @@ pub fn icon_btn(ui: &mut Ui, theme: &Theme, ch: char, size: f32) -> Response {
         ui.painter()
             .rect_filled(rect, Rounding::same(9.0), theme.border);
     }
-    let color = if resp.hovered() { theme.fg } else { theme.muted };
+    let color = if resp.hovered() {
+        theme.fg
+    } else {
+        theme.muted
+    };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -125,7 +133,11 @@ pub fn seg(ui: &mut Ui, theme: &Theme, opts: &[&str], selected: usize) -> Option
             ui.horizontal(|ui| {
                 for (i, o) in opts.iter().enumerate() {
                     let on = i == selected;
-                    let fill = if on { theme.accent_soft } else { Color32::TRANSPARENT };
+                    let fill = if on {
+                        theme.accent_soft
+                    } else {
+                        Color32::TRANSPARENT
+                    };
                     let col = if on { theme.accent_strong } else { theme.muted };
                     ui.spacing_mut().button_padding = vec2(14.0, 6.0);
                     let r = ui.add(
@@ -233,7 +245,11 @@ fn icon_flat(ui: &mut Ui, theme: &Theme, ch: char, w: f32) -> Response {
     if resp.hovered() {
         ui.painter().rect_filled(rect, Rounding::ZERO, theme.border);
     }
-    let color = if resp.hovered() { theme.fg } else { theme.muted };
+    let color = if resp.hovered() {
+        theme.fg
+    } else {
+        theme.muted
+    };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -288,9 +304,7 @@ pub fn code_area(
         });
     // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
     if out.inner.gained_focus() {
-        if let Some(mut state) =
-            egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id)
-        {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
             let end = egui::text::CCursor::new(text.chars().count());
             state
                 .cursor
@@ -377,8 +391,7 @@ pub fn code_area_seamless(
     // 超出距离越大滚得越快（约每秒 10 倍超出距离），选区随内容滚动持续扩展。
     // 注意不能用 resp.dragged()：指针一离开编辑区它就变 false（egui 行为），
     // 改用「编辑器有焦点 + 左键按住」判定拖选中。
-    let selecting =
-        ui.input(|i| i.pointer.primary_down()) && (resp.dragged() || resp.has_focus());
+    let selecting = ui.input(|i| i.pointer.primary_down()) && (resp.dragged() || resp.has_focus());
     if selecting {
         if let Some(pos) = ui.ctx().pointer_latest_pos() {
             let view = out.inner_rect;
@@ -436,8 +449,10 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
             code_area(ui, id, &mut owned, false, min_rows);
             // 右上角复制
             let r = ui.max_rect();
-            let btn_rect =
-                egui::Rect::from_min_size(egui::pos2(r.right() - 30.0, r.top() - 2.0), vec2(34.0, 34.0));
+            let btn_rect = egui::Rect::from_min_size(
+                egui::pos2(r.right() - 30.0, r.top() - 2.0),
+                vec2(34.0, 34.0),
+            );
             if ui
                 .put(
                     btn_rect,
@@ -478,7 +493,14 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, add: impl FnOnce(&mut Ui) -> R) -> R 
 }
 
 /// 工具条图标按钮（32×32，可选 active/primary，带 tooltip）。
-pub fn tb_icon_btn(ui: &mut Ui, theme: &Theme, ch: char, active: bool, primary: bool, tip: &str) -> Response {
+pub fn tb_icon_btn(
+    ui: &mut Ui,
+    theme: &Theme,
+    ch: char,
+    active: bool,
+    primary: bool,
+    tip: &str,
+) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let hovered = resp.hovered();
     let fill = if active {

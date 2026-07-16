@@ -71,7 +71,12 @@ impl Tool for GmTool {
 
         // 卡1：SM2 密钥对
         widgets::card(ui, &theme, |ui| {
-            ui.label(RichText::new("SM2 密钥对").size(15.0).strong().color(theme.fg));
+            ui.label(
+                RichText::new("SM2 密钥对")
+                    .size(15.0)
+                    .strong()
+                    .color(theme.fg),
+            );
             ui.add_space(8.0);
             ui.columns(2, |cols| {
                 widgets::field_label(&mut cols[0], &theme, "公钥（加密用 · 04 开头 130 hex）");
@@ -83,7 +88,9 @@ impl Tool for GmTool {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if widgets::subtle_button(ui, &theme, Some(icons::REFRESH_CW), "生成 SM2 密钥对").clicked() {
+                if widgets::subtle_button(ui, &theme, Some(icons::REFRESH_CW), "生成 SM2 密钥对")
+                    .clicked()
+                {
                     let (pk, sk) = gm::gen_sm2_keypair();
                     self.pub_key = pk;
                     self.priv_key = sk;
@@ -99,7 +106,12 @@ impl Tool for GmTool {
 
         // 卡2：加密 / 摘要
         widgets::card(ui, &theme, |ui| {
-            ui.label(RichText::new("加密 / 摘要").size(15.0).strong().color(theme.fg));
+            ui.label(
+                RichText::new("加密 / 摘要")
+                    .size(15.0)
+                    .strong()
+                    .color(theme.fg),
+            );
             ui.add_space(8.0);
             ui.columns(2, |cols| {
                 widgets::field_label(&mut cols[0], &theme, "您的文本");
@@ -114,7 +126,9 @@ impl Tool for GmTool {
                 };
                 cols[1].add_enabled(
                     self.enc_algo != EncAlgo::Sm3,
-                    TextEdit::singleline(&mut self.enc_key).desired_width(f32::INFINITY).hint_text(hint),
+                    TextEdit::singleline(&mut self.enc_key)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(hint),
                 );
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "国密算法");
@@ -176,7 +190,11 @@ impl Tool for GmTool {
                     DecAlgo::Sm4 => "SM4 口令",
                     DecAlgo::Sm2 => "SM2 私钥（留空则用上方密钥对）",
                 };
-                cols[1].add(TextEdit::singleline(&mut self.dec_key).desired_width(f32::INFINITY).hint_text(hint));
+                cols[1].add(
+                    TextEdit::singleline(&mut self.dec_key)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(hint),
+                );
                 cols[1].add_space(8.0);
                 widgets::field_label(&mut cols[1], &theme, "国密算法");
                 cols[1].add_space(4.0);
