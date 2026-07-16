@@ -5,16 +5,21 @@ use smcrypto::{sm2, sm3, sm4};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EncAlgo {
-    Sm4,
+    /// SM4 ECB：确定性——同明文同口令结果固定。旧版草稿存的 "Sm4" 即此模式。
+    #[serde(alias = "Sm4")]
+    Sm4Ecb,
+    /// SM4 CBC：每次随机 IV，同明文同口令每次结果都不同。
+    Sm4Cbc,
     Sm2,
     Sm3,
 }
 
 impl EncAlgo {
-    pub const ALL: [EncAlgo; 3] = [EncAlgo::Sm4, EncAlgo::Sm2, EncAlgo::Sm3];
+    pub const ALL: [EncAlgo; 4] = [EncAlgo::Sm4Ecb, EncAlgo::Sm4Cbc, EncAlgo::Sm2, EncAlgo::Sm3];
     pub fn label(self) -> &'static str {
         match self {
-            EncAlgo::Sm4 => "SM4 · 对称加密",
+            EncAlgo::Sm4Ecb => "SM4-ECB · 对称（结果固定）",
+            EncAlgo::Sm4Cbc => "SM4-CBC · 对称（随机 IV · 每次不同）",
             EncAlgo::Sm2 => "SM2 · 公钥加密",
             EncAlgo::Sm3 => "SM3 · 摘要",
         }
@@ -23,15 +28,18 @@ impl EncAlgo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecAlgo {
-    Sm4,
+    #[serde(alias = "Sm4")]
+    Sm4Ecb,
+    Sm4Cbc,
     Sm2,
 }
 
 impl DecAlgo {
-    pub const ALL: [DecAlgo; 2] = [DecAlgo::Sm4, DecAlgo::Sm2];
+    pub const ALL: [DecAlgo; 3] = [DecAlgo::Sm4Ecb, DecAlgo::Sm4Cbc, DecAlgo::Sm2];
     pub fn label(self) -> &'static str {
         match self {
-            DecAlgo::Sm4 => "SM4 · 对称解密",
+            DecAlgo::Sm4Ecb => "SM4-ECB · 对称解密",
+            DecAlgo::Sm4Cbc => "SM4-CBC · 对称解密（IV+密文）",
             DecAlgo::Sm2 => "SM2 · 私钥解密",
         }
     }
@@ -52,16 +60,41 @@ fn sm4_key(pass: &str) -> Vec<u8> {
     sm3::sm3_hash_raw(pass.as_bytes())[..16].to_vec()
 }
 
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim();
+    if !s.is_ascii() || s.len() % 2 != 0 {
+        return Err("无效 hex 密文".into());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "无效 hex 密文".to_string()))
+        .collect()
+}
+
 /// 加密 / 摘要，输出 hex。
 pub fn encrypt(algo: EncAlgo, text: &str, key: &str) -> Result<String, String> {
     match algo {
         EncAlgo::Sm3 => Ok(sm3::sm3_hash(text.as_bytes())),
-        EncAlgo::Sm4 => {
+        EncAlgo::Sm4Ecb => {
             if key.is_empty() {
                 return Err("请输入 SM4 口令".into());
             }
             let k = sm4_key(key);
             guard(move || sm4::CryptSM4ECB::new(&k).encrypt_ecb_hex(text.as_bytes()))
+        }
+        EncAlgo::Sm4Cbc => {
+            if key.is_empty() {
+                return Err("请输入 SM4 口令".into());
+            }
+            let k = sm4_key(key);
+            // 每次随机 IV → 同明文同口令每次密文都不同；IV 拼在密文前随之分发。
+            let iv: [u8; 16] = rand::random();
+            let ct = guard(move || sm4::CryptSM4CBC::new(&k, &iv).encrypt_cbc(text.as_bytes()))?;
+            Ok(format!("{}{}", to_hex(&iv), to_hex(&ct)))
         }
         EncAlgo::Sm2 => {
             // pubkey_valid / Encrypt::new 都同时接受 130（04 前缀）与 128 hex，
@@ -79,12 +112,26 @@ pub fn encrypt(algo: EncAlgo, text: &str, key: &str) -> Result<String, String> {
 pub fn decrypt(algo: DecAlgo, hex: &str, key: &str) -> Result<String, String> {
     let hex = hex.trim().to_string();
     match algo {
-        DecAlgo::Sm4 => {
+        DecAlgo::Sm4Ecb => {
             if key.is_empty() {
                 return Err("请输入 SM4 口令".into());
             }
             let k = sm4_key(key);
             let pt = guard(move || sm4::CryptSM4ECB::new(&k).decrypt_ecb_hex(&hex))?;
+            String::from_utf8(pt).map_err(|_| "解密结果不是有效 UTF-8".into())
+        }
+        DecAlgo::Sm4Cbc => {
+            if key.is_empty() {
+                return Err("请输入 SM4 口令".into());
+            }
+            let k = sm4_key(key);
+            let raw = from_hex(&hex)?;
+            if raw.len() < 32 {
+                return Err("SM4-CBC 密文过短：应为 IV(16 字节) + 密文".into());
+            }
+            let (iv, ct) = raw.split_at(16);
+            let (iv, ct) = (iv.to_vec(), ct.to_vec());
+            let pt = guard(move || sm4::CryptSM4CBC::new(&k, &iv).decrypt_cbc(&ct))?;
             String::from_utf8(pt).map_err(|_| "解密结果不是有效 UTF-8".into())
         }
         DecAlgo::Sm2 => {
@@ -110,10 +157,29 @@ mod tests {
     }
 
     #[test]
-    fn sm4_roundtrip() {
-        let ct = encrypt(EncAlgo::Sm4, "国密 SM4", "pass").unwrap();
-        let pt = decrypt(DecAlgo::Sm4, &ct, "pass").unwrap();
+    fn sm4_ecb_roundtrip() {
+        let ct = encrypt(EncAlgo::Sm4Ecb, "国密 SM4", "pass").unwrap();
+        let pt = decrypt(DecAlgo::Sm4Ecb, &ct, "pass").unwrap();
         assert_eq!(pt, "国密 SM4");
+        // ECB 是确定性的：两次加密结果相同。
+        assert_eq!(ct, encrypt(EncAlgo::Sm4Ecb, "国密 SM4", "pass").unwrap());
+    }
+
+    #[test]
+    fn sm4_cbc_roundtrip_and_randomized() {
+        let a = encrypt(EncAlgo::Sm4Cbc, "国密 SM4", "pass").unwrap();
+        let b = encrypt(EncAlgo::Sm4Cbc, "国密 SM4", "pass").unwrap();
+        // 随机 IV：同明文同口令两次密文不同。
+        assert_ne!(a, b);
+        // 两份密文都能正确解密。
+        assert_eq!(decrypt(DecAlgo::Sm4Cbc, &a, "pass").unwrap(), "国密 SM4");
+        assert_eq!(decrypt(DecAlgo::Sm4Cbc, &b, "pass").unwrap(), "国密 SM4");
+    }
+
+    #[test]
+    fn sm4_cbc_rejects_short_or_bad_hex() {
+        assert!(decrypt(DecAlgo::Sm4Cbc, "abcd", "pass").is_err());
+        assert!(decrypt(DecAlgo::Sm4Cbc, "zz".repeat(24).as_str(), "pass").is_err());
     }
 
     #[test]

@@ -41,13 +41,13 @@ impl Default for GmTool {
             enc_text: String::new(),
             enc_key: String::new(),
             enc_out: String::new(),
-            enc_algo: EncAlgo::Sm4,
+            enc_algo: EncAlgo::Sm4Ecb,
             enc_ok: true,
             enc_status: "就绪".to_owned(),
             dec_text: String::new(),
             dec_key: String::new(),
             dec_out: String::new(),
-            dec_algo: DecAlgo::Sm4,
+            dec_algo: DecAlgo::Sm4Ecb,
             dec_ok: true,
             dec_status: "就绪".to_owned(),
         }
@@ -60,7 +60,7 @@ impl Tool for GmTool {
             id: "gm",
             name: "国密 SM 加解密",
             group: "加密",
-            desc: "使用国密算法加密和解密文本 —— SM4（对称）、SM2（非对称公钥）、SM3（摘要）。",
+            desc: "使用国密算法加密和解密文本 —— SM4（对称 · ECB/CBC）、SM2（非对称公钥）、SM3（摘要）。",
             icon: icons::SHIELD_CHECK,
             keywords: &["gm", "国密", "sm2", "sm3", "sm4", "国密sm"],
         }
@@ -120,7 +120,7 @@ impl Tool for GmTool {
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
                 let hint = match self.enc_algo {
-                    EncAlgo::Sm4 => "SM4 口令",
+                    EncAlgo::Sm4Ecb | EncAlgo::Sm4Cbc => "SM4 口令",
                     EncAlgo::Sm2 => "SM2 公钥（留空则用上方密钥对）",
                     EncAlgo::Sm3 => "SM3 摘要无需密钥",
                 };
@@ -187,7 +187,7 @@ impl Tool for GmTool {
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
                 let hint = match self.dec_algo {
-                    DecAlgo::Sm4 => "SM4 口令",
+                    DecAlgo::Sm4Ecb | DecAlgo::Sm4Cbc => "SM4 口令",
                     DecAlgo::Sm2 => "SM2 私钥（留空则用上方密钥对）",
                 };
                 cols[1].add(
