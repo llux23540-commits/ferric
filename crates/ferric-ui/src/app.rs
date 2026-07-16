@@ -240,6 +240,18 @@ impl FerricApp {
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 let filter = self.rail_filter.to_lowercase();
+                // 收藏分组：置顶展示（点顶栏 ❤ 收藏的工具），搜索时同样过滤。
+                let favs: Vec<usize> = (0..self.tools.len())
+                    .filter(|i| self.favorites.contains(self.tools[*i].meta().id))
+                    .filter(|i| self.matches(*i, &filter))
+                    .collect();
+                if !favs.is_empty() {
+                    self.group_label(ui, "收藏");
+                    for i in favs {
+                        self.nav_item(ui, i);
+                    }
+                    ui.add_space(10.0);
+                }
                 for (group, indices) in self.grouped() {
                     let visible: Vec<usize> = indices
                         .into_iter()
@@ -636,6 +648,7 @@ fn content_metrics(avail: f32) -> (f32, f32) {
 /// 分组图标（Lucide 字形）。
 fn group_icon(group: &str) -> char {
     match group {
+        "收藏" => icons::HEART,
         "JSON" => icons::CODE,
         "对比" => icons::GIT_COMPARE,
         "转换" => icons::CLOCK,
