@@ -6,6 +6,9 @@ use egui::{ComboBox, RichText, Ui};
 use ferric_core::idgen::{self, IdKind, Namespace, Opts};
 use serde::{Deserialize, Serialize};
 
+/// 执行记录保留条数的可选档位。
+const KEEP_OPTS: [i64; 4] = [3, 5, 10, 20];
+
 fn default_hist_keep() -> i64 {
     3
 }
@@ -43,7 +46,7 @@ pub struct UuidTool {
     status: String,
     history: Vec<HistEntry>,
     counter: u32,
-    /// 执行记录保留条数（1-6，可调并随草稿持久化）。
+    /// 执行记录保留条数（3/5/10/20 档位，随草稿持久化）。
     hist_keep: i64,
 }
 
@@ -118,7 +121,7 @@ impl UuidTool {
             },
         );
         self.history
-            .truncate(1 + self.hist_keep.clamp(1, 6) as usize);
+            .truncate(1 + self.hist_keep.clamp(1, 20) as usize);
     }
 }
 
@@ -252,13 +255,25 @@ impl Tool for UuidTool {
         ui.horizontal(|ui| {
             widgets::field_label(ui, &theme, "执行记录 · 保留最近");
             ui.add_space(6.0);
-            if widgets::num_field(ui, &theme, &mut self.hist_keep, 1, 6, 1) {
+            let mut changed = false;
+            ComboBox::from_id_salt("uuid-hist-keep")
+                .selected_text(format!("{} 条", self.hist_keep))
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for opt in KEEP_OPTS {
+                        if ui
+                            .selectable_value(&mut self.hist_keep, opt, format!("{opt} 条"))
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            if changed {
                 // 调小时立刻裁掉多余记录（history[0] 是当前这次，不计入展示）。
                 self.history
-                    .truncate(1 + self.hist_keep.clamp(1, 6) as usize);
+                    .truncate(1 + self.hist_keep.clamp(1, 20) as usize);
             }
-            ui.add_space(6.0);
-            widgets::field_label(ui, &theme, "次");
         });
         ui.add_space(6.0);
         if self.history.len() <= 1 {
@@ -274,45 +289,53 @@ impl Tool for UuidTool {
                 .skip(1)
                 .map(|h| (h.label.clone(), h.body.clone()))
                 .collect();
-            // 左右排列：每条记录一列，卡片内完整展示全部数据（超长时卡内滚动）。
-            ui.columns(hist.len(), |cols| {
-                for (i, (label, body)) in hist.iter().enumerate() {
-                    let ui = &mut cols[i];
-                    widgets::card(ui, &theme, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(label)
-                                    .size(11.5)
-                                    .color(theme.muted)
-                                    .monospace(),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制")
-                                        .clicked()
-                                    {
-                                        shared.copy(ui.ctx(), body.clone());
-                                    }
-                                },
-                            );
-                        });
-                        ui.add_space(4.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt(format!("uuid-hist-{i}"))
-                            .max_height(240.0)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
+            // 左右排列：每行最多 3 张卡片，超出换行；卡片内完整展示全部数据（超长时卡内滚动）。
+            for (row, chunk) in hist.chunks(3).enumerate() {
+                ui.columns(3, |cols| {
+                    for (col, (label, body)) in chunk.iter().enumerate() {
+                        let ui = &mut cols[col];
+                        widgets::card(ui, &theme, |ui| {
+                            ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(body)
-                                        .size(12.0)
-                                        .monospace()
-                                        .color(theme.fg_soft),
+                                    RichText::new(label)
+                                        .size(11.5)
+                                        .color(theme.muted)
+                                        .monospace(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if widgets::subtle_button(
+                                            ui,
+                                            &theme,
+                                            Some(icons::COPY),
+                                            "复制",
+                                        )
+                                        .clicked()
+                                        {
+                                            shared.copy(ui.ctx(), body.clone());
+                                        }
+                                    },
                                 );
                             });
-                    });
-                }
-            });
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt(format!("uuid-hist-{row}-{col}"))
+                                .max_height(240.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(body)
+                                            .size(12.0)
+                                            .monospace()
+                                            .color(theme.fg_soft),
+                                    );
+                                });
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+            }
         }
     }
 
@@ -341,7 +364,12 @@ impl Tool for UuidTool {
             self.upper = d.upper;
             self.nohyphen = d.nohyphen;
             self.as_json = d.as_json;
-            self.hist_keep = d.hist_keep.clamp(1, 6);
+            // 旧草稿可能存有档位之外的值（如步进器时代的 1-6），回落为默认 3。
+            self.hist_keep = if KEEP_OPTS.contains(&d.hist_keep) {
+                d.hist_keep
+            } else {
+                default_hist_keep()
+            };
             self.history.clear();
             self.regen();
         }
