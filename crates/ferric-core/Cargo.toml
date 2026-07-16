@@ -19,6 +19,7 @@ rsa = { workspace = true }
 rand = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }
+ecb = { workspace = true }
 des = { workspace = true }
 sm4 = { workspace = true }
 cipher = { workspace = true }
