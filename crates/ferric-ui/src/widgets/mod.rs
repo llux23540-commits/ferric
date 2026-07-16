@@ -379,6 +379,8 @@ impl DiffLineStyle {
 
 /// 等宽多行编辑框（外观同 [`code_area`]），按 `line_styles` 就地渲染 diff 高亮：
 /// 改动行整行底色横向铺满（折行的续行同底色），emph 片段画字符级标记。
+/// `min_inner_h` 为内容区最小高度：行数除不尽的余数由白框撑满补齐，
+/// 保证框体高度精确等于外部预算、左右两栏底边严格对齐。
 pub fn code_area_diff(
     ui: &mut Ui,
     theme: &Theme,
@@ -386,6 +388,7 @@ pub fn code_area_diff(
     text: &mut String,
     rows: usize,
     line_styles: &[DiffLineStyle],
+    min_inner_h: f32,
 ) -> Response {
     let fill = ui.visuals().extreme_bg_color;
     let border = ui.visuals().window_stroke; // border_2，很浅
@@ -397,6 +400,7 @@ pub fn code_area_diff(
         .rounding(Rounding::same(10.0))
         .inner_margin(Margin::symmetric(16.0, 12.0))
         .show(ui, |ui| {
+            ui.set_min_height(min_inner_h);
             // 行底色占位：先占一个绘制槽，TextEdit 画完后回填，保证底色在文字下方。
             let bg_idx = ui.painter().add(egui::Shape::Noop);
 

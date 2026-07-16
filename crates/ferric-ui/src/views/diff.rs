@@ -195,14 +195,14 @@ impl Tool for DiffTool {
                 let gutter = 16.0;
                 let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-                // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（约 100），
-                // 另留一行文字的底部间距——输入框底到内容区边界只剩约一行高。
-                let box_h = (avail_h - 100.0 - row_h).max(160.0);
-                let rows = (((box_h - 28.0) / row_h).floor() as usize).max(6);
-                // 视口高度按行数精确反推（编辑框内边距 24 + 描边余量），
-                // 保证内容 ≤ 视口，否则会差出 1-2px 常驻可滚动状态。
-                let pin_h = rows as f32 * row_h + 28.0;
-                // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
+                // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（实测约 108），
+                // 底部留和左右一致的 24px 边距，面板高度取精确值。
+                let pin_h = (avail_h - 108.0 - 24.0).max(160.0);
+                // 行数向下取整（内容 ≤ 视口，避免 1-2px 常驻滚动），
+                // 除不尽的余数由 code_area_diff 的 min_inner_h 撑满补齐。
+                let rows = (((pin_h - 28.0) / row_h).floor() as usize).max(6);
+                let min_inner_h = pin_h - 24.0; // 扣掉编辑框上下内边距
+                                                // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
                 let mut load_left = false;
                 let mut load_right = false;
 
@@ -260,6 +260,7 @@ impl Tool for DiffTool {
                                             &mut self.left,
                                             rows,
                                             &left_styles,
+                                            min_inner_h,
                                         );
                                     });
                             },
@@ -314,6 +315,7 @@ impl Tool for DiffTool {
                                             &mut self.right,
                                             rows,
                                             &right_styles,
+                                            min_inner_h,
                                         );
                                     });
                             },
