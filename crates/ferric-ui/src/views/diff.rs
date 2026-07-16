@@ -4,7 +4,7 @@ use crate::theme::Theme;
 use crate::tool::{Shared, Tool, ToolMeta};
 use crate::widgets::DiffLineStyle;
 use crate::{icons, widgets};
-use egui::{Align, Color32, Layout, RichText, Ui};
+use egui::{Color32, RichText, Ui};
 use ferric_core::diff::{self, Tag};
 use serde::{Deserialize, Serialize};
 
@@ -140,6 +140,10 @@ impl Tool for DiffTool {
         }
     }
 
+    fn show_desc(&self) -> bool {
+        false
+    }
+
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
         self.handle_drops(ui, shared);
@@ -147,7 +151,7 @@ impl Tool for DiffTool {
         let (lines, stats) = diff::line_diff(&self.left, &self.right);
         let (left_styles, right_styles) = side_styles(&lines, &theme);
 
-        // 工具条：左侧统计，右侧载入文件
+        // 顶部统计行
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(format!("+{} 新增", stats.added))
@@ -168,32 +172,6 @@ impl Tool for DiffTool {
                     .color(theme.muted)
                     .size(13.0),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入右侧")
-                    .clicked()
-                {
-                    match pick_file() {
-                        Ok(Some((n, t))) => {
-                            self.right = t;
-                            self.right_name = n;
-                        }
-                        Ok(None) => {}
-                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
-                    }
-                }
-                if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入左侧")
-                    .clicked()
-                {
-                    match pick_file() {
-                        Ok(Some((n, t))) => {
-                            self.left = t;
-                            self.left_name = n;
-                        }
-                        Ok(None) => {}
-                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
-                    }
-                }
-            });
         });
         ui.add_space(10.0);
 
@@ -201,9 +179,12 @@ impl Tool for DiffTool {
         let gutter = 16.0;
         let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
         let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-        // 固定开销：工具条、卡片头、内边距与各级间距（无底部状态行）
-        let box_h = (shared.content_height - 170.0).max(160.0);
+        // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（无底部状态行）
+        let box_h = (shared.content_height - 180.0).max(160.0);
         let rows = (((box_h - 24.0) / row_h).floor() as usize).max(6);
+        // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
+        let mut load_left = false;
+        let mut load_right = false;
 
         let left_lines = self.left.lines().count();
         let right_lines = self.right.lines().count();
@@ -220,20 +201,25 @@ impl Tool for DiffTool {
                     &theme,
                     "左侧 · 原始",
                     |ui| {
-                        ui.label(
-                            RichText::new(format!("{left_lines} 行"))
-                                .size(11.0)
-                                .color(theme.faint),
-                        );
+                        if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入文件")
+                            .clicked()
+                        {
+                            load_left = true;
+                        }
                         if !left_name.is_empty() {
-                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(&left_name)
                                     .size(11.0)
                                     .color(theme.muted)
                                     .monospace(),
                             );
+                            ui.add_space(8.0);
                         }
+                        ui.label(
+                            RichText::new(format!("{left_lines} 行"))
+                                .size(11.0)
+                                .color(theme.faint),
+                        );
                     },
                     |ui| {
                         egui::ScrollArea::vertical()
@@ -264,20 +250,25 @@ impl Tool for DiffTool {
                     &theme,
                     "右侧 · 修改后",
                     |ui| {
-                        ui.label(
-                            RichText::new(format!("{right_lines} 行"))
-                                .size(11.0)
-                                .color(theme.faint),
-                        );
+                        if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入文件")
+                            .clicked()
+                        {
+                            load_right = true;
+                        }
                         if !right_name.is_empty() {
-                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(&right_name)
                                     .size(11.0)
                                     .color(theme.muted)
                                     .monospace(),
                             );
+                            ui.add_space(8.0);
                         }
+                        ui.label(
+                            RichText::new(format!("{right_lines} 行"))
+                                .size(11.0)
+                                .color(theme.faint),
+                        );
                     },
                     |ui| {
                         egui::ScrollArea::vertical()
@@ -299,6 +290,28 @@ impl Tool for DiffTool {
                 );
             });
         });
+
+        // 卡片头里点了「载入文件」：出布局后统一弹窗读取
+        if load_left {
+            match pick_file() {
+                Ok(Some((n, t))) => {
+                    self.left = t;
+                    self.left_name = n;
+                }
+                Ok(None) => {}
+                Err(e) => shared.toast(format!("读取文件失败：{e}")),
+            }
+        }
+        if load_right {
+            match pick_file() {
+                Ok(Some((n, t))) => {
+                    self.right = t;
+                    self.right_name = n;
+                }
+                Ok(None) => {}
+                Err(e) => shared.toast(format!("读取文件失败：{e}")),
+            }
+        }
     }
 
     fn save_draft(&self) -> Option<String> {
