@@ -120,7 +120,11 @@ impl Tool for GmTool {
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
                 let hint = match self.enc_algo {
-                    EncAlgo::Sm4Ecb | EncAlgo::Sm4Cbc => "SM4 口令",
+                    EncAlgo::Sm4Ecb
+                    | EncAlgo::Sm4Cbc
+                    | EncAlgo::Sm4Ctr
+                    | EncAlgo::Sm4Cfb
+                    | EncAlgo::Sm4Ofb => "SM4 口令",
                     EncAlgo::Sm2 => "SM2 公钥（留空则用上方密钥对）",
                     EncAlgo::Sm3 => "SM3 摘要无需密钥",
                 };
@@ -187,7 +191,11 @@ impl Tool for GmTool {
                 widgets::field_label(&mut cols[1], &theme, "您的密钥 / 口令");
                 cols[1].add_space(4.0);
                 let hint = match self.dec_algo {
-                    DecAlgo::Sm4Ecb | DecAlgo::Sm4Cbc => "SM4 口令",
+                    DecAlgo::Sm4Ecb
+                    | DecAlgo::Sm4Cbc
+                    | DecAlgo::Sm4Ctr
+                    | DecAlgo::Sm4Cfb
+                    | DecAlgo::Sm4Ofb => "SM4 口令",
                     DecAlgo::Sm2 => "SM2 私钥（留空则用上方密钥对）",
                 };
                 cols[1].add(
