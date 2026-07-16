@@ -90,6 +90,123 @@ pub fn gen_sm2_keypair() -> (String, String) {
     (format!("04{pub_k}"), priv_k)
 }
 
+/// SM2 密文格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Sm2Fmt {
+    C1C3C2,
+    C1C2C3,
+    Asn1,
+}
+
+impl Sm2Fmt {
+    pub const ALL: [Sm2Fmt; 3] = [Sm2Fmt::C1C3C2, Sm2Fmt::C1C2C3, Sm2Fmt::Asn1];
+    pub fn label(self) -> &'static str {
+        match self {
+            Sm2Fmt::C1C3C2 => "C1C3C2 · 新国标（默认）",
+            Sm2Fmt::C1C2C3 => "C1C2C3 · 旧国标",
+            Sm2Fmt::Asn1 => "ASN.1 / DER",
+        }
+    }
+}
+
+fn valid_sm2_pk(key: &str) -> Result<String, String> {
+    let pk = key.trim().to_string();
+    if !sm2::pubkey_valid(&pk) {
+        return Err("SM2 公钥无效（应为 04 开头 130 hex）".into());
+    }
+    Ok(pk)
+}
+
+fn valid_sm2_sk(key: &str) -> Result<String, String> {
+    let sk = key.trim().to_string();
+    if !sm2::privkey_valid(&sk) {
+        return Err("SM2 私钥无效（应为 64 hex）".into());
+    }
+    Ok(sk)
+}
+
+/// SM2 按指定密文格式加密，输出 hex。
+pub fn sm2_encrypt_fmt(fmt: Sm2Fmt, text: &str, pubkey: &str) -> Result<String, String> {
+    let pk = valid_sm2_pk(pubkey)?;
+    let data = text.as_bytes().to_vec();
+    guard(move || {
+        let enc = sm2::Encrypt::new(&pk);
+        match fmt {
+            Sm2Fmt::C1C3C2 => enc.encrypt_hex(&data),
+            Sm2Fmt::C1C2C3 => to_hex(&enc.encrypt_c1c2c3(&data)),
+            Sm2Fmt::Asn1 => to_hex(&enc.encrypt_asna1(&data)),
+        }
+    })
+}
+
+/// SM2 按指定密文格式解密 hex 密文。
+pub fn sm2_decrypt_fmt(fmt: Sm2Fmt, hex_str: &str, privkey: &str) -> Result<String, String> {
+    let sk = valid_sm2_sk(privkey)?;
+    let hex_str = hex_str.trim().to_string();
+    let pt = match fmt {
+        Sm2Fmt::C1C3C2 => guard(move || sm2::Decrypt::new(&sk).decrypt_hex(&hex_str))?,
+        Sm2Fmt::C1C2C3 => {
+            let raw = from_hex(&hex_str)?;
+            guard(move || sm2::Decrypt::new(&sk).decrypt_c1c2c3(&raw))?
+        }
+        Sm2Fmt::Asn1 => {
+            let raw = from_hex(&hex_str)?;
+            guard(move || sm2::Decrypt::new(&sk).decrypt_asna1(&raw))?
+        }
+    };
+    String::from_utf8(pt).map_err(|_| "解密结果不是有效 UTF-8".into())
+}
+
+/// SM2 签名（SM3 摘要 + 默认 ID `1234567812345678`），输出 ASN.1/DER 签名的 hex。
+pub fn sm2_sign(text: &str, privkey: &str) -> Result<String, String> {
+    let sk = valid_sm2_sk(privkey)?;
+    let data = text.as_bytes().to_vec();
+    let sig = guard(move || sm2::Sign::new(&sk).sign(&data))?;
+    if sig.is_empty() {
+        return Err("签名失败，请重试".into());
+    }
+    Ok(to_hex(&sig))
+}
+
+/// SM2 验签（与 [`sm2_sign`] 对应的 DER hex 签名）。
+pub fn sm2_verify(text: &str, sig_hex: &str, pubkey: &str) -> Result<bool, String> {
+    let pk = valid_sm2_pk(pubkey)?;
+    let sig = from_hex(sig_hex)?;
+    if sig.is_empty() {
+        return Err("请输入签名值（hex）".into());
+    }
+    let data = text.as_bytes().to_vec();
+    guard(move || sm2::Verify::new(&pk).verify(&data, &sig))
+}
+
+/// 由私钥反推公钥（04 前缀 130 hex）。
+pub fn sm2_pk_from_sk(privkey: &str) -> Result<String, String> {
+    let sk = valid_sm2_sk(privkey)?;
+    guard(move || format!("04{}", sm2::pk_from_sk(&sk)))
+}
+
+/// 密钥对导出为 PEM 文件（含私钥）。
+pub fn sm2_keypair_to_pem(privkey: &str, path: &str) -> Result<(), String> {
+    let sk = valid_sm2_sk(privkey)?;
+    let path = path.to_string();
+    guard(move || sm2::keypair_to_pem_file(&sk, &path))
+}
+
+/// 从 PEM 文件导入密钥对，返回 `(公钥 04+128hex, 私钥 64hex)`。
+pub fn sm2_keypair_from_pem(path: &str) -> Result<(String, String), String> {
+    let path = path.to_string();
+    let (sk, pk) = guard(move || sm2::keypair_from_pem_file(&path))?;
+    if sk.is_empty() || !sm2::privkey_valid(&sk) {
+        return Err("PEM 解析失败或不是 SM2 私钥文件".into());
+    }
+    let pk_full = if pk.len() == 130 {
+        pk
+    } else {
+        format!("04{pk}")
+    };
+    Ok((pk_full, sk))
+}
+
 fn guard<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T, String> {
     std::panic::catch_unwind(f).map_err(|_| "运算失败：输入或密钥不合法".to_string())
 }
@@ -321,5 +438,46 @@ mod tests {
     fn sm2_rejects_invalid_128_pubkey() {
         let bad = format!("zz{}", "1".repeat(126));
         assert!(encrypt(EncAlgo::Sm2, "x", &bad).is_err());
+    }
+
+    /// 三种 SM2 密文格式都能各自往返。
+    #[test]
+    fn sm2_fmt_roundtrips() {
+        let (pk, sk) = gen_sm2_keypair();
+        for fmt in Sm2Fmt::ALL {
+            let ct = sm2_encrypt_fmt(fmt, "格式互通", &pk).unwrap();
+            assert_eq!(
+                sm2_decrypt_fmt(fmt, &ct, &sk).unwrap(),
+                "格式互通",
+                "{fmt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sm2_sign_verify_roundtrip() {
+        let (pk, sk) = gen_sm2_keypair();
+        let sig = sm2_sign("待签名数据", &sk).unwrap();
+        assert!(sm2_verify("待签名数据", &sig, &pk).unwrap());
+        // 篡改原文 → 验签失败
+        assert!(!sm2_verify("被篡改数据", &sig, &pk).unwrap());
+    }
+
+    #[test]
+    fn sm2_pk_derives_from_sk() {
+        let (pk, sk) = gen_sm2_keypair();
+        assert_eq!(sm2_pk_from_sk(&sk).unwrap(), pk);
+    }
+
+    #[test]
+    fn sm2_pem_roundtrip() {
+        let (pk, sk) = gen_sm2_keypair();
+        let path = std::env::temp_dir().join("ferric-test-sm2.pem");
+        let path = path.to_string_lossy().into_owned();
+        sm2_keypair_to_pem(&sk, &path).unwrap();
+        let (pk2, sk2) = sm2_keypair_from_pem(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(sk2, sk);
+        assert_eq!(pk2, pk);
     }
 }
