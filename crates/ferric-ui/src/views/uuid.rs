@@ -6,6 +6,10 @@ use egui::{ComboBox, RichText, Ui};
 use ferric_core::idgen::{self, IdKind, Namespace, Opts};
 use serde::{Deserialize, Serialize};
 
+fn default_hist_keep() -> i64 {
+    3
+}
+
 #[derive(Serialize, Deserialize)]
 struct UuidDraft {
     kind: IdKind,
@@ -16,6 +20,8 @@ struct UuidDraft {
     upper: bool,
     nohyphen: bool,
     as_json: bool,
+    #[serde(default = "default_hist_keep")]
+    hist_keep: i64,
 }
 
 struct HistEntry {
@@ -37,6 +43,8 @@ pub struct UuidTool {
     status: String,
     history: Vec<HistEntry>,
     counter: u32,
+    /// 执行记录保留条数（1-6，可调并随草稿持久化）。
+    hist_keep: i64,
 }
 
 impl Default for UuidTool {
@@ -55,6 +63,7 @@ impl Default for UuidTool {
             status: "就绪".to_owned(),
             history: Vec::new(),
             counter: 0,
+            hist_keep: default_hist_keep(),
         };
         t.regen();
         t
@@ -94,7 +103,7 @@ impl UuidTool {
             }
         }
         self.counter = self.counter.wrapping_add(1);
-        // 记入历史：history[0] 是当前这次，其后保留最近 3 次
+        // 记入历史：history[0] 是当前这次，其后保留最近 hist_keep 次
         let label = format!(
             "{} · {} 个 · #{}",
             self.kind.label(),
@@ -108,7 +117,8 @@ impl UuidTool {
                 body: self.output.clone(),
             },
         );
-        self.history.truncate(4);
+        self.history
+            .truncate(1 + self.hist_keep.clamp(1, 6) as usize);
     }
 }
 
@@ -239,7 +249,17 @@ impl Tool for UuidTool {
 
         // 历史
         ui.add_space(16.0);
-        widgets::field_label(ui, &theme, "执行记录（保留最近 3 次）");
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "执行记录 · 保留最近");
+            ui.add_space(6.0);
+            if widgets::num_field(ui, &theme, &mut self.hist_keep, 1, 6, 1) {
+                // 调小时立刻裁掉多余记录（history[0] 是当前这次，不计入展示）。
+                self.history
+                    .truncate(1 + self.hist_keep.clamp(1, 6) as usize);
+            }
+            ui.add_space(6.0);
+            widgets::field_label(ui, &theme, "次");
+        });
         ui.add_space(6.0);
         if self.history.len() <= 1 {
             ui.label(
@@ -254,34 +274,45 @@ impl Tool for UuidTool {
                 .skip(1)
                 .map(|h| (h.label.clone(), h.body.clone()))
                 .collect();
-            for (label, body) in hist {
-                widgets::card(ui, &theme, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(&label)
-                                .size(11.5)
-                                .color(theme.muted)
-                                .monospace(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制")
-                                .clicked()
-                            {
-                                shared.copy(ui.ctx(), body.clone());
-                            }
+            // 左右排列：每条记录一列，卡片内完整展示全部数据（超长时卡内滚动）。
+            ui.columns(hist.len(), |cols| {
+                for (i, (label, body)) in hist.iter().enumerate() {
+                    let ui = &mut cols[i];
+                    widgets::card(ui, &theme, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(label)
+                                    .size(11.5)
+                                    .color(theme.muted)
+                                    .monospace(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制")
+                                        .clicked()
+                                    {
+                                        shared.copy(ui.ctx(), body.clone());
+                                    }
+                                },
+                            );
                         });
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("uuid-hist-{i}"))
+                            .max_height(240.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(body)
+                                        .size(12.0)
+                                        .monospace()
+                                        .color(theme.fg_soft),
+                                );
+                            });
                     });
-                    ui.add_space(4.0);
-                    let preview: String = body.lines().take(3).collect::<Vec<_>>().join("\n");
-                    ui.label(
-                        RichText::new(preview)
-                            .size(12.0)
-                            .monospace()
-                            .color(theme.fg_soft),
-                    );
-                });
-                ui.add_space(8.0);
-            }
+                }
+            });
         }
     }
 
@@ -295,6 +326,7 @@ impl Tool for UuidTool {
             upper: self.upper,
             nohyphen: self.nohyphen,
             as_json: self.as_json,
+            hist_keep: self.hist_keep,
         })
         .ok()
     }
@@ -309,6 +341,7 @@ impl Tool for UuidTool {
             self.upper = d.upper;
             self.nohyphen = d.nohyphen;
             self.as_json = d.as_json;
+            self.hist_keep = d.hist_keep.clamp(1, 6);
             self.history.clear();
             self.regen();
         }
