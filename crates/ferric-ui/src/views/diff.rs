@@ -144,6 +144,11 @@ impl Tool for DiffTool {
         false
     }
 
+    /// 铺满模式：内容区宽度 100% 交给本工具，两个输入框随窗口宽度自动均分。
+    fn full_bleed(&self) -> bool {
+        true
+    }
+
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
         self.handle_drops(ui, shared);
@@ -151,171 +156,193 @@ impl Tool for DiffTool {
         let (lines, stats) = diff::line_diff(&self.left, &self.right);
         let (left_styles, right_styles) = side_styles(&lines, &theme);
 
-        // 顶部统计行
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(format!("+{} 新增", stats.added))
-                    .color(theme.ok)
-                    .size(13.0)
-                    .strong(),
-            );
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!("−{} 删除", stats.removed))
-                    .color(theme.danger)
-                    .size(13.0)
-                    .strong(),
-            );
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!("={} 未变", stats.unchanged))
-                    .color(theme.muted)
-                    .size(13.0),
-            );
-        });
-        ui.add_space(10.0);
+        // 铺满模式下自己负责边距；宽度随窗口变化，两栏始终均分。
+        egui::Frame::none()
+            .inner_margin(egui::Margin {
+                left: 24.0,
+                right: 24.0,
+                top: 12.0,
+                bottom: 0.0,
+            })
+            .show(ui, |ui| {
+                let avail_h = ui.available_height();
 
-        // 双栏卡片：同高、铺满剩余高度（同 JSON→YAML 页的布局策略）。
-        let gutter = 16.0;
-        let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
-        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-        // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（约 100），
-        // 另留一行文字的底部间距——输入框底到内容区边界只剩约一行高。
-        let box_h = (shared.content_height - 100.0 - row_h).max(160.0);
-        let rows = (((box_h - 28.0) / row_h).floor() as usize).max(6);
-        // 视口高度按行数精确反推（编辑框内边距 24 + 描边余量），
-        // 保证内容 ≤ 视口，否则会差出 1-2px 常驻可滚动状态。
-        let pin_h = rows as f32 * row_h + 28.0;
-        // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
-        let mut load_left = false;
-        let mut load_right = false;
+                // 顶部统计行
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("+{} 新增", stats.added))
+                            .color(theme.ok)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("−{} 删除", stats.removed))
+                            .color(theme.danger)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("={} 未变", stats.unchanged))
+                            .color(theme.muted)
+                            .size(13.0),
+                    );
+                });
+                ui.add_space(10.0);
 
-        let left_lines = self.left.lines().count();
-        let right_lines = self.right.lines().count();
-        let left_name = self.left_name.clone();
-        let right_name = self.right_name.clone();
+                // 双栏卡片：同高、铺满剩余高度（同 JSON→YAML 页的布局策略）。
+                let gutter = 16.0;
+                let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（约 100），
+                // 另留一行文字的底部间距——输入框底到内容区边界只剩约一行高。
+                let box_h = (avail_h - 100.0 - row_h).max(160.0);
+                let rows = (((box_h - 28.0) / row_h).floor() as usize).max(6);
+                // 视口高度按行数精确反推（编辑框内边距 24 + 描边余量），
+                // 保证内容 ≤ 视口，否则会差出 1-2px 常驻可滚动状态。
+                let pin_h = rows as f32 * row_h + 28.0;
+                // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
+                let mut load_left = false;
+                let mut load_right = false;
 
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
+                let left_lines = self.left.lines().count();
+                let right_lines = self.right.lines().count();
+                let left_name = self.left_name.clone();
+                let right_name = self.right_name.clone();
 
-            ui.vertical(|ui| {
-                ui.set_width(colw);
-                widgets::panel(
-                    ui,
-                    &theme,
-                    "左侧 · 原始",
-                    |ui| {
-                        if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入文件")
-                            .clicked()
-                        {
-                            load_left = true;
-                        }
-                        if !left_name.is_empty() {
-                            ui.label(
-                                RichText::new(&left_name)
-                                    .size(11.0)
-                                    .color(theme.muted)
-                                    .monospace(),
-                            );
-                            ui.add_space(8.0);
-                        }
-                        ui.label(
-                            RichText::new(format!("{left_lines} 行"))
-                                .size(11.0)
-                                .color(theme.faint),
-                        );
-                    },
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("diff-l-sc")
-                            .min_scrolled_height(pin_h)
-                            .max_height(pin_h)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                widgets::code_area_diff(
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+
+                    ui.vertical(|ui| {
+                        ui.set_width(colw);
+                        widgets::panel(
+                            ui,
+                            &theme,
+                            "左侧 · 原始",
+                            |ui| {
+                                if widgets::subtle_button(
                                     ui,
                                     &theme,
-                                    "diff-l",
-                                    &mut self.left,
-                                    rows,
-                                    &left_styles,
+                                    Some(icons::FOLDER_OPEN),
+                                    "载入文件",
+                                )
+                                .clicked()
+                                {
+                                    load_left = true;
+                                }
+                                if !left_name.is_empty() {
+                                    ui.label(
+                                        RichText::new(&left_name)
+                                            .size(11.0)
+                                            .color(theme.muted)
+                                            .monospace(),
+                                    );
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(
+                                    RichText::new(format!("{left_lines} 行"))
+                                        .size(11.0)
+                                        .color(theme.faint),
                                 );
-                            });
-                    },
-                );
-            });
-
-            ui.add_space(gutter);
-
-            ui.vertical(|ui| {
-                ui.set_width(colw);
-                widgets::panel(
-                    ui,
-                    &theme,
-                    "右侧 · 修改后",
-                    |ui| {
-                        if widgets::subtle_button(ui, &theme, Some(icons::FOLDER_OPEN), "载入文件")
-                            .clicked()
-                        {
-                            load_right = true;
-                        }
-                        if !right_name.is_empty() {
-                            ui.label(
-                                RichText::new(&right_name)
-                                    .size(11.0)
-                                    .color(theme.muted)
-                                    .monospace(),
-                            );
-                            ui.add_space(8.0);
-                        }
-                        ui.label(
-                            RichText::new(format!("{right_lines} 行"))
-                                .size(11.0)
-                                .color(theme.faint),
+                            },
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("diff-l-sc")
+                                    .min_scrolled_height(pin_h)
+                                    .max_height(pin_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-l",
+                                            &mut self.left,
+                                            rows,
+                                            &left_styles,
+                                        );
+                                    });
+                            },
                         );
-                    },
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("diff-r-sc")
-                            .min_scrolled_height(pin_h)
-                            .max_height(pin_h)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                widgets::code_area_diff(
+                    });
+
+                    ui.add_space(gutter);
+
+                    ui.vertical(|ui| {
+                        ui.set_width(colw);
+                        widgets::panel(
+                            ui,
+                            &theme,
+                            "右侧 · 修改后",
+                            |ui| {
+                                if widgets::subtle_button(
                                     ui,
                                     &theme,
-                                    "diff-r",
-                                    &mut self.right,
-                                    rows,
-                                    &right_styles,
+                                    Some(icons::FOLDER_OPEN),
+                                    "载入文件",
+                                )
+                                .clicked()
+                                {
+                                    load_right = true;
+                                }
+                                if !right_name.is_empty() {
+                                    ui.label(
+                                        RichText::new(&right_name)
+                                            .size(11.0)
+                                            .color(theme.muted)
+                                            .monospace(),
+                                    );
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(
+                                    RichText::new(format!("{right_lines} 行"))
+                                        .size(11.0)
+                                        .color(theme.faint),
                                 );
-                            });
-                    },
-                );
-            });
-        });
+                            },
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("diff-r-sc")
+                                    .min_scrolled_height(pin_h)
+                                    .max_height(pin_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-r",
+                                            &mut self.right,
+                                            rows,
+                                            &right_styles,
+                                        );
+                                    });
+                            },
+                        );
+                    });
+                });
 
-        // 卡片头里点了「载入文件」：出布局后统一弹窗读取
-        if load_left {
-            match pick_file() {
-                Ok(Some((n, t))) => {
-                    self.left = t;
-                    self.left_name = n;
+                // 卡片头里点了「载入文件」：出布局后统一弹窗读取
+                if load_left {
+                    match pick_file() {
+                        Ok(Some((n, t))) => {
+                            self.left = t;
+                            self.left_name = n;
+                        }
+                        Ok(None) => {}
+                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => shared.toast(format!("读取文件失败：{e}")),
-            }
-        }
-        if load_right {
-            match pick_file() {
-                Ok(Some((n, t))) => {
-                    self.right = t;
-                    self.right_name = n;
+                if load_right {
+                    match pick_file() {
+                        Ok(Some((n, t))) => {
+                            self.right = t;
+                            self.right_name = n;
+                        }
+                        Ok(None) => {}
+                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => shared.toast(format!("读取文件失败：{e}")),
-            }
-        }
+            });
     }
 
     fn save_draft(&self) -> Option<String> {
