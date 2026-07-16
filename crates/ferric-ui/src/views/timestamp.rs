@@ -21,6 +21,9 @@ pub struct TimestampTool {
     ts_output: String,
     date_input: String,
     date_output: String,
+    /// 当前时间戳是否实时刷新；暂停时显示 `paused_ms` 的定格值。
+    running: bool,
+    paused_ms: i64,
 }
 
 impl Default for TimestampTool {
@@ -32,6 +35,8 @@ impl Default for TimestampTool {
             ts_output: String::new(),
             date_input: "2025-07-08 12:03:05".to_owned(),
             date_output: String::new(),
+            running: true,
+            paused_ms: 0,
         }
     }
 }
@@ -67,16 +72,35 @@ impl Tool for TimestampTool {
 
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
-        // 持续实时刷新：对齐到下一个 100ms 边界再重绘（+5ms 余量确保跨过边界）。
+        // 实时刷新：对齐到下一个 100ms 边界再重绘（+5ms 余量确保跨过边界）。
         // 相比固定间隔，采样点不会在秒内漂移，长时间挂着也不会出现跳秒 / 卡顿。
-        let now_ms = timestamp::now(Precision::Millis);
-        let wait = 100 - (now_ms % 100) + 5;
-        ui.ctx()
-            .request_repaint_after(Duration::from_millis(wait as u64));
+        // 暂停时显示定格值，且不再请求重绘（零开销）。
+        let now_ms = if self.running {
+            let v = timestamp::now(Precision::Millis);
+            let wait = 100 - (v % 100) + 5;
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(wait as u64));
+            v
+        } else {
+            self.paused_ms
+        };
 
         // ---- 卡1：当前 Unix 时间戳（秒级 / 毫秒级同时显示） ----
         widgets::card(ui, &theme, |ui| {
-            widgets::field_label(ui, &theme, "当前 Unix 时间戳");
+            ui.horizontal(|ui| {
+                widgets::field_label(ui, &theme, "当前 Unix 时间戳");
+                ui.add_space(10.0);
+                if widgets::pill_toggle(ui, &theme, self.running, "实时刷新") {
+                    self.running = !self.running;
+                    if !self.running {
+                        self.paused_ms = now_ms; // 定格当前值
+                    }
+                }
+                if !self.running {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("已暂停").size(12.0).color(theme.muted));
+                }
+            });
             ui.add_space(6.0);
             let rows: [(&str, i64); 2] =
                 [("秒级 · 10 位", now_ms / 1000), ("毫秒级 · 13 位", now_ms)];
