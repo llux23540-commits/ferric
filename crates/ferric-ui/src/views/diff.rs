@@ -179,9 +179,13 @@ impl Tool for DiffTool {
         let gutter = 16.0;
         let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
         let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-        // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（无底部状态行）
-        let box_h = (shared.content_height - 180.0).max(160.0);
-        let rows = (((box_h - 24.0) / row_h).floor() as usize).max(6);
+        // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（约 100），
+        // 另留一行文字的底部间距——输入框底到内容区边界只剩约一行高。
+        let box_h = (shared.content_height - 100.0 - row_h).max(160.0);
+        let rows = (((box_h - 28.0) / row_h).floor() as usize).max(6);
+        // 视口高度按行数精确反推（编辑框内边距 24 + 描边余量），
+        // 保证内容 ≤ 视口，否则会差出 1-2px 常驻可滚动状态。
+        let pin_h = rows as f32 * row_h + 28.0;
         // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
         let mut load_left = false;
         let mut load_right = false;
@@ -224,8 +228,8 @@ impl Tool for DiffTool {
                     |ui| {
                         egui::ScrollArea::vertical()
                             .id_salt("diff-l-sc")
-                            .min_scrolled_height(box_h)
-                            .max_height(box_h)
+                            .min_scrolled_height(pin_h)
+                            .max_height(pin_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 widgets::code_area_diff(
@@ -273,8 +277,8 @@ impl Tool for DiffTool {
                     |ui| {
                         egui::ScrollArea::vertical()
                             .id_salt("diff-r-sc")
-                            .min_scrolled_height(box_h)
-                            .max_height(box_h)
+                            .min_scrolled_height(pin_h)
+                            .max_height(pin_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 widgets::code_area_diff(

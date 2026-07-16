@@ -94,9 +94,13 @@ impl Tool for YamlTool {
         let gutter = 30.0;
         let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
         let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-        // 固定开销：工具条、卡片头、内边距、状态行与各级间距（实测约 200，留少量余量）
-        let box_h = (shared.content_height - 200.0).max(160.0);
-        let rows = (((box_h - 24.0) / row_h).floor() as usize).max(6);
+        // 固定开销：工具条、卡片头、内边距、状态行与各级间距（约 128），
+        // 另留一行文字的底部间距，与对比页一致。
+        let box_h = (shared.content_height - 128.0 - row_h).max(160.0);
+        let rows = (((box_h - 28.0) / row_h).floor() as usize).max(6);
+        // 视口高度按行数精确反推（编辑框内边距 24 + 描边余量），
+        // 保证内容 ≤ 视口，否则会差出 1-2px 常驻可滚动状态。
+        let pin_h = rows as f32 * row_h + 28.0;
         // 箭头对齐编辑区垂直中线：卡片头高 + 半个编辑框
         let arrow_y = 30.0 + 4.0 + box_h * 0.5;
 
@@ -123,8 +127,8 @@ impl Tool for YamlTool {
                     |ui| {
                         egui::ScrollArea::vertical()
                             .id_salt("yaml-in-sc")
-                            .min_scrolled_height(box_h)
-                            .max_height(box_h)
+                            .min_scrolled_height(pin_h)
+                            .max_height(pin_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 input_changed =
@@ -160,8 +164,8 @@ impl Tool for YamlTool {
                     |ui| {
                         egui::ScrollArea::vertical()
                             .id_salt("yaml-out-sc")
-                            .min_scrolled_height(box_h)
-                            .max_height(box_h)
+                            .min_scrolled_height(pin_h)
+                            .max_height(pin_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 widgets::code_area(ui, "yaml-out", &mut self.output, false, rows);
