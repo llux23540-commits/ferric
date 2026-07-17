@@ -1,4 +1,5 @@
 /target
+plugins/*/target
 **/*.rs.bk
 crates/ferric-ui/build_number.txt
 Cargo.lock.orig

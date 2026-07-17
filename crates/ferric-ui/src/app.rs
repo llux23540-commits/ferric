@@ -89,6 +89,11 @@ impl FerricApp {
         theme.apply(&cc.egui_ctx);
 
         let mut tools = views::registry();
+        // WASM 插件：内置工具之后追加（加载失败只提示，不影响启动）
+        let (plugin_tools, plugin_warns) = crate::plugin_host::load_all();
+        for t in plugin_tools {
+            tools.push(Box::new(t));
+        }
         for t in tools.iter_mut() {
             let id = t.meta().id;
             if let Some(data) = persist.drafts.get(id) {
@@ -100,6 +105,11 @@ impl FerricApp {
             .position(|t| t.meta().id == persist.active_id)
             .unwrap_or(0);
 
+        let mut shared = Shared::new(theme);
+        for w in plugin_warns {
+            shared.toast(format!("插件加载失败 · {w}"));
+        }
+
         Self {
             tools,
             active,
@@ -110,7 +120,7 @@ impl FerricApp {
             rail_filter: String::new(),
             focus_search: false,
             settings_open: false,
-            shared: Shared::new(theme),
+            shared,
         }
     }
 
@@ -656,6 +666,7 @@ fn group_icon(group: &str) -> char {
         "生成" => icons::CREDIT_CARD,
         "加密" => icons::LOCK,
         "文本" => icons::TERMINAL,
+        "插件" => icons::BOX,
         _ => icons::BOX,
     }
 }

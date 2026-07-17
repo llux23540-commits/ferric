@@ -1,6 +1,8 @@
 ﻿[workspace]
 resolver = "2"
 members = ["crates/ferric-core", "crates/ferric-ui", "crates/ferric-app"]
+# plugins/ 下是独立编译到 wasm32 的插件示例，不属于主工作区
+exclude = ["plugins"]
 
 [workspace.package]
 version = "0.5.0"

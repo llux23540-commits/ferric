@@ -6,6 +6,7 @@ mod app;
 mod chrome;
 mod fonts;
 mod icons;
+mod plugin_host;
 mod theme;
 mod tool;
 mod views;

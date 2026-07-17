@@ -13,3 +13,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono-tz = { workspace = true }
 rfd = { workspace = true }
+wasmtime = "27.0.0"
+directories.workspace = true
