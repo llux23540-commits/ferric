@@ -1,26 +1,50 @@
-//! 对称加解密（AES / TripleDES / RC4 / Rabbit），OpenSSL 盐格式（与 crypto-js 默认兼容）。
+//! 对称加解密（AES 全模式 / TripleDES / RC4 / Rabbit），OpenSSL 盐格式（与 crypto-js 兼容）。
 //!
 //! 输出为 base64(`"Salted__"` + 8 字节盐 + 密文)，密钥/IV 用 `EVP_BytesToKey`(MD5) 从口令派生。
+//! AES 提供 CBC / ECB / CTR / CFB / OFB 五种模式，与 crypto-js 的对应 mode 互通
+//! （CTR 采用 crypto-js 的 32 位计数器递增语义，即 `Ctr32BE`）。
 
 use aes::Aes256;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{
+    block_padding::Pkcs7, AsyncStreamCipher, BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit,
+    StreamCipher,
+};
 use des::TdesEde3;
 use md5::{Digest, Md5};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Algo {
-    Aes,
+    /// AES-256-CBC：crypto-js 默认模式。旧版草稿存的 "Aes" 即此模式。
+    #[serde(alias = "Aes")]
+    AesCbc,
+    AesEcb,
+    AesCtr,
+    AesCfb,
+    AesOfb,
     TripleDes,
     Rc4,
     Rabbit,
 }
 
 impl Algo {
-    pub const ALL: [Algo; 4] = [Algo::Aes, Algo::TripleDes, Algo::Rabbit, Algo::Rc4];
+    pub const ALL: [Algo; 8] = [
+        Algo::AesCbc,
+        Algo::AesEcb,
+        Algo::AesCtr,
+        Algo::AesCfb,
+        Algo::AesOfb,
+        Algo::TripleDes,
+        Algo::Rabbit,
+        Algo::Rc4,
+    ];
     pub fn label(self) -> &'static str {
         match self {
-            Algo::Aes => "AES",
+            Algo::AesCbc => "AES-CBC（crypto-js 默认）",
+            Algo::AesEcb => "AES-ECB（结果同盐固定）",
+            Algo::AesCtr => "AES-CTR",
+            Algo::AesCfb => "AES-CFB",
+            Algo::AesOfb => "AES-OFB",
             Algo::TripleDes => "TripleDES",
             Algo::Rabbit => "Rabbit",
             Algo::Rc4 => "RC4",
@@ -28,7 +52,8 @@ impl Algo {
     }
     fn key_iv_len(self) -> (usize, usize) {
         match self {
-            Algo::Aes => (32, 16),
+            Algo::AesCbc | Algo::AesCtr | Algo::AesCfb | Algo::AesOfb => (32, 16),
+            Algo::AesEcb => (32, 0),
             Algo::TripleDes => (24, 8),
             Algo::Rc4 => (32, 0),
             Algo::Rabbit => (16, 8),
@@ -38,6 +63,13 @@ impl Algo {
 
 type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
+type Aes256EcbEnc = ecb::Encryptor<Aes256>;
+type Aes256EcbDec = ecb::Decryptor<Aes256>;
+// crypto-js 的 CTR 只递增计数器最后 32 位（大端），对应 Ctr32BE。
+type Aes256Ctr = ctr::Ctr32BE<Aes256>;
+type Aes256Ofb = ofb::Ofb<Aes256>;
+type Aes256CfbEnc = cfb_mode::Encryptor<Aes256>;
+type Aes256CfbDec = cfb_mode::Decryptor<Aes256>;
 type TdesCbcEnc = cbc::Encryptor<TdesEde3>;
 type TdesCbcDec = cbc::Decryptor<TdesEde3>;
 
@@ -68,8 +100,14 @@ struct Rabbit {
 }
 
 const RABBIT_A: [u32; 8] = [
-    0x4D34_D34D, 0xD34D_34D3, 0x34D3_4D34, 0x4D34_D34D,
-    0xD34D_34D3, 0x34D3_4D34, 0x4D34_D34D, 0xD34D_34D3,
+    0x4D34_D34D,
+    0xD34D_34D3,
+    0x34D3_4D34,
+    0x4D34_D34D,
+    0xD34D_34D3,
+    0x34D3_4D34,
+    0x4D34_D34D,
+    0xD34D_34D3,
 ];
 
 impl Rabbit {
@@ -133,13 +171,21 @@ impl Rabbit {
             *g = (sq ^ (sq >> 32)) as u32;
         }
         let x = &mut self.x;
-        x[0] = g[0].wrapping_add(g[7].rotate_left(16)).wrapping_add(g[6].rotate_left(16));
+        x[0] = g[0]
+            .wrapping_add(g[7].rotate_left(16))
+            .wrapping_add(g[6].rotate_left(16));
         x[1] = g[1].wrapping_add(g[0].rotate_left(8)).wrapping_add(g[7]);
-        x[2] = g[2].wrapping_add(g[1].rotate_left(16)).wrapping_add(g[0].rotate_left(16));
+        x[2] = g[2]
+            .wrapping_add(g[1].rotate_left(16))
+            .wrapping_add(g[0].rotate_left(16));
         x[3] = g[3].wrapping_add(g[2].rotate_left(8)).wrapping_add(g[1]);
-        x[4] = g[4].wrapping_add(g[3].rotate_left(16)).wrapping_add(g[2].rotate_left(16));
+        x[4] = g[4]
+            .wrapping_add(g[3].rotate_left(16))
+            .wrapping_add(g[2].rotate_left(16));
         x[5] = g[5].wrapping_add(g[4].rotate_left(8)).wrapping_add(g[3]);
-        x[6] = g[6].wrapping_add(g[5].rotate_left(16)).wrapping_add(g[4].rotate_left(16));
+        x[6] = g[6]
+            .wrapping_add(g[5].rotate_left(16))
+            .wrapping_add(g[4].rotate_left(16));
         x[7] = g[7].wrapping_add(g[6].rotate_left(8)).wrapping_add(g[5]);
     }
 
@@ -188,9 +234,7 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut s: Vec<u8> = (0..=255).collect();
     let mut j: u8 = 0;
     for i in 0..256 {
-        j = j
-            .wrapping_add(s[i])
-            .wrapping_add(key[i % key.len().max(1)]);
+        j = j.wrapping_add(s[i]).wrapping_add(key[i % key.len().max(1)]);
         s.swap(i, j as usize);
     }
     let mut out = Vec::with_capacity(data.len());
@@ -216,9 +260,33 @@ pub fn encrypt(algo: Algo, text: &str, password: &str) -> Result<String, String>
     let data = text.as_bytes();
 
     let ct = match algo {
-        Algo::Aes => Aes256CbcEnc::new_from_slices(&k, &iv)
+        Algo::AesCbc => Aes256CbcEnc::new_from_slices(&k, &iv)
             .map_err(|e| e.to_string())?
             .encrypt_padded_vec_mut::<Pkcs7>(data),
+        Algo::AesEcb => Aes256EcbEnc::new_from_slice(&k)
+            .map_err(|e| e.to_string())?
+            .encrypt_padded_vec_mut::<Pkcs7>(data),
+        Algo::AesCtr => {
+            let mut buf = data.to_vec();
+            Aes256Ctr::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .apply_keystream(&mut buf);
+            buf
+        }
+        Algo::AesOfb => {
+            let mut buf = data.to_vec();
+            Aes256Ofb::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .apply_keystream(&mut buf);
+            buf
+        }
+        Algo::AesCfb => {
+            let mut buf = data.to_vec();
+            Aes256CfbEnc::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .encrypt(&mut buf);
+            buf
+        }
         Algo::TripleDes => TdesCbcEnc::new_from_slices(&k, &iv)
             .map_err(|e| e.to_string())?
             .encrypt_padded_vec_mut::<Pkcs7>(data),
@@ -246,10 +314,35 @@ pub fn decrypt(algo: Algo, b64: &str, password: &str) -> Result<String, String> 
     let (k, iv) = evp_bytes_to_key(password.as_bytes(), salt, key_len, iv_len);
 
     let pt = match algo {
-        Algo::Aes => Aes256CbcDec::new_from_slices(&k, &iv)
+        Algo::AesCbc => Aes256CbcDec::new_from_slices(&k, &iv)
             .map_err(|e| e.to_string())?
             .decrypt_padded_vec_mut::<Pkcs7>(ct)
             .map_err(|_| "解密失败（密钥或算法不匹配）".to_string())?,
+        Algo::AesEcb => Aes256EcbDec::new_from_slice(&k)
+            .map_err(|e| e.to_string())?
+            .decrypt_padded_vec_mut::<Pkcs7>(ct)
+            .map_err(|_| "解密失败（密钥或算法不匹配）".to_string())?,
+        Algo::AesCtr => {
+            let mut buf = ct.to_vec();
+            Aes256Ctr::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .apply_keystream(&mut buf);
+            buf
+        }
+        Algo::AesOfb => {
+            let mut buf = ct.to_vec();
+            Aes256Ofb::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .apply_keystream(&mut buf);
+            buf
+        }
+        Algo::AesCfb => {
+            let mut buf = ct.to_vec();
+            Aes256CfbDec::new_from_slices(&k, &iv)
+                .map_err(|e| e.to_string())?
+                .decrypt(&mut buf);
+            buf
+        }
         Algo::TripleDes => TdesCbcDec::new_from_slices(&k, &iv)
             .map_err(|e| e.to_string())?
             .decrypt_padded_vec_mut::<Pkcs7>(ct)
@@ -276,8 +369,18 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_aes() {
-        let ct = encrypt(Algo::Aes, "secret", "k1").unwrap();
-        assert!(decrypt(Algo::Aes, &ct, "k2").is_err());
+        let ct = encrypt(Algo::AesCbc, "secret", "k1").unwrap();
+        assert!(decrypt(Algo::AesCbc, &ct, "k2").is_err());
+    }
+
+    /// 随机盐使所有模式（含 ECB，盐不同 → 派生密钥不同）每次结果都不同。
+    #[test]
+    fn all_modes_randomized_by_salt() {
+        for algo in Algo::ALL {
+            let a = encrypt(algo, "same text", "pass").unwrap();
+            let b = encrypt(algo, "same text", "pass").unwrap();
+            assert_ne!(a, b, "{algo:?} 两次加密结果应不同（随机盐）");
+        }
     }
 
     fn hex(s: &str) -> Vec<u8> {

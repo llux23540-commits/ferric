@@ -9,32 +9,34 @@ use std::time::Duration;
 
 #[derive(Serialize, Deserialize)]
 struct TimestampDraft {
-    precision: Precision,
     tz: String,
     ts_input: String,
     date_input: String,
 }
 
 pub struct TimestampTool {
-    precision: Precision,
     tz: chrono_tz::Tz,
     tz_filter: String,
     ts_input: String,
     ts_output: String,
     date_input: String,
     date_output: String,
+    /// 当前时间戳是否实时刷新；暂停时显示 `paused_ms` 的定格值。
+    running: bool,
+    paused_ms: i64,
 }
 
 impl Default for TimestampTool {
     fn default() -> Self {
         Self {
-            precision: Precision::Seconds,
             tz: chrono_tz::Asia::Shanghai,
             tz_filter: String::new(),
             ts_input: String::new(),
             ts_output: String::new(),
             date_input: "2025-07-08 12:03:05".to_owned(),
             date_output: String::new(),
+            running: true,
+            paused_ms: 0,
         }
     }
 }
@@ -70,34 +72,64 @@ impl Tool for TimestampTool {
 
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
-        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        // 实时刷新：对齐到下一个 100ms 边界再重绘（+5ms 余量确保跨过边界）。
+        // 相比固定间隔，采样点不会在秒内漂移，长时间挂着也不会出现跳秒 / 卡顿。
+        // 暂停时显示定格值，且不再请求重绘（零开销）。
+        let now_ms = if self.running {
+            let v = timestamp::now(Precision::Millis);
+            let wait = 100 - (v % 100) + 5;
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(wait as u64));
+            v
+        } else {
+            self.paused_ms
+        };
 
-        // ---- 卡1：当前 Unix 时间戳 ----
+        // ---- 卡1：当前 Unix 时间戳（秒级 / 毫秒级同时显示） ----
         widgets::card(ui, &theme, |ui| {
-            widgets::field_label(ui, &theme, "当前 Unix 时间戳");
-            ui.add_space(6.0);
-            let now = timestamp::now(self.precision);
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(now.to_string())
-                        .monospace()
-                        .size(20.0)
-                        .color(theme.fg),
-                );
+                widgets::field_label(ui, &theme, "当前 Unix 时间戳");
                 ui.add_space(10.0);
-                if widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked() {
-                    shared.copy(ui.ctx(), now.to_string());
+                if widgets::pill_toggle(ui, &theme, self.running, "实时刷新") {
+                    self.running = !self.running;
+                    if !self.running {
+                        self.paused_ms = now_ms; // 定格当前值
+                    }
+                }
+                if !self.running {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("已暂停").size(12.0).color(theme.muted));
                 }
             });
+            ui.add_space(6.0);
+            let rows: [(&str, i64); 2] =
+                [("秒级 · 10 位", now_ms / 1000), ("毫秒级 · 13 位", now_ms)];
+            for (label, value) in rows {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [96.0, 20.0],
+                        egui::Label::new(RichText::new(label).size(12.0).color(theme.muted)),
+                    );
+                    ui.add_space(8.0);
+                    ui.add_sized(
+                        [150.0, 26.0],
+                        egui::Label::new(
+                            RichText::new(value.to_string())
+                                .monospace()
+                                .size(20.0)
+                                .color(theme.fg),
+                        ),
+                    );
+                    ui.add_space(10.0);
+                    if widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
+                        .clicked()
+                    {
+                        shared.copy(ui.ctx(), value.to_string());
+                    }
+                });
+            }
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                if widgets::pill_toggle(ui, &theme, self.precision == Precision::Seconds, "10 位（秒级）") {
-                    self.precision = Precision::Seconds;
-                }
-                if widgets::pill_toggle(ui, &theme, self.precision == Precision::Millis, "13 位（毫秒级）") {
-                    self.precision = Precision::Millis;
-                }
-                ui.add_space(14.0);
                 widgets::field_label(ui, &theme, "目标时区");
                 ui.add_space(4.0);
                 ComboBox::from_id_salt("tz-combo")
@@ -111,14 +143,15 @@ impl Tool for TimestampTool {
                         );
                         let f = self.tz_filter.to_lowercase();
                         // 全量列出（约 590 个），超长部分靠下拉内滚动，不截断。
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for z in chrono_tz::TZ_VARIANTS
-                                .iter()
-                                .filter(|z| f.is_empty() || z.name().to_lowercase().contains(&f))
-                            {
-                                ui.selectable_value(&mut self.tz, *z, z.name());
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for z in chrono_tz::TZ_VARIANTS.iter().filter(|z| {
+                                    f.is_empty() || z.name().to_lowercase().contains(&f)
+                                }) {
+                                    ui.selectable_value(&mut self.tz, *z, z.name());
+                                }
+                            });
                     });
             });
             ui.add_space(6.0);
@@ -139,12 +172,21 @@ impl Tool for TimestampTool {
                     ui.add(
                         TextEdit::singleline(&mut self.ts_input)
                             .desired_width(180.0)
-                            .hint_text("输入 Unix 时间戳"),
+                            .hint_text("10 / 13 位，自动识别"),
                     );
                     if widgets::primary_button(ui, &theme, "转换").clicked() {
                         self.ts_output = match self.ts_input.trim().parse::<i64>() {
-                            Ok(ts) => timestamp::to_datetime(ts, self.precision, self.tz)
-                                .unwrap_or_else(|e| format!("错误：{e}")),
+                            Ok(ts) => {
+                                // 按位数自动识别精度：≥13 位按毫秒，否则按秒。
+                                let precision =
+                                    if self.ts_input.trim().trim_start_matches('-').len() >= 13 {
+                                        Precision::Millis
+                                    } else {
+                                        Precision::Seconds
+                                    };
+                                timestamp::to_datetime(ts, precision, self.tz)
+                                    .unwrap_or_else(|e| format!("错误：{e}"))
+                            }
                             Err(_) => "错误：请输入整数时间戳".to_owned(),
                         };
                     }
@@ -153,7 +195,8 @@ impl Tool for TimestampTool {
                     widgets::field_label(ui, &theme, "转换后的时间");
                     if !self.ts_output.is_empty()
                         && !self.ts_output.starts_with("错误")
-                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
+                            .clicked()
                     {
                         shared.copy(ui.ctx(), self.ts_output.clone());
                     }
@@ -185,7 +228,8 @@ impl Tool for TimestampTool {
                     widgets::field_label(ui, &theme, "转换后的时间戳");
                     if !self.date_output.is_empty()
                         && !self.date_output.starts_with("错误")
-                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制").clicked()
+                        && widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
+                            .clicked()
                     {
                         shared.copy(ui.ctx(), self.date_output.clone());
                     }
@@ -198,7 +242,6 @@ impl Tool for TimestampTool {
 
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&TimestampDraft {
-            precision: self.precision,
             tz: self.tz.name().to_owned(),
             ts_input: self.ts_input.clone(),
             date_input: self.date_input.clone(),
@@ -208,7 +251,6 @@ impl Tool for TimestampTool {
 
     fn load_draft(&mut self, data: &str) {
         if let Ok(d) = serde_json::from_str::<TimestampDraft>(data) {
-            self.precision = d.precision;
             if let Ok(tz) = d.tz.parse::<chrono_tz::Tz>() {
                 self.tz = tz;
             }

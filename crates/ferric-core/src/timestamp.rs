@@ -27,7 +27,10 @@ pub fn to_datetime(ts: i64, precision: Precision, tz: Tz) -> Result<String, Stri
         Precision::Millis => Utc.timestamp_millis_opt(ts),
     };
     match dt_utc {
-        LocalResult::Single(dt) => Ok(dt.with_timezone(&tz).format("%Y-%m-%d %H:%M:%S").to_string()),
+        LocalResult::Single(dt) => Ok(dt
+            .with_timezone(&tz)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()),
         _ => Err("无效的时间戳".into()),
     }
 }
@@ -44,9 +47,7 @@ pub fn parts_to_unix(
     tz: Tz,
 ) -> Result<i64, String> {
     let date = NaiveDate::from_ymd_opt(year, month, day).ok_or("无效的年月日")?;
-    let naive = date
-        .and_hms_opt(hour, min, sec)
-        .ok_or("无效的时分秒")?;
+    let naive = date.and_hms_opt(hour, min, sec).ok_or("无效的时分秒")?;
     match tz.from_local_datetime(&naive) {
         LocalResult::Single(dt) => Ok(dt.timestamp()),
         LocalResult::Ambiguous(dt, _) => Ok(dt.timestamp()),
@@ -130,7 +131,11 @@ pub fn system_offset() -> String {
 }
 
 /// 把时间戳拆成时区内的 (年,月,日,时,分,秒)，用于回填逐项输入框。
-pub fn to_parts(ts: i64, precision: Precision, tz: Tz) -> Result<(i32, u32, u32, u32, u32, u32), String> {
+pub fn to_parts(
+    ts: i64,
+    precision: Precision,
+    tz: Tz,
+) -> Result<(i32, u32, u32, u32, u32, u32), String> {
     let dt_utc = match precision {
         Precision::Seconds => Utc.timestamp_opt(ts, 0),
         Precision::Millis => Utc.timestamp_millis_opt(ts),
@@ -138,7 +143,14 @@ pub fn to_parts(ts: i64, precision: Precision, tz: Tz) -> Result<(i32, u32, u32,
     match dt_utc {
         LocalResult::Single(dt) => {
             let l = dt.with_timezone(&tz);
-            Ok((l.year(), l.month(), l.day(), l.hour(), l.minute(), l.second()))
+            Ok((
+                l.year(),
+                l.month(),
+                l.day(),
+                l.hour(),
+                l.minute(),
+                l.second(),
+            ))
         }
         _ => Err("无效的时间戳".into()),
     }
@@ -172,11 +184,17 @@ mod tests {
     #[test]
     fn flexible_formats() {
         let want = parse_compact("20250708120305", Shanghai).unwrap();
-        assert_eq!(parse_flexible("2025-07-08 12:03:05", Shanghai).unwrap(), want);
+        assert_eq!(
+            parse_flexible("2025-07-08 12:03:05", Shanghai).unwrap(),
+            want
+        );
         assert_eq!(parse_flexible("2025/7/8 12:03:05", Shanghai).unwrap(), want);
         assert_eq!(parse_flexible("20250708120305", Shanghai).unwrap(), want);
         // 仅日期 → 00:00:00
         let day = parse_flexible("2025-07-08", Shanghai).unwrap();
-        assert_eq!(to_datetime(day, Precision::Seconds, Shanghai).unwrap(), "2025-07-08 00:00:00");
+        assert_eq!(
+            to_datetime(day, Precision::Seconds, Shanghai).unwrap(),
+            "2025-07-08 00:00:00"
+        );
     }
 }

@@ -90,7 +90,10 @@ pub struct Toast {
 
 impl Toast {
     fn new(msg: String) -> Self {
-        Self { msg, frames_left: 120 }
+        Self {
+            msg,
+            frames_left: 120,
+        }
     }
 }
 

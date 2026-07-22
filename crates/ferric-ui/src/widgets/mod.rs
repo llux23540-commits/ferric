@@ -151,7 +151,11 @@ fn btn(ui: &mut Ui, theme: &Theme, icon: Option<char>, text: &str, v: Variant) -
         Variant::Subtle => (Color32::TRANSPARENT, Stroke::NONE, theme.muted),
     };
     let desired = vec2(0.0, 38.0);
-    let padding = if matches!(v, Variant::Subtle) { 12.0 } else { 16.0 };
+    let padding = if matches!(v, Variant::Subtle) {
+        12.0
+    } else {
+        16.0
+    };
 
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = vec2(padding, 8.0);
@@ -201,7 +205,11 @@ pub fn icon_btn(ui: &mut Ui, theme: &Theme, ch: char, size: f32) -> Response {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(9), theme.border);
     }
-    let color = if resp.hovered() { theme.fg } else { theme.muted };
+    let color = if resp.hovered() {
+        theme.fg
+    } else {
+        theme.muted
+    };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -226,7 +234,11 @@ pub fn seg(ui: &mut Ui, theme: &Theme, opts: &[&str], selected: usize) -> Option
             ui.horizontal(|ui| {
                 for (i, o) in opts.iter().enumerate() {
                     let on = i == selected;
-                    let fill = if on { theme.accent_soft } else { Color32::TRANSPARENT };
+                    let fill = if on {
+                        theme.accent_soft
+                    } else {
+                        Color32::TRANSPARENT
+                    };
                     let col = if on { theme.accent_strong } else { theme.muted };
                     ui.spacing_mut().button_padding = vec2(14.0, 6.0);
                     let r = ui.add(
@@ -334,7 +346,11 @@ fn icon_flat(ui: &mut Ui, theme: &Theme, ch: char, w: f32) -> Response {
     if resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.border);
     }
-    let color = if resp.hovered() { theme.fg } else { theme.muted };
+    let color = if resp.hovered() {
+        theme.fg
+    } else {
+        theme.muted
+    };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -389,9 +405,182 @@ pub fn code_area(
         });
     // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
     if out.inner.gained_focus() {
-        if let Some(mut state) =
-            egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id)
-        {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
+            let end = egui::text::CCursor::new(text.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), out.inner.id);
+        }
+    }
+    // 聚焦时显示主色环
+    if out.inner.has_focus() {
+        ui.painter().rect_stroke(
+            out.response.rect,
+            CornerRadius::same(10),
+            Stroke::new(1.5_f32, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    out.inner
+}
+
+/// code_bg 卡片面板：标题头（左标题 + 右侧自定义内容）+ 任意主体内容，
+/// SQL 格式化 / JSON→YAML / 对比等页面的统一版式。
+pub fn panel(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    trailing: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui),
+) {
+    Frame::NONE
+        .fill(theme.code_bg)
+        .corner_radius(CornerRadius::same(12))
+        .show(ui, |ui| {
+            Frame::NONE
+                .inner_margin(Margin::symmetric(14, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(title)
+                                .size(11.0)
+                                .family(egui::FontFamily::Monospace)
+                                .color(theme.faint),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
+                    });
+                });
+            Frame::NONE.inner_margin(Margin::same(4)).show(ui, body);
+        });
+}
+
+/// 差异行样式：`segs` 拼起来应等于该行文本；不一致（如输入后的一帧延迟）时该行退回无样式。
+#[derive(Clone)]
+pub struct DiffLineStyle {
+    /// 整行底色（TRANSPARENT = 无）。
+    pub bg: Color32,
+    /// emph 片段的字符级标记背景。
+    pub mark: Color32,
+    pub segs: Vec<ferric_core::diff::Seg>,
+}
+
+impl DiffLineStyle {
+    fn matches(&self, line: &str) -> bool {
+        let mut rest = line;
+        for s in &self.segs {
+            match rest.strip_prefix(s.text.as_str()) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        }
+        rest.is_empty()
+    }
+}
+
+/// 等宽多行编辑框（外观同 [`code_area`]），按 `line_styles` 就地渲染 diff 高亮：
+/// 改动行整行底色横向铺满（折行的续行同底色），emph 片段画字符级标记。
+/// `min_inner_h` 为内容区最小高度：行数除不尽的余数由白框撑满补齐，
+/// 保证框体高度精确等于外部预算、左右两栏底边严格对齐。
+pub fn code_area_diff(
+    ui: &mut Ui,
+    theme: &Theme,
+    id: &str,
+    text: &mut String,
+    rows: usize,
+    line_styles: &[DiffLineStyle],
+    min_inner_h: f32,
+) -> Response {
+    let fill = ui.visuals().extreme_bg_color;
+    let border = ui.visuals().window_stroke; // border_2，很浅
+    let accent = ui.visuals().hyperlink_color; // = accent
+    let fg = theme.fg;
+    let out = Frame::NONE
+        .fill(fill)
+        .stroke(border)
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(16, 12))
+        .show(ui, |ui| {
+            ui.set_min_height(min_inner_h);
+            // 行底色占位：先占一个绘制槽，TextEdit 画完后回填，保证底色在文字下方。
+            let bg_idx = ui.painter().add(egui::Shape::Noop);
+
+            let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                let plain = egui::TextFormat {
+                    font_id: font_id.clone(),
+                    color: fg,
+                    ..Default::default()
+                };
+                let mut job = egui::text::LayoutJob::default();
+                job.wrap.max_width = wrap_width;
+                let lines: Vec<&str> = buf.as_str().split('\n').collect();
+                for (i, line) in lines.iter().enumerate() {
+                    match line_styles.get(i).filter(|s| s.matches(line)) {
+                        Some(style) => {
+                            for seg in &style.segs {
+                                let mut fmt = plain.clone();
+                                if seg.emph {
+                                    fmt.background = style.mark;
+                                }
+                                job.append(&seg.text, 0.0, fmt);
+                            }
+                        }
+                        None => job.append(line, 0.0, plain.clone()),
+                    }
+                    if i + 1 < lines.len() {
+                        job.append("\n", 0.0, plain.clone());
+                    }
+                }
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+
+            let edit = TextEdit::multiline(text)
+                .id_salt(id)
+                .desired_width(f32::INFINITY)
+                .desired_rows(rows)
+                .code_editor()
+                .frame(egui::Frame::NONE)
+                .layouter(&mut layouter)
+                .show(ui);
+
+            // 回填整行底色：按 galley 视觉行映射逻辑行（同 code_area_seamless 的行号逻辑）。
+            let inner = ui.max_rect();
+            let cur_lines: Vec<&str> = text.split('\n').collect();
+            let mut shapes = Vec::new();
+            let mut logical = 0usize;
+            for grow in edit.galley.rows.iter() {
+                let styled = line_styles
+                    .get(logical)
+                    .filter(|s| s.bg != Color32::TRANSPARENT)
+                    .filter(|s| {
+                        cur_lines
+                            .get(logical)
+                            .copied()
+                            .is_some_and(|l| s.matches(l))
+                    });
+                if let Some(style) = styled {
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(inner.left(), edit.galley_pos.y + grow.rect().min.y),
+                        egui::pos2(inner.right(), edit.galley_pos.y + grow.rect().max.y),
+                    );
+                    shapes.push(egui::Shape::rect_filled(
+                        rect.expand2(vec2(6.0, 0.0)),
+                        CornerRadius::same(3),
+                        style.bg,
+                    ));
+                }
+                if grow.ends_with_newline {
+                    logical += 1;
+                }
+            }
+            ui.painter().set(bg_idx, egui::Shape::Vec(shapes));
+            edit.response.response
+        });
+    // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
+    if out.inner.gained_focus() {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
             let end = egui::text::CCursor::new(text.chars().count());
             state
                 .cursor
@@ -430,8 +619,10 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
             code_area(ui, id, &mut owned, false, min_rows);
             // 右上角复制
             let r = ui.max_rect();
-            let btn_rect =
-                egui::Rect::from_min_size(egui::pos2(r.right() - 30.0, r.top() - 2.0), vec2(34.0, 34.0));
+            let btn_rect = egui::Rect::from_min_size(
+                egui::pos2(r.right() - 30.0, r.top() - 2.0),
+                vec2(34.0, 34.0),
+            );
             if ui
                 .put(
                     btn_rect,
@@ -472,7 +663,14 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, add: impl FnOnce(&mut Ui) -> R) -> R 
 }
 
 /// 工具条图标按钮（32×32，可选 active/primary，带 tooltip）。
-pub fn tb_icon_btn(ui: &mut Ui, theme: &Theme, ch: char, active: bool, primary: bool, tip: &str) -> Response {
+pub fn tb_icon_btn(
+    ui: &mut Ui,
+    theme: &Theme,
+    ch: char,
+    active: bool,
+    primary: bool,
+    tip: &str,
+) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let hovered = resp.hovered();
     let fill = if active {

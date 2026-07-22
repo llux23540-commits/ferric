@@ -1,7 +1,7 @@
 //! JSON 工具：格式化 / 压缩 / 校验 / 转义 / 去转义 / 排序键。
 
-use serde_json::{ser::PrettyFormatter, Serializer, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::{ser::PrettyFormatter, Serializer, Value};
 
 /// 缩进风格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

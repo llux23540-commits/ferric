@@ -12,20 +12,20 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
-    pub canvas: Color32,   // 窗口外的桌面底色
-    pub bg: Color32,       // 主内容底
-    pub rail: Color32,     // 侧栏底
-    pub titlebar: Color32, // 标题栏底
-    pub fg: Color32,       // 主文字
-    pub fg_soft: Color32,  // 次强文字（标题栏名/按钮）
-    pub muted: Color32,    // 次要文字
-    pub faint: Color32,    // 更弱文字（分组标签/占位）
-    pub border: Color32,   // 常规分隔线
-    pub border_2: Color32, // 较强边框（卡片/按钮）
-    pub field: Color32,    // 输入框底
-    pub field_bd: Color32, // 输入框边
-    pub code_bg: Color32,  // 代码块 / 搜索框底
-    pub accent: Color32,       // 主色（绿）
+    pub canvas: Color32,        // 窗口外的桌面底色
+    pub bg: Color32,            // 主内容底
+    pub rail: Color32,          // 侧栏底
+    pub titlebar: Color32,      // 标题栏底
+    pub fg: Color32,            // 主文字
+    pub fg_soft: Color32,       // 次强文字（标题栏名/按钮）
+    pub muted: Color32,         // 次要文字
+    pub faint: Color32,         // 更弱文字（分组标签/占位）
+    pub border: Color32,        // 常规分隔线
+    pub border_2: Color32,      // 较强边框（卡片/按钮）
+    pub field: Color32,         // 输入框底
+    pub field_bd: Color32,      // 输入框边
+    pub code_bg: Color32,       // 代码块 / 搜索框底
+    pub accent: Color32,        // 主色（绿）
     pub accent_strong: Color32, // hover / active 主色
     pub accent_soft: Color32,   // 主色浅底（active 导航 / pill）
     pub accent_ring: Color32,   // 聚焦光环
@@ -79,9 +79,9 @@ impl Theme {
             muted: rgb(0x8b, 0x94, 0x9e),
             faint: rgb(0x62, 0x6c, 0x76),
             border: rgba(0xff, 0xff, 0xff, 18),   // 0.07
-            border_2: rgba(0xff, 0xff, 0xff, 28),  // 0.11
+            border_2: rgba(0xff, 0xff, 0xff, 28), // 0.11
             field: rgb(0x12, 0x16, 0x1b),
-            field_bd: rgba(0xff, 0xff, 0xff, 31),  // 0.12
+            field_bd: rgba(0xff, 0xff, 0xff, 31), // 0.12
             code_bg: rgb(0x12, 0x16, 0x1b),
             accent: rgb(0x2b, 0xb5, 0x6a),
             accent_strong: rgb(0x39, 0xc1, 0x76),
@@ -90,9 +90,9 @@ impl Theme {
             ok: rgb(0x2b, 0xb5, 0x6a),
             danger: rgb(0xe0, 0x6b, 0x67),
             add_bg: rgba(0x2b, 0xb5, 0x6a, 33),   // 0.13
-            add_mark: rgba(0x2b, 0xb5, 0x6a, 84),  // 0.33
+            add_mark: rgba(0x2b, 0xb5, 0x6a, 84), // 0.33
             del_bg: rgba(0xe0, 0x6b, 0x67, 36),   // 0.14
-            del_mark: rgba(0xe0, 0x6b, 0x67, 84),  // 0.33
+            del_mark: rgba(0xe0, 0x6b, 0x67, 84), // 0.33
         }
     }
 
@@ -106,6 +106,14 @@ impl Theme {
 
     /// 把主题映射到 egui 全局 Visuals，让内置控件也跟随配色。
     pub fn apply(&self, ctx: &egui::Context) {
+        // 显式锁定 egui 的深/浅样式槽：egui 默认 ThemePreference::System 会在
+        // 系统切换时自行换槽，导致 set_visuals 写入的自定义配色被默认样式顶掉。
+        // 深浅色跟随系统由 app 层（sync_theme）负责，这里只认传入的 self.dark。
+        ctx.set_theme(if self.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
         let mut v = if self.dark {
             Visuals::dark()
         } else {

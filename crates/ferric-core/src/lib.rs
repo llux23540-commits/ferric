@@ -8,6 +8,7 @@ pub mod diff;
 pub mod gm;
 pub mod idgen;
 pub mod json;
+pub mod plugin;
 pub mod regex;
 pub mod rsa;
 pub mod sql;

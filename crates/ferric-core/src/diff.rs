@@ -118,8 +118,12 @@ mod tests {
         assert_eq!(stats.removed, 1); // b
         assert_eq!(stats.added, 1); // d
         assert_eq!(stats.unchanged, 2); // a, c
-        assert!(lines.iter().any(|l| l.tag == Tag::Delete && l.text() == "b"));
-        assert!(lines.iter().any(|l| l.tag == Tag::Insert && l.text() == "d"));
+        assert!(lines
+            .iter()
+            .any(|l| l.tag == Tag::Delete && l.text() == "b"));
+        assert!(lines
+            .iter()
+            .any(|l| l.tag == Tag::Insert && l.text() == "d"));
     }
 
     #[test]

@@ -18,9 +18,19 @@ const RAIL_DEFAULT: f32 = 264.0;
 const RAIL_MIN: f32 = 196.0;
 const RAIL_MAX: f32 = 460.0;
 
+/// 主题模式：默认跟随系统深浅色，也可手动锁定。
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeMode {
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Persist {
-    dark: bool,
+    dark: bool, // 最近一次生效的深浅色（启动首帧兜底，避免闪白/闪黑）
+    #[serde(default)]
+    theme_mode: Option<ThemeMode>, // 旧版本数据无此字段 → None，迁移见 new()
     rail_width: f32,
     favorites: Vec<String>,
     active_id: String,
@@ -34,6 +44,7 @@ impl Default for Persist {
     fn default() -> Self {
         Self {
             dark: false,
+            theme_mode: Some(ThemeMode::System),
             rail_width: RAIL_DEFAULT,
             favorites: Vec::new(),
             active_id: "json".to_owned(),
@@ -46,7 +57,8 @@ impl Default for Persist {
 pub struct FerricApp {
     tools: Vec<Box<dyn Tool>>,
     active: usize,
-    dark: bool,
+    mode: ThemeMode,
+    dark: bool, // 当前生效的深浅色（mode 为 System 时由系统主题解析而来）
     rail_width: f32,
     favorites: HashSet<String>,
     rail_filter: String,
@@ -64,10 +76,27 @@ impl FerricApp {
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
 
-        let theme = Theme::from_dark(persist.dark);
+        // 迁移：旧数据没有 theme_mode，一律改为跟随系统（旧版的 dark 只作首帧兜底）。
+        let mode = persist.theme_mode.unwrap_or(ThemeMode::System);
+        // 启动首帧系统主题可能尚未上报（system_theme() 为 None），
+        // 先用上次生效的深浅色兜底，进入 update() 后每帧与系统同步。
+        let dark = match mode {
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+            ThemeMode::System => cc
+                .egui_ctx
+                .system_theme()
+                .map_or(persist.dark, |t| t == egui::Theme::Dark),
+        };
+        let theme = Theme::from_dark(dark);
         theme.apply(&cc.egui_ctx);
 
         let mut tools = views::registry();
+        // WASM 插件：内置工具之后追加（加载失败只提示，不影响启动）
+        let (plugin_tools, plugin_warns) = crate::plugin_host::load_all();
+        for t in plugin_tools {
+            tools.push(Box::new(t));
+        }
         for t in tools.iter_mut() {
             let id = t.meta().id;
             if let Some(data) = persist.drafts.get(id) {
@@ -79,27 +108,46 @@ impl FerricApp {
             .position(|t| t.meta().id == persist.active_id)
             .unwrap_or(0);
 
+        let mut shared = Shared::new(theme);
+        shared.lang = persist.lang;
+        for w in plugin_warns {
+            shared.toast(format!("插件加载失败 · {w}"));
+        }
+
         Self {
             tools,
             active,
-            dark: persist.dark,
+            mode,
+            dark,
             rail_width: persist.rail_width.clamp(RAIL_MIN, RAIL_MAX),
             favorites: persist.favorites.into_iter().collect(),
             rail_filter: String::new(),
             focus_search: false,
             settings_open: false,
-            shared: {
-                let mut s = Shared::new(theme);
-                s.lang = persist.lang;
-                s
-            },
+            shared,
         }
     }
 
-    fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
-        self.dark = dark;
-        self.shared.theme = Theme::from_dark(dark);
-        self.shared.theme.apply(ctx);
+    fn set_mode(&mut self, ctx: &egui::Context, mode: ThemeMode) {
+        self.mode = mode;
+        self.sync_theme(ctx);
+    }
+
+    /// 按当前模式解析生效深浅色；System 模式下读系统主题，变化时重建配色。
+    /// 每帧调用（无变化时零开销），系统切换深浅色可实时跟随。
+    fn sync_theme(&mut self, ctx: &egui::Context) {
+        let want = match self.mode {
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+            ThemeMode::System => ctx
+                .system_theme()
+                .map_or(self.dark, |t| t == egui::Theme::Dark),
+        };
+        if want != self.dark || self.shared.theme.dark != want {
+            self.dark = want;
+            self.shared.theme = Theme::from_dark(want);
+            self.shared.theme.apply(ctx);
+        }
     }
 
     /// 按 group 分组（保序）返回 (组名, 工具索引列表)。
@@ -174,12 +222,25 @@ impl FerricApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let tmoon = if self.dark { icons::SUN } else { icons::MOON };
-                    if widgets::icon_btn(ui, &theme, tmoon, 18.0).clicked() {
-                        let want = !self.dark;
-                        self.set_dark(ui.ctx(), want);
+                    let resp = widgets::icon_btn(ui, &theme, tmoon, 18.0)
+                        .on_hover_text("切换深浅色（设置中可改回跟随系统）");
+                    if resp.clicked() {
+                        // 快捷切换即视为手动锁定；想恢复跟随系统去设置里选。
+                        let mode = if self.dark {
+                            ThemeMode::Light
+                        } else {
+                            ThemeMode::Dark
+                        };
+                        self.set_mode(ui.ctx(), mode);
                     }
                     if widgets::icon_btn(ui, &theme, icons::INFO, 18.0).clicked() {
-                        self.shared.toast("Ferric v0.4.2 · 本地开发者工具箱");
+                        self.shared.toast(concat!(
+                            "Ferric v",
+                            env!("CARGO_PKG_VERSION"),
+                            " (build ",
+                            env!("FERRIC_BUILD_NUMBER"),
+                            ") · 本地开发者工具箱"
+                        ));
                     }
                     if widgets::icon_btn(ui, &theme, icons::SETTINGS, 18.0).clicked() {
                         self.settings_open = true;
@@ -209,6 +270,18 @@ impl FerricApp {
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 let filter = self.rail_filter.to_lowercase();
+                // 收藏分组：置顶展示（点顶栏 ❤ 收藏的工具），搜索时同样过滤。
+                let favs: Vec<usize> = (0..self.tools.len())
+                    .filter(|i| self.favorites.contains(self.tools[*i].meta().id))
+                    .filter(|i| self.matches(*i, &filter))
+                    .collect();
+                if !favs.is_empty() {
+                    self.group_label(ui, "收藏");
+                    for i in favs {
+                        self.nav_item(ui, i);
+                    }
+                    ui.add_space(10.0);
+                }
                 for (group, indices) in self.grouped() {
                     let visible: Vec<usize> = indices
                         .into_iter()
@@ -231,8 +304,7 @@ impl FerricApp {
             return true;
         }
         let m = self.tools[idx].meta();
-        m.name.to_lowercase().contains(filter)
-            || m.keywords.iter().any(|k| k.contains(filter))
+        m.name.to_lowercase().contains(filter) || m.keywords.iter().any(|k| k.contains(filter))
     }
 
     fn brand(&self, ui: &mut egui::Ui) {
@@ -258,10 +330,16 @@ impl FerricApp {
                     .color(theme.fg),
             );
             ui.label(
-                RichText::new("v0.4.2 · rust")
-                    .family(FontFamily::Monospace)
-                    .size(10.0)
-                    .color(theme.faint),
+                RichText::new(concat!(
+                    "v",
+                    env!("CARGO_PKG_VERSION"),
+                    ".",
+                    env!("FERRIC_BUILD_NUMBER"),
+                    " · rust"
+                ))
+                .family(FontFamily::Monospace)
+                .size(10.0)
+                .color(theme.faint),
             );
         });
     }
@@ -441,6 +519,41 @@ impl FerricApp {
             });
     }
 
+    // ---------- 窗口发光边框 ----------
+
+    /// 沿窗口边缘画一圈深灰半透明发散边框（内发光），全局常显：
+    /// 无边框方角窗口下与轮廓完全贴合，用于和桌面上其他窗口区分。
+    fn window_glow_ui(&self, ctx: &egui::Context) {
+        let rect = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("window-glow"),
+        ));
+        // 亮色主题用深灰，暗色主题提亮一档保证可见。
+        let c = if self.shared.theme.dark {
+            Color32::from_rgb(150, 150, 155)
+        } else {
+            Color32::from_rgb(60, 60, 66)
+        };
+        let fade = |a: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
+        // 内发光：由外向内逐圈变透明（刻意收着，避免喧宾夺主）
+        for (inset, alpha) in [(2.0_f32, 30_u8), (4.0, 16), (6.0, 7)] {
+            painter.rect_stroke(
+                rect.shrink(inset),
+                CornerRadius::ZERO,
+                Stroke::new(3.0_f32, fade(alpha)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // 边缘细线（半透明，不抢内容）
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::ZERO,
+            Stroke::new(1.5_f32, fade(150)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     // ---------- 设置弹窗 ----------
 
     fn settings_ui(&mut self, ctx: &egui::Context) {
@@ -467,11 +580,21 @@ impl FerricApp {
                 ui.horizontal(|ui| {
                     widgets::field_label(ui, &theme, "外观");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let sel = if self.dark { 1 } else { 0 };
-                        if let Some(n) = widgets::seg(ui, &theme, &["亮色", "暗色"], sel) {
-                            let want = n == 1;
-                            if want != self.dark {
-                                self.set_dark(ui.ctx(), want);
+                        let sel = match self.mode {
+                            ThemeMode::System => 0,
+                            ThemeMode::Light => 1,
+                            ThemeMode::Dark => 2,
+                        };
+                        if let Some(n) =
+                            widgets::seg(ui, &theme, &["跟随系统", "亮色", "暗色"], sel)
+                        {
+                            let want = match n {
+                                1 => ThemeMode::Light,
+                                2 => ThemeMode::Dark,
+                                _ => ThemeMode::System,
+                            };
+                            if want != self.mode {
+                                self.set_mode(ui.ctx(), want);
                             }
                         }
                     });
@@ -492,7 +615,8 @@ impl FerricApp {
                 ui.horizontal(|ui| {
                     widgets::field_label(ui, &theme, "本地数据");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::ghost_button(ui, &theme, "清除收藏与工具草稿").clicked() {
+                        if widgets::ghost_button(ui, &theme, "清除收藏与工具草稿").clicked()
+                        {
                             self.favorites.clear();
                             // 草稿在 save() 时由工具状态重建，重置工具即清除草稿。
                             self.tools = views::registry();
@@ -502,10 +626,16 @@ impl FerricApp {
                 });
                 ui.add_space(10.0);
                 ui.label(
-                    RichText::new(concat!("Ferric v", env!("CARGO_PKG_VERSION"), " · 全部数据仅存于本机，不上传"))
-                        .family(FontFamily::Monospace)
-                        .size(11.0)
-                        .color(theme.faint),
+                    RichText::new(concat!(
+                        "Ferric v",
+                        env!("CARGO_PKG_VERSION"),
+                        ".",
+                        env!("FERRIC_BUILD_NUMBER"),
+                        " · 全部数据仅存于本机，不上传"
+                    ))
+                    .family(FontFamily::Monospace)
+                    .size(11.0)
+                    .color(theme.faint),
                 );
             });
         self.settings_open = open;
@@ -548,6 +678,7 @@ fn content_metrics(avail: f32) -> (f32, f32) {
 /// 分组图标（Lucide 字形）。
 fn group_icon(group: &str) -> char {
     match group {
+        "收藏" => icons::HEART,
         "JSON" => icons::CODE,
         "对比" => icons::GIT_COMPARE,
         "转换" => icons::CLOCK,
@@ -555,6 +686,7 @@ fn group_icon(group: &str) -> char {
         "生成" => icons::CREDIT_CARD,
         "加密" => icons::LOCK,
         "文本" => icons::TERMINAL,
+        "插件" => icons::BOX,
         _ => icons::BOX,
     }
 }
@@ -578,6 +710,7 @@ impl eframe::App for FerricApp {
             .collect();
         let persist = Persist {
             dark: self.dark,
+            theme_mode: Some(self.mode),
             rail_width: self.rail_width,
             favorites: self.favorites.iter().cloned().collect(),
             active_id: self.tools[self.active].meta().id.to_owned(),
@@ -590,6 +723,9 @@ impl eframe::App for FerricApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
+        // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
+        self.sync_theme(ctx);
+
         // Ctrl+K 聚焦搜索框
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::K)) {
             self.focus_search = true;
@@ -652,6 +788,9 @@ impl eframe::App for FerricApp {
                         });
                 });
         });
+
+        // 全局窗口发散边框
+        self.window_glow_ui(ctx);
 
         self.settings_ui(ctx);
         self.toasts_ui(ctx);

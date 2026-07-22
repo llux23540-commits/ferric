@@ -32,7 +32,8 @@ impl Default for RegexTool {
             fm: false,
             fs: false,
             fx: false,
-            text: "联系我们：hi@ferric.dev 或 support@example.com，也可发送到 dev@ferric.io。".to_owned(),
+            text: "联系我们：hi@ferric.dev 或 support@example.com，也可发送到 dev@ferric.io。"
+                .to_owned(),
         }
     }
 }
@@ -92,7 +93,12 @@ impl Tool for RegexTool {
                             .font(egui::TextStyle::Monospace),
                     );
                     ui.label(RichText::new("/").monospace().size(16.0).color(theme.faint));
-                    ui.label(RichText::new(&flags).monospace().size(13.0).color(theme.accent_strong));
+                    ui.label(
+                        RichText::new(&flags)
+                            .monospace()
+                            .size(13.0)
+                            .color(theme.accent_strong),
+                    );
                 });
             });
         ui.add_space(6.0);
@@ -137,15 +143,40 @@ impl Tool for RegexTool {
                             for (i, m) in matches.iter().enumerate() {
                                 widgets::card(ui, &theme, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("#{}", i + 1)).size(12.0).strong().color(theme.accent_strong));
-                                        ui.label(RichText::new(format!("at {}..{}", m.start, m.end)).size(11.0).color(theme.faint).monospace());
+                                        ui.label(
+                                            RichText::new(format!("#{}", i + 1))
+                                                .size(12.0)
+                                                .strong()
+                                                .color(theme.accent_strong),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("at {}..{}", m.start, m.end))
+                                                .size(11.0)
+                                                .color(theme.faint)
+                                                .monospace(),
+                                        );
                                     });
-                                    ui.label(RichText::new(&m.text).monospace().size(12.5).color(theme.fg).background_color(theme.accent_soft));
+                                    ui.label(
+                                        RichText::new(&m.text)
+                                            .monospace()
+                                            .size(12.5)
+                                            .color(theme.fg)
+                                            .background_color(theme.accent_soft),
+                                    );
                                     for (gi, g) in m.groups.iter().enumerate() {
                                         if let Some(g) = g {
                                             ui.horizontal(|ui| {
-                                                ui.label(RichText::new(format!("组 {}", gi + 1)).size(11.0).color(theme.muted));
-                                                ui.label(RichText::new(g).monospace().size(12.0).color(theme.fg_soft));
+                                                ui.label(
+                                                    RichText::new(format!("组 {}", gi + 1))
+                                                        .size(11.0)
+                                                        .color(theme.muted),
+                                                );
+                                                ui.label(
+                                                    RichText::new(g)
+                                                        .monospace()
+                                                        .size(12.0)
+                                                        .color(theme.fg_soft),
+                                                );
                                             });
                                         }
                                     }
@@ -268,7 +299,13 @@ fn cheat_sheet(ui: &mut Ui, theme: &crate::theme::Theme) {
                 ui.add_space(6.0);
                 for (expr, desc) in rows.iter() {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(*expr).monospace().size(12.5).color(theme.fg).background_color(theme.code_bg));
+                        ui.label(
+                            RichText::new(*expr)
+                                .monospace()
+                                .size(12.5)
+                                .color(theme.fg)
+                                .background_color(theme.code_bg),
+                        );
                         ui.label(RichText::new(*desc).size(12.0).color(theme.muted));
                     });
                 }

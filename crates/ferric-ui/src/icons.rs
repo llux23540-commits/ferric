@@ -19,7 +19,6 @@ pub fn text(ch: char, size: f32, color: Color32) -> RichText {
 // ---- 字形常量（对照 Lucide info.json）----
 pub const CODE: char = '\u{e093}';
 pub const BRACES: char = '\u{e36a}';
-pub const GIT_COMPARE: char = '\u{e359}';
 pub const CLOCK: char = '\u{e087}';
 pub const DATABASE: char = '\u{e0ad}';
 pub const CREDIT_CARD: char = '\u{e0aa}';
@@ -40,6 +39,7 @@ pub const HEART: char = '\u{e0f2}';
 pub const SEARCH: char = '\u{e151}';
 pub const COPY: char = '\u{e09e}';
 pub const CHECK: char = '\u{e06c}';
+pub const GIT_COMPARE: char = '\u{e359}';
 pub const CHEVRON_DOWN: char = '\u{e06d}';
 pub const CHEVRON_RIGHT: char = '\u{e06f}';
 pub const FILE_DOWN: char = '\u{e318}';

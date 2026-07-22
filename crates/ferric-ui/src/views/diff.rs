@@ -1,8 +1,10 @@
-//! 文本 / 文件对比视图。
+//! 文本 / 文件对比视图：差异直接高亮在左右两个编辑面板内。
 
 use crate::theme::Theme;
+use crate::tool::{Shared, Tool, ToolMeta};
+use crate::widgets::DiffLineStyle;
 use crate::{icons, widgets};
-use egui::{Color32, Frame, Margin, RichText, ScrollArea, Stroke, Ui};
+use egui::{Color32, RichText, Ui};
 use ferric_core::diff::{self, Tag};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +38,7 @@ impl Default for DiffTool {
 
 impl DiffTool {
     /// 处理拖入的文件：按指针水平位置决定落到左 / 右侧。
-    fn handle_drops(&mut self, ui: &Ui, shared: &mut crate::tool::Shared) {
+    fn handle_drops(&mut self, ui: &Ui, shared: &mut Shared) {
         let dropped = ui.ctx().input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
@@ -92,148 +94,257 @@ fn pick_file() -> Result<Option<(String, String)>, String> {
     Ok(Some((name, text)))
 }
 
-fn row_style(tag: Tag, theme: &Theme) -> (Color32, Color32, Color32, &'static str) {
-    match tag {
-        Tag::Equal => (Color32::TRANSPARENT, theme.muted, Color32::TRANSPARENT, " "),
-        Tag::Insert => (theme.add_bg, theme.ok, theme.add_mark, "+"),
-        Tag::Delete => (theme.del_bg, theme.danger, theme.del_mark, "-"),
+/// 由统一 diff 行派生左右两侧面板各自的行样式：
+/// 左侧只关心删除（红），右侧只关心新增（绿），未变行透明。
+fn side_styles(
+    lines: &[diff::DiffLine],
+    theme: &Theme,
+) -> (Vec<DiffLineStyle>, Vec<DiffLineStyle>) {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for line in lines {
+        match line.tag {
+            Tag::Equal => {
+                let plain = DiffLineStyle {
+                    bg: Color32::TRANSPARENT,
+                    mark: Color32::TRANSPARENT,
+                    segs: line.segs.clone(),
+                };
+                left.push(plain.clone());
+                right.push(plain);
+            }
+            Tag::Delete => left.push(DiffLineStyle {
+                bg: theme.del_bg,
+                mark: theme.del_mark,
+                segs: line.segs.clone(),
+            }),
+            Tag::Insert => right.push(DiffLineStyle {
+                bg: theme.add_bg,
+                mark: theme.add_mark,
+                segs: line.segs.clone(),
+            }),
+        }
     }
+    (left, right)
 }
 
-impl DiffTool {
-    fn column(
-        ui: &mut Ui,
-        theme: &Theme,
-        title: &str,
-        name: &mut String,
-        text: &mut String,
-        id: &str,
-        shared: &mut crate::tool::Shared,
-    ) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(title).size(12.5).color(theme.fg_soft));
-            ui.label(
-                RichText::new(format!("{} 行", text.lines().count()))
-                    .size(11.0)
-                    .color(theme.faint),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::subtle_button(ui, theme, Some(icons::FOLDER_OPEN), "载入文件").clicked() {
+impl Tool for DiffTool {
+    fn meta(&self) -> ToolMeta {
+        ToolMeta {
+            id: "diff",
+            name: "文本 / 文件对比",
+            group: "对比",
+            desc: "逐行比较两段文本或文件，差异直接高亮在两侧编辑框：左侧标删除，右侧标新增，可载入或拖入文件。",
+            icon: icons::GIT_COMPARE,
+            keywords: &["diff", "compare", "对比", "比较", "差异"],
+        }
+    }
+
+    fn show_desc(&self) -> bool {
+        false
+    }
+
+    /// 铺满模式：内容区宽度 100% 交给本工具，两个输入框随窗口宽度自动均分。
+    fn full_bleed(&self) -> bool {
+        true
+    }
+
+    fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
+        let theme = shared.theme;
+        self.handle_drops(ui, shared);
+
+        let (lines, stats) = diff::line_diff(&self.left, &self.right);
+        let (left_styles, right_styles) = side_styles(&lines, &theme);
+
+        // 铺满模式下自己负责边距；宽度随窗口变化，两栏始终均分。
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 24,
+                right: 24,
+                top: 12,
+                bottom: 0,
+            })
+            .show(ui, |ui| {
+                let avail_h = ui.available_height();
+
+                // 顶部统计行
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("+{} 新增", stats.added))
+                            .color(theme.ok)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("−{} 删除", stats.removed))
+                            .color(theme.danger)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("={} 未变", stats.unchanged))
+                            .color(theme.muted)
+                            .size(13.0),
+                    );
+                });
+                ui.add_space(10.0);
+
+                // 双栏卡片：同高、铺满剩余高度（同 JSON→YAML 页的布局策略）。
+                let gutter = 16.0;
+                let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（实测约 108），
+                // 底部留和左右一致的 24px 边距，面板高度取精确值。
+                let pin_h = (avail_h - 108.0 - 24.0).max(160.0);
+                // 行数向下取整（内容 ≤ 视口，避免 1-2px 常驻滚动），
+                // 除不尽的余数由 code_area_diff 的 min_inner_h 撑满补齐。
+                let rows = (((pin_h - 28.0) / row_h).floor() as usize).max(6);
+                let min_inner_h = pin_h - 24.0; // 扣掉编辑框上下内边距
+                                                // 载入按钮点击标记：卡片头闭包里不能同时可变借用 self，出布局后统一处理。
+                let mut load_left = false;
+                let mut load_right = false;
+
+                let left_lines = self.left.lines().count();
+                let right_lines = self.right.lines().count();
+                let left_name = self.left_name.clone();
+                let right_name = self.right_name.clone();
+
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+
+                    ui.vertical(|ui| {
+                        ui.set_width(colw);
+                        widgets::panel(
+                            ui,
+                            &theme,
+                            "左侧 · 原始",
+                            |ui| {
+                                if widgets::subtle_button(
+                                    ui,
+                                    &theme,
+                                    Some(icons::FOLDER_OPEN),
+                                    "载入文件",
+                                )
+                                .clicked()
+                                {
+                                    load_left = true;
+                                }
+                                if !left_name.is_empty() {
+                                    ui.label(
+                                        RichText::new(&left_name)
+                                            .size(11.0)
+                                            .color(theme.muted)
+                                            .monospace(),
+                                    );
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(
+                                    RichText::new(format!("{left_lines} 行"))
+                                        .size(11.0)
+                                        .color(theme.faint),
+                                );
+                            },
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("diff-l-sc")
+                                    .min_scrolled_height(pin_h)
+                                    .max_height(pin_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-l",
+                                            &mut self.left,
+                                            rows,
+                                            &left_styles,
+                                            min_inner_h,
+                                        );
+                                    });
+                            },
+                        );
+                    });
+
+                    ui.add_space(gutter);
+
+                    ui.vertical(|ui| {
+                        ui.set_width(colw);
+                        widgets::panel(
+                            ui,
+                            &theme,
+                            "右侧 · 修改后",
+                            |ui| {
+                                if widgets::subtle_button(
+                                    ui,
+                                    &theme,
+                                    Some(icons::FOLDER_OPEN),
+                                    "载入文件",
+                                )
+                                .clicked()
+                                {
+                                    load_right = true;
+                                }
+                                if !right_name.is_empty() {
+                                    ui.label(
+                                        RichText::new(&right_name)
+                                            .size(11.0)
+                                            .color(theme.muted)
+                                            .monospace(),
+                                    );
+                                    ui.add_space(8.0);
+                                }
+                                ui.label(
+                                    RichText::new(format!("{right_lines} 行"))
+                                        .size(11.0)
+                                        .color(theme.faint),
+                                );
+                            },
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("diff-r-sc")
+                                    .min_scrolled_height(pin_h)
+                                    .max_height(pin_h)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-r",
+                                            &mut self.right,
+                                            rows,
+                                            &right_styles,
+                                            min_inner_h,
+                                        );
+                                    });
+                            },
+                        );
+                    });
+                });
+
+                // 卡片头里点了「载入文件」：出布局后统一弹窗读取
+                if load_left {
                     match pick_file() {
                         Ok(Some((n, t))) => {
-                            *text = t;
-                            *name = n;
+                            self.left = t;
+                            self.left_name = n;
                         }
                         Ok(None) => {}
                         Err(e) => shared.toast(format!("读取文件失败：{e}")),
                     }
                 }
-                if !name.is_empty() {
-                    ui.label(RichText::new(name.as_str()).size(11.0).color(theme.muted).monospace());
+                if load_right {
+                    match pick_file() {
+                        Ok(Some((n, t))) => {
+                            self.right = t;
+                            self.right_name = n;
+                        }
+                        Ok(None) => {}
+                        Err(e) => shared.toast(format!("读取文件失败：{e}")),
+                    }
                 }
             });
-        });
-        ui.add_space(4.0);
-        widgets::code_area(ui, id, text, true, 10);
-    }
-}
-
-impl crate::tool::Tool for DiffTool {
-    fn meta(&self) -> crate::tool::ToolMeta {
-        crate::tool::ToolMeta {
-            id: "diff",
-            name: "文本 / 文件对比",
-            group: "对比",
-            desc: "逐行比较两段文本或文件，改动行做字符级高亮。",
-            icon: crate::icons::GIT_COMPARE,
-            keywords: &["diff", "compare", "对比", "比较", "差异"],
-        }
-    }
-
-    fn ui(&mut self, ui: &mut Ui, shared: &mut crate::tool::Shared) {
-        let theme = shared.theme;
-        self.handle_drops(ui, shared);
-
-        ui.label(
-            RichText::new("逐行比较两段内容 —— 每一侧都可以粘贴文本、载入文件，或直接把文件拖进输入框。")
-                .size(12.5)
-                .color(theme.muted),
-        );
-        ui.add_space(10.0);
-
-        // 双栏编辑器
-        ui.columns(2, |cols| {
-            Self::column(&mut cols[0], &theme, "左侧 · 原始", &mut self.left_name, &mut self.left, "diff-l", shared);
-            Self::column(&mut cols[1], &theme, "右侧 · 修改后", &mut self.right_name, &mut self.right, "diff-r", shared);
-        });
-
-        ui.add_space(14.0);
-        let (lines, stats) = diff::line_diff(&self.left, &self.right);
-
-        // 结果块
-        widgets::card(ui, &theme, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("+{} 新增", stats.added)).color(theme.ok).size(13.0).strong());
-                ui.add_space(10.0);
-                ui.label(RichText::new(format!("−{} 删除", stats.removed)).color(theme.danger).size(13.0).strong());
-                ui.add_space(10.0);
-                ui.label(RichText::new(format!("={} 未变", stats.unchanged)).color(theme.muted).size(13.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    legend_swatch(ui, &theme, theme.del_mark, "删除");
-                    legend_swatch(ui, &theme, theme.add_mark, "新增");
-                });
-            });
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            ScrollArea::vertical()
-                .max_height(360.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for line in &lines {
-                        let (bg, sign_col, mark, sign) = row_style(line.tag, &theme);
-                        Frame::NONE
-                            .fill(bg)
-                            .inner_margin(Margin::symmetric(6, 1))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 0.0;
-                                    let ln = |n: Option<usize>| {
-                                        n.map(|v| v.to_string()).unwrap_or_default()
-                                    };
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{:>4} {:>4} ",
-                                            ln(line.left_no),
-                                            ln(line.right_no)
-                                        ))
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(theme.faint),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("{sign} "))
-                                            .monospace()
-                                            .size(12.5)
-                                            .color(sign_col),
-                                    );
-                                    for seg in &line.segs {
-                                        let mut rt = RichText::new(&seg.text)
-                                            .monospace()
-                                            .size(12.5)
-                                            .color(theme.fg);
-                                        if seg.emph {
-                                            rt = rt.background_color(mark);
-                                        }
-                                        ui.label(rt);
-                                    }
-                                });
-                            });
-                    }
-                });
-        });
     }
 
     fn save_draft(&self) -> Option<String> {
@@ -254,17 +365,4 @@ impl crate::tool::Tool for DiffTool {
             self.right_name = d.right_name;
         }
     }
-}
-
-fn legend_swatch(ui: &mut Ui, theme: &Theme, color: Color32, label: &str) {
-    ui.label(RichText::new(label).size(11.5).color(theme.muted));
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-    ui.painter().rect(
-        rect,
-        egui::CornerRadius::same(3),
-        color,
-        Stroke::new(1.0_f32, theme.border_2),
-        egui::StrokeKind::Inside,
-    );
-    ui.add_space(8.0);
 }

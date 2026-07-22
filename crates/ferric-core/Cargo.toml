@@ -19,7 +19,13 @@ rsa = { workspace = true }
 rand = { workspace = true }
 aes = { workspace = true }
 cbc = { workspace = true }
+ecb = { workspace = true }
 des = { workspace = true }
+sm4 = { workspace = true }
+cipher = { workspace = true }
+ctr = { workspace = true }
+cfb-mode = { workspace = true }
+ofb = { workspace = true }
 md-5 = { workspace = true }
 base64 = { workspace = true }
 smcrypto = { workspace = true }
