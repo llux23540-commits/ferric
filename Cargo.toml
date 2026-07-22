@@ -15,8 +15,9 @@ ferric-core = { path = "crates/ferric-core" }
 ferric-ui = { path = "crates/ferric-ui" }
 
 # GUI
-eframe = { version = "0.29", default-features = false, features = ["wgpu", "persistence", "wayland", "x11"] }
-egui = "0.29"
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "persistence", "wayland", "x11"] }
+egui = "0.35"
+egui_json_tree = "0.16"
 
 # Serialization / data
 serde = { version = "1", features = ["derive"] }

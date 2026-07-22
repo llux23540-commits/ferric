@@ -2,14 +2,9 @@
 
 use crate::tool::{Shared, Tool, ToolMeta};
 use crate::{icons, widgets};
-use egui::{
-    vec2, Align2, Color32, FontId, Frame, Margin, RichText, Rounding, ScrollArea, Sense, Stroke,
-    TextWrapMode, Ui,
-};
+use egui::{Frame, Margin, RichText, Stroke, Ui};
 use ferric_core::json::{self, Indent};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashSet;
 
 #[derive(Serialize, Deserialize)]
 struct JsonDraft {
@@ -24,9 +19,6 @@ pub struct JsonTool {
     sort: bool,
     ok: bool,
     status: String,
-    tree: bool,
-    /// 折叠视图中已收起的块路径。
-    collapsed: HashSet<String>,
     undo: Vec<String>,
     redo: Vec<String>,
 }
@@ -39,8 +31,6 @@ impl Default for JsonTool {
             sort: false,
             ok: true,
             status: "就绪".to_owned(),
-            tree: false,
-            collapsed: HashSet::new(),
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -54,7 +44,6 @@ impl JsonTool {
                 self.undo.push(self.input.clone());
                 self.redo.clear();
                 self.input = out;
-                self.collapsed.clear();
                 self.ok = true;
                 self.status = done.to_owned();
             }
@@ -69,7 +58,6 @@ impl JsonTool {
         self.undo.push(self.input.clone());
         self.redo.clear();
         self.input = out;
-        self.collapsed.clear();
         self.ok = true;
         self.status = done.to_owned();
     }
@@ -82,7 +70,6 @@ impl JsonTool {
                 self.undo.push(self.input.clone());
                 self.redo.clear();
                 self.input = out;
-                self.collapsed.clear();
             }
             self.ok = true;
             self.status = "已按新缩进格式化".to_owned();
@@ -92,7 +79,6 @@ impl JsonTool {
     fn undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.input, prev));
-            self.collapsed.clear();
             self.status = "已撤销".to_owned();
         }
     }
@@ -100,7 +86,6 @@ impl JsonTool {
     fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.input, next));
-            self.collapsed.clear();
             self.status = "已重做".to_owned();
         }
     }
@@ -114,18 +99,6 @@ impl JsonTool {
                     }
                     if widgets::tb_icon_btn(ui, theme, icons::WRAP_TEXT, false, false, "压缩为单行").clicked() {
                         self.run_op(json::minify, "已压缩为单行");
-                    }
-                    if widgets::tb_icon_btn(ui, theme, icons::CIRCLE_CHECK, false, false, "校验语法").clicked() {
-                        match json::validate(&self.input) {
-                            Ok(_) => {
-                                self.ok = true;
-                                self.status = "JSON 有效".to_owned();
-                            }
-                            Err(e) => {
-                                self.ok = false;
-                                self.status = format!("解析失败：{e}");
-                            }
-                        }
                     }
                     if widgets::tb_icon_btn(ui, theme, icons::QUOTE, false, false, "转义为 JSON 字符串").clicked() {
                         let out = json::escape(&self.input);
@@ -164,9 +137,6 @@ impl JsonTool {
                         self.sort = !self.sort;
                     }
                     widgets::tb_sep(ui, theme);
-                    if widgets::tb_icon_btn(ui, theme, icons::LIST_TREE, self.tree, false, "折叠视图（点箭头收起/展开）").clicked() {
-                        self.tree = !self.tree;
-                    }
                     if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
                         let out = self.input.clone();
                         shared.copy(ui.ctx(), out);
@@ -216,12 +186,29 @@ impl Tool for JsonTool {
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
 
+        // 实时校验语法：结果直接反映到底部状态条（顶部工具条不再放“校验”按钮）。
+        if self.input.trim().is_empty() {
+            self.ok = true;
+            self.status = "就绪".to_owned();
+        } else {
+            match json::validate(&self.input) {
+                Ok(_) => {
+                    self.ok = true;
+                    self.status = "JSON 有效".to_owned();
+                }
+                Err(e) => {
+                    self.ok = false;
+                    self.status = format!("语法错误：{e}");
+                }
+            }
+        }
+
         // 底部固定一行状态条（自带顶部分割线），其余空间 100% 交给编辑区。
-        egui::TopBottomPanel::bottom("json-status-bar")
-            .exact_height(30.0)
-            .frame(Frame::none().inner_margin(Margin::symmetric(24.0, 0.0)))
+        egui::Panel::bottom("json-status-bar")
+            .exact_size(30.0)
+            .frame(Frame::NONE.inner_margin(Margin::symmetric(24, 0)))
             .show_separator_line(false)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 // 分割线：状态条顶边（横贯整个内容区宽度）
                 let rect = ui.max_rect();
                 let full = egui::Rangef::new(rect.left() - 24.0, rect.right() + 24.0);
@@ -247,27 +234,16 @@ impl Tool for JsonTool {
             });
 
         egui::CentralPanel::default()
-            .frame(Frame::none().inner_margin(Margin {
-                left: 24.0,
-                right: 24.0,
-                top: 10.0,
-                bottom: 10.0,
+            .frame(Frame::NONE.inner_margin(Margin {
+                left: 24,
+                right: 24,
+                top: 10,
+                bottom: 10,
             }))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
+                // 单栏：自研代码编辑器（自由编辑 + 语法高亮；后续叠加折叠）。
                 let editor_h = ui.available_height();
-                if self.tree {
-                    match serde_json::from_str::<Value>(&self.input) {
-                        Ok(v) => {
-                            fold_view(ui, &theme, &v, &mut self.collapsed, editor_h);
-                        }
-                        Err(e) => {
-                            self.ok = false;
-                            ui.colored_label(theme.danger, format!("无法解析为 JSON：{e}"));
-                        }
-                    }
-                } else {
-                    widgets::code_area_seamless(ui, &theme, "json-in", &mut self.input, editor_h);
-                }
+                widgets::code_editor::code_editor(ui, &theme, "json-in", &mut self.input, editor_h);
             });
     }
 
@@ -324,216 +300,6 @@ fn demo_json() -> String {
         root.insert((*g).to_owned(), Value::Object(o2));
     }
     serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
-}
-
-// ---------- 折叠视图（只读、行号 + ▸/▾ 折叠箭头、铺满高度）----------
-
-/// 一段文本的语义类别，用于着色。
-#[derive(Clone, Copy)]
-enum Col {
-    Punct,
-    Key,
-    Str,
-    Num,
-    Bool,
-    Null,
-}
-
-fn seg_color(c: Col, theme: &crate::theme::Theme) -> Color32 {
-    match c {
-        Col::Key => theme.accent_strong,
-        Col::Str => theme.ok,
-        Col::Num => {
-            if theme.dark {
-                Color32::from_rgb(0xe0, 0xb0, 0x62)
-            } else {
-                Color32::from_rgb(0xb0, 0x6f, 0x00)
-            }
-        }
-        Col::Bool => theme.danger,
-        Col::Null | Col::Punct => theme.muted,
-    }
-}
-
-/// 折叠视图的一「行」。
-struct FoldRow {
-    indent: usize,
-    /// `Some(是否已收起)` 表示该行是一个可折叠块的起始行；`None` 为普通行。
-    fold: Option<bool>,
-    /// 可折叠块的稳定路径（用于记忆收起状态）。
-    path: String,
-    segs: Vec<(String, Col)>,
-}
-
-/// 递归把 JSON 展开成「显示行」，遇到已收起的块只输出一行摘要。
-fn build_rows(
-    value: &Value,
-    key: Option<&str>,
-    path: String,
-    indent: usize,
-    trailing: &str,
-    collapsed: &HashSet<String>,
-    out: &mut Vec<FoldRow>,
-) {
-    let mut segs: Vec<(String, Col)> = Vec::new();
-    if let Some(k) = key {
-        segs.push((format!("\"{k}\""), Col::Key));
-        segs.push((": ".to_owned(), Col::Punct));
-    }
-    match value {
-        Value::Object(map) if !map.is_empty() => {
-            if collapsed.contains(&path) {
-                segs.push((format!("{{ … }}{trailing}"), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(true), path, segs });
-            } else {
-                segs.push(("{".to_owned(), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(false), path: path.clone(), segs });
-                let n = map.len();
-                for (i, (k, v)) in map.iter().enumerate() {
-                    let tc = if i + 1 < n { "," } else { "" };
-                    build_rows(v, Some(k), format!("{path}/{k}"), indent + 1, tc, collapsed, out);
-                }
-                out.push(FoldRow {
-                    indent,
-                    fold: None,
-                    path: String::new(),
-                    segs: vec![(format!("}}{trailing}"), Col::Punct)],
-                });
-            }
-        }
-        Value::Array(arr) if !arr.is_empty() => {
-            if collapsed.contains(&path) {
-                segs.push((format!("[ … ]{trailing}"), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(true), path, segs });
-            } else {
-                segs.push(("[".to_owned(), Col::Punct));
-                out.push(FoldRow { indent, fold: Some(false), path: path.clone(), segs });
-                let n = arr.len();
-                for (i, v) in arr.iter().enumerate() {
-                    let tc = if i + 1 < n { "," } else { "" };
-                    build_rows(v, None, format!("{path}/{i}"), indent + 1, tc, collapsed, out);
-                }
-                out.push(FoldRow {
-                    indent,
-                    fold: None,
-                    path: String::new(),
-                    segs: vec![(format!("]{trailing}"), Col::Punct)],
-                });
-            }
-        }
-        Value::Object(_) => {
-            segs.push((format!("{{}}{trailing}"), Col::Punct));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-        Value::Array(_) => {
-            segs.push((format!("[]{trailing}"), Col::Punct));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-        Value::String(s) => {
-            segs.push((format!("\"{s}\"{trailing}"), Col::Str));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-        Value::Number(n) => {
-            segs.push((format!("{n}{trailing}"), Col::Num));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-        Value::Bool(b) => {
-            segs.push((format!("{b}{trailing}"), Col::Bool));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-        Value::Null => {
-            segs.push((format!("null{trailing}"), Col::Null));
-            out.push(FoldRow { indent, fold: None, path, segs });
-        }
-    }
-}
-
-/// 渲染只读折叠视图，铺满 `height`。点行首箭头收起/展开对应块。
-fn fold_view(
-    ui: &mut Ui,
-    theme: &crate::theme::Theme,
-    value: &Value,
-    collapsed: &mut HashSet<String>,
-    height: f32,
-) {
-    let mut rows: Vec<FoldRow> = Vec::new();
-    build_rows(value, None, "$".to_owned(), 0, "", collapsed, &mut rows);
-    let digits = rows.len().to_string().len().max(2);
-
-    let fill = ui.visuals().extreme_bg_color;
-    let border = ui.visuals().window_stroke;
-    let inner_h = (height - 24.0).max(60.0);
-    let font = egui::TextStyle::Monospace.resolve(ui.style());
-
-    let mut toggle: Option<String> = None;
-    Frame::none()
-        .fill(fill)
-        .stroke(border)
-        .rounding(Rounding::same(10.0))
-        .inner_margin(Margin::symmetric(14.0, 12.0))
-        .show(ui, |ui| {
-            ui.set_height(inner_h);
-            let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
-            ScrollArea::vertical()
-                .id_salt("json-fold-sc")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for (i, row) in rows.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            // 行号
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!("{:>digits$} ", i + 1))
-                                        .font(font.clone())
-                                        .color(theme.faint),
-                                )
-                                .wrap_mode(TextWrapMode::Extend)
-                                .selectable(false),
-                            );
-                            // 折叠箭头（固定列，可点）
-                            let (arect, aresp) =
-                                ui.allocate_exact_size(vec2(16.0, row_h), Sense::click());
-                            if let Some(is_col) = row.fold {
-                                let ch = if is_col {
-                                    icons::CHEVRON_RIGHT
-                                } else {
-                                    icons::CHEVRON_DOWN
-                                };
-                                let acol = if aresp.hovered() { theme.fg } else { theme.muted };
-                                ui.painter().text(
-                                    arect.center(),
-                                    Align2::CENTER_CENTER,
-                                    ch,
-                                    FontId::new(13.0, icons::family()),
-                                    acol,
-                                );
-                                if aresp.clicked() {
-                                    toggle = Some(row.path.clone());
-                                }
-                            }
-                            // 缩进
-                            ui.add_space(row.indent as f32 * 14.0);
-                            // 文本段（按类别着色，可选中/复制）
-                            for (t, c) in &row.segs {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(t).font(font.clone()).color(seg_color(*c, theme)),
-                                    )
-                                    .wrap_mode(TextWrapMode::Extend)
-                                    .selectable(true),
-                                );
-                            }
-                        });
-                    }
-                });
-        });
-
-    if let Some(p) = toggle {
-        if !collapsed.remove(&p) {
-            collapsed.insert(p);
-        }
-    }
 }
 
 #[cfg(test)]

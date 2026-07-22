@@ -25,7 +25,7 @@ pub fn handle_resize(ctx: &egui::Context) {
     let Some(pos) = ctx.pointer_hover_pos() else {
         return;
     };
-    let rect = ctx.screen_rect();
+    let rect = ctx.input(|i| i.viewport_rect());
     let b = 6.0;
     let left = pos.x <= rect.left() + b;
     let right = pos.x >= rect.right() - b;
@@ -114,8 +114,7 @@ pub fn title_bar_content(ui: &mut Ui, theme: &Theme) {
     );
 
     // 右侧窗口控制按钮
-    #[allow(deprecated)]
-    ui.allocate_ui_at_rect(rect, |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if win_btn(ui, theme, icons::X, true).clicked() {

@@ -41,10 +41,10 @@ impl Default for TimestampTool {
 
 /// 只读字段样式的展示框 + 复制按钮。
 fn readonly_field(ui: &mut Ui, theme: &crate::theme::Theme, value: &str, placeholder: &str) {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme.code_bg)
-        .rounding(egui::Rounding::same(10.0))
-        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let (txt, col) = if value.is_empty() {

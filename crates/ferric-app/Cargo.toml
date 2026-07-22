@@ -16,7 +16,7 @@ egui = { workspace = true }
 # eframe 0.29 只给 wgpu 开了 metal/webgpu，未开 Windows 的 DX12 后端。
 # 显式启用 dx12（feature 合并到 eframe 共用的 wgpu 构建），
 # 否则在无 Vulkan 驱动 / GL 仅 1.1 的环境（如 QEMU 虚拟机的 WARP 软件渲染）下找不到适配器。
-wgpu = { version = "22", default-features = false, features = ["dx12"] }
+wgpu = { version = "29", default-features = false, features = ["dx12"] }
 
 # 打包配置（cargo-packager）。安装：cargo install cargo-packager
 # 构建产物：cargo packager --release

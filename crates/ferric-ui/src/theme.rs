@@ -1,6 +1,6 @@
 //! 设计令牌（亮 / 暗），精确对齐 Ferric 最新原型（index.html）色板。
 
-use egui::{Color32, Rounding, Stroke, Visuals};
+use egui::{Color32, CornerRadius, Stroke, Visuals};
 
 fn rgb(r: u8, g: u8, b: u8) -> Color32 {
     Color32::from_rgb(r, g, b)
@@ -135,7 +135,7 @@ impl Theme {
         v.widgets.open.bg_fill = self.code_bg;
 
         // 统一控件圆角（输入框 / 下拉 / 按钮）。
-        let r = Rounding::same(8.0);
+        let r = CornerRadius::same(8);
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -143,23 +143,23 @@ impl Theme {
             &mut v.widgets.active,
             &mut v.widgets.open,
         ] {
-            w.rounding = r;
+            w.corner_radius = r;
             w.expansion = 0.0;
         }
-        v.menu_rounding = Rounding::same(10.0);
-        v.window_rounding = Rounding::same(12.0);
+        v.menu_corner_radius = CornerRadius::same(10);
+        v.window_corner_radius = CornerRadius::same(12);
         v.window_stroke = Stroke::new(1.0_f32, self.border_2);
         v.window_fill = self.bg;
         v.popup_shadow = egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 6.0),
-            blur: 18.0,
-            spread: 0.0,
+            offset: [0, 6],
+            blur: 18,
+            spread: 0,
             color: Color32::from_black_alpha(40),
         };
         ctx.set_visuals(v);
 
         // 更舒展的间距。
-        ctx.style_mut(|s| {
+        ctx.all_styles_mut(|s| {
             s.spacing.item_spacing = egui::vec2(8.0, 6.0);
             s.spacing.button_padding = egui::vec2(10.0, 6.0);
             s.spacing.interact_size.y = 30.0;

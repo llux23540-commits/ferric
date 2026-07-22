@@ -3,9 +3,110 @@
 use crate::icons;
 use crate::theme::Theme;
 use egui::{
-    vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Layout, Margin, Response,
-    RichText, Rounding, ScrollArea, Sense, Stroke, TextEdit, Ui,
+    vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Layout, Margin,
+    Response, RichText, CornerRadius, Sense, Stroke, TextEdit, Ui,
 };
+
+pub mod code_editor;
+
+/// JSON 语法高亮：把文本按 token 着色生成 `LayoutJob`（供 TextEdit 的 layouter 使用，
+/// 边编辑边高亮）。键=主色、字符串=绿、数字=琥珀、true/false=红、null/标点=弱色。
+pub(crate) fn json_highlight(text: &str, font_id: &FontId, theme: &Theme) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let num_col = if theme.dark {
+        Color32::from_rgb(0xe0, 0xb0, 0x62)
+    } else {
+        Color32::from_rgb(0xb0, 0x6f, 0x00)
+    };
+    let mut job = LayoutJob::default();
+    let mk = |c: Color32| TextFormat {
+        font_id: font_id.clone(),
+        color: c,
+        ..Default::default()
+    };
+    let b = text.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    let mut run = 0usize; // 待输出的「标点/空白」默认段起点
+    let is_ws = |c: u8| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r';
+    while i < n {
+        let c = b[i];
+        if c == b'"' {
+            if run < i {
+                job.append(&text[run..i], 0.0, mk(theme.muted));
+            }
+            let start = i;
+            i += 1;
+            while i < n {
+                if b[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            let end = i.min(n);
+            let mut k = end;
+            while k < n && is_ws(b[k]) {
+                k += 1;
+            }
+            let is_key = k < n && b[k] == b':';
+            let col = if is_key { theme.accent_strong } else { theme.ok };
+            job.append(&text[start..end], 0.0, mk(col));
+            run = end;
+        } else if c == b'-' || c.is_ascii_digit() {
+            if run < i {
+                job.append(&text[run..i], 0.0, mk(theme.muted));
+            }
+            let start = i;
+            i += 1;
+            while i < n {
+                let d = b[i];
+                if d.is_ascii_digit()
+                    || d == b'.'
+                    || d == b'e'
+                    || d == b'E'
+                    || d == b'+'
+                    || d == b'-'
+                {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            job.append(&text[start..i], 0.0, mk(num_col));
+            run = i;
+        } else if c == b't' || c == b'f' || c == b'l' || c == b'n' {
+            let rest = &text[i..];
+            let (lit, col) = if rest.starts_with("true") || rest.starts_with("false") {
+                (if c == b't' { 4 } else { 5 }, theme.danger)
+            } else if rest.starts_with("null") {
+                (4, theme.muted)
+            } else {
+                (0, theme.muted)
+            };
+            if lit > 0 {
+                if run < i {
+                    job.append(&text[run..i], 0.0, mk(theme.muted));
+                }
+                job.append(&text[i..i + lit], 0.0, mk(col));
+                i += lit;
+                run = i;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if run < n {
+        job.append(&text[run..], 0.0, mk(theme.muted));
+    }
+    job
+}
 
 // ---- 文本标签 ----
 
@@ -85,7 +186,7 @@ fn btn(ui: &mut Ui, theme: &Theme, icon: Option<char>, text: &str, v: Variant) -
             Button::new(label)
                 .fill(fill)
                 .stroke(stroke)
-                .rounding(Rounding::same(10.0))
+                .corner_radius(CornerRadius::same(10))
                 .min_size(desired),
         )
     })
@@ -98,7 +199,7 @@ pub fn icon_btn(ui: &mut Ui, theme: &Theme, ch: char, size: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     if resp.hovered() {
         ui.painter()
-            .rect_filled(rect, Rounding::same(9.0), theme.border);
+            .rect_filled(rect, CornerRadius::same(9), theme.border);
     }
     let color = if resp.hovered() { theme.fg } else { theme.muted };
     ui.painter().text(
@@ -116,10 +217,10 @@ pub fn icon_btn(ui: &mut Ui, theme: &Theme, ch: char, size: f32) -> Response {
 /// 分段控件：返回被点击的新选项索引（未变则 None）。
 pub fn seg(ui: &mut Ui, theme: &Theme, opts: &[&str], selected: usize) -> Option<usize> {
     let mut clicked = None;
-    Frame::none()
+    Frame::NONE
         .fill(theme.code_bg)
-        .rounding(Rounding::same(9.0))
-        .inner_margin(egui::Margin::same(3.0))
+        .corner_radius(CornerRadius::same(9))
+        .inner_margin(egui::Margin::same(3))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.horizontal(|ui| {
@@ -132,7 +233,7 @@ pub fn seg(ui: &mut Ui, theme: &Theme, opts: &[&str], selected: usize) -> Option
                         Button::new(RichText::new(*o).size(13.0).color(col))
                             .fill(fill)
                             .stroke(Stroke::NONE)
-                            .rounding(Rounding::same(7.0))
+                            .corner_radius(CornerRadius::same(7))
                             .min_size(vec2(0.0, 30.0)),
                     );
                     if r.clicked() {
@@ -174,7 +275,7 @@ pub fn pill_toggle(ui: &mut Ui, theme: &Theme, on: bool, label: &str) -> bool {
         Button::new(job)
             .fill(fill)
             .stroke(Stroke::NONE)
-            .rounding(Rounding::same(8.0))
+            .corner_radius(CornerRadius::same(8))
             .min_size(vec2(0.0, 32.0)),
     )
     .clicked()
@@ -192,9 +293,9 @@ pub fn num_field(
     step: i64,
 ) -> bool {
     let mut changed = false;
-    Frame::none()
+    Frame::NONE
         .fill(theme.code_bg)
-        .rounding(Rounding::same(11.0))
+        .corner_radius(CornerRadius::same(11))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.horizontal(|ui| {
@@ -231,7 +332,7 @@ pub fn num_field(
 fn icon_flat(ui: &mut Ui, theme: &Theme, ch: char, w: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, Rounding::ZERO, theme.border);
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.border);
     }
     let color = if resp.hovered() { theme.fg } else { theme.muted };
     ui.painter().text(
@@ -258,11 +359,11 @@ pub fn code_area(
     let fill = ui.visuals().extreme_bg_color;
     let border = ui.visuals().window_stroke; // border_2，很浅
     let accent = ui.visuals().hyperlink_color; // = accent
-    let out = Frame::none()
+    let out = Frame::NONE
         .fill(fill)
         .stroke(border)
-        .rounding(Rounding::same(10.0))
-        .inner_margin(Margin::symmetric(16.0, 12.0)) // 舒适内边距，文字不贴边
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(16, 12)) // 舒适内边距，文字不贴边
         .show(ui, |ui| {
             if editable {
                 ui.add(
@@ -271,7 +372,7 @@ pub fn code_area(
                         .desired_width(f32::INFINITY)
                         .desired_rows(rows)
                         .code_editor()
-                        .frame(false),
+                        .frame(egui::Frame::NONE),
                 )
             } else {
                 // 只读：以不可变缓冲呈现——仍可选中/复制，键入不会改动内容。
@@ -282,7 +383,7 @@ pub fn code_area(
                         .desired_width(f32::INFINITY)
                         .desired_rows(rows)
                         .code_editor()
-                        .frame(false),
+                        .frame(egui::Frame::NONE),
                 )
             }
         });
@@ -302,134 +403,27 @@ pub fn code_area(
     if out.inner.has_focus() {
         ui.painter().rect_stroke(
             out.response.rect,
-            Rounding::same(10.0),
+            CornerRadius::same(10),
             Stroke::new(1.5_f32, accent),
+            egui::StrokeKind::Inside,
         );
     }
     out.inner
 }
 
-/// 无边框贴底编辑区：透明背景直接融入主题背景（亮/暗自动跟随），
-/// 文字用主题前景色（清晰可读），不画卡片框与聚焦环，铺满给定高度，超长时内部滚动。
-/// 左侧带行号栏：按 galley 实际布局逐「逻辑行」编号，折行的续行不编号。
-pub fn code_area_seamless(
-    ui: &mut Ui,
-    theme: &Theme,
-    id: &str,
-    text: &mut String,
-    height: f32,
-) -> Response {
-    let inner_h = height.max(60.0);
-    let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
-    let rows = (inner_h / row_h).floor().max(3.0) as usize;
-
-    // 行号栏宽度：位数 × 字宽 + 右侧间距，随内容行数自适应。
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let num_color = ui.visuals().weak_text_color();
-    let line_count = text.split('\n').count().max(1);
-    let digits = line_count.to_string().len().max(2);
-    let char_w = ui.fonts(|f| f.glyph_width(&font_id, '0'));
-    let gutter_w = char_w * digits as f32 + 12.0;
-
-    let mut out = ScrollArea::vertical()
-        .id_salt(format!("{id}-sc"))
-        .max_height(inner_h)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(gutter_w);
-                let edit = TextEdit::multiline(text)
-                    .id_salt(id)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(rows)
-                    .code_editor()
-                    .text_color(theme.fg)
-                    .frame(false)
-                    .margin(egui::Margin::ZERO)
-                    .show(ui);
-                // 按 galley 实际布局逐「逻辑行」绘制行号：折行的续行不编号，始终对齐。
-                let painter = ui.painter();
-                let nx = edit.galley_pos.x - 6.0; // 数字右缘，贴着文本左侧
-                let mut logical = 1usize;
-                let mut start_line = true;
-                for grow in edit.galley.rows.iter() {
-                    if start_line {
-                        let y = edit.galley_pos.y + grow.rect.min.y;
-                        painter.text(
-                            egui::pos2(nx, y),
-                            Align2::RIGHT_TOP,
-                            logical.to_string(),
-                            font_id.clone(),
-                            num_color,
-                        );
-                        logical += 1;
-                    }
-                    start_line = grow.ends_with_newline;
-                }
-                edit.response
-            })
-            .inner
-        });
-    let resp = out.inner;
-
-    // 拖选超出可视区上/下边缘时自动滚动（egui 原生不支持）：
-    // 超出距离越大滚得越快（约每秒 10 倍超出距离），选区随内容滚动持续扩展。
-    // 注意不能用 resp.dragged()：指针一离开编辑区它就变 false（egui 行为），
-    // 改用「编辑器有焦点 + 左键按住」判定拖选中。
-    let selecting =
-        ui.input(|i| i.pointer.primary_down()) && (resp.dragged() || resp.has_focus());
-    if selecting {
-        if let Some(pos) = ui.ctx().pointer_latest_pos() {
-            let view = out.inner_rect;
-            let overshoot = if pos.y < view.top() {
-                pos.y - view.top()
-            } else if pos.y > view.bottom() {
-                pos.y - view.bottom()
-            } else {
-                0.0
-            };
-            if overshoot != 0.0 {
-                let dt = ui.input(|i| i.stable_dt).min(0.1);
-                // 速度随超出距离增大，保底 60px/s
-                let speed = overshoot.signum() * (overshoot.abs() * 10.0).max(60.0);
-                let max_off = (out.content_size.y - view.height()).max(0.0);
-                let new_y = (out.state.offset.y + speed * dt).clamp(0.0, max_off);
-                if (new_y - out.state.offset.y).abs() > f32::EPSILON {
-                    out.state.offset.y = new_y;
-                    out.state.store(ui.ctx(), out.id);
-                }
-                ui.ctx().request_repaint(); // 指针不动也要持续滚
-            }
-        }
-    }
-    // 首次聚焦时避免“全选默认文本”，但要折叠到**当前光标处（点击落点）**而非文本末尾，
-    // 否则第一次点击会从末尾选到点击处。
-    if resp.gained_focus() {
-        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), resp.id) {
-            if let Some(range) = state.cursor.char_range() {
-                state
-                    .cursor
-                    .set_char_range(Some(egui::text::CCursorRange::one(range.primary)));
-                state.store(ui.ctx(), resp.id);
-            }
-        }
-    }
-    resp
-}
 
 /// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。返回复制点击。
 pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usize) -> bool {
     let mut copied = false;
-    Frame::none()
+    Frame::NONE
         .fill(theme.code_bg)
         .stroke(Stroke::new(1.0_f32, theme.border))
-        .rounding(Rounding::same(12.0))
+        .corner_radius(CornerRadius::same(12))
         .inner_margin(egui::Margin {
-            left: 16.0,
-            right: 44.0,
-            top: 14.0,
-            bottom: 12.0,
+            left: 16,
+            right: 44,
+            top: 14,
+            bottom: 12,
         })
         .show(ui, |ui| {
             let mut owned = text.to_owned();
@@ -444,7 +438,7 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
                     Button::new(icons::text(icons::COPY, 16.0, theme.muted))
                         .fill(theme.field)
                         .stroke(Stroke::new(1.0_f32, theme.border))
-                        .rounding(Rounding::same(8.0)),
+                        .corner_radius(CornerRadius::same(8)),
                 )
                 .clicked()
             {
@@ -459,17 +453,17 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
 /// 圆角卡片：柔和阴影 + 最浅发丝线（不再是明显方框）。
 pub fn card<R>(ui: &mut Ui, theme: &Theme, add: impl FnOnce(&mut Ui) -> R) -> R {
     let shadow = egui::epaint::Shadow {
-        offset: vec2(0.0, 3.0),
-        blur: 16.0,
-        spread: 0.0,
+        offset: [0, 3],
+        blur: 16,
+        spread: 0,
         color: Color32::from_black_alpha(if theme.dark { 55 } else { 16 }),
     };
-    Frame::none()
+    Frame::NONE
         .fill(theme.bg)
         .stroke(Stroke::new(1.0_f32, theme.border))
-        .rounding(Rounding::same(14.0))
+        .corner_radius(CornerRadius::same(14))
         .shadow(shadow)
-        .inner_margin(Margin::same(18.0))
+        .inner_margin(Margin::same(18))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
@@ -489,7 +483,7 @@ pub fn tb_icon_btn(ui: &mut Ui, theme: &Theme, ch: char, active: bool, primary: 
         Color32::TRANSPARENT
     };
     if fill != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, Rounding::same(7.0), fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     }
     let color = if active {
         theme.accent_strong
@@ -523,7 +517,7 @@ pub fn tb_text_btn(ui: &mut Ui, theme: &Theme, label: &str, active: bool, tip: &
         Color32::TRANSPARENT
     };
     if fill != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, Rounding::same(7.0), fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     }
     let color = if active {
         theme.accent_strong

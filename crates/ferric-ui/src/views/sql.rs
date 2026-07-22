@@ -69,12 +69,12 @@ impl Tool for SqlTool {
         ui.add_space(10.0);
 
         // 编辑器（带 SQL 头）
-        Frame::none()
+        Frame::NONE
             .fill(theme.code_bg)
-            .rounding(egui::Rounding::same(12.0))
+            .corner_radius(egui::CornerRadius::same(12))
             .show(ui, |ui| {
-                Frame::none()
-                    .inner_margin(Margin::symmetric(14.0, 8.0))
+                Frame::NONE
+                    .inner_margin(Margin::symmetric(14, 8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(
@@ -84,8 +84,8 @@ impl Tool for SqlTool {
                                 .color(theme.faint),
                         );
                     });
-                Frame::none()
-                    .inner_margin(Margin::same(4.0))
+                Frame::NONE
+                    .inner_margin(Margin::same(4))
                     .show(ui, |ui| {
                         widgets::code_area(ui, "sql-in", &mut self.input, true, 16);
                     });

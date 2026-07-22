@@ -193,9 +193,9 @@ impl crate::tool::Tool for DiffTool {
                 .show(ui, |ui| {
                     for line in &lines {
                         let (bg, sign_col, mark, sign) = row_style(line.tag, &theme);
-                        Frame::none()
+                        Frame::NONE
                             .fill(bg)
-                            .inner_margin(Margin::symmetric(6.0, 1.0))
+                            .inner_margin(Margin::symmetric(6, 1))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.horizontal_wrapped(|ui| {
@@ -261,9 +261,10 @@ fn legend_swatch(ui: &mut Ui, theme: &Theme, color: Color32, label: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
     ui.painter().rect(
         rect,
-        egui::Rounding::same(3.0),
+        egui::CornerRadius::same(3),
         color,
         Stroke::new(1.0_f32, theme.border_2),
+        egui::StrokeKind::Inside,
     );
     ui.add_space(8.0);
 }

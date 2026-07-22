@@ -77,16 +77,16 @@ impl Tool for RegexTool {
         let result = regex::find_all(&self.pattern, &flags, &self.text);
 
         // 模式输入行： /pattern/flags + 状态
-        Frame::none()
+        Frame::NONE
             .fill(theme.code_bg)
-            .rounding(egui::Rounding::same(10.0))
-            .inner_margin(Margin::symmetric(12.0, 6.0))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(12, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("/").monospace().size(16.0).color(theme.faint));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.pattern)
-                            .frame(false)
+                            .frame(egui::Frame::NONE)
                             .desired_width((ui.available_width() - 120.0).max(80.0))
                             .hint_text(r"正则表达式，如 (\w+)@(\w+\.\w+)")
                             .font(egui::TextStyle::Monospace),

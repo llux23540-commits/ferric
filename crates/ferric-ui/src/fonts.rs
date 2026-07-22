@@ -4,6 +4,7 @@
 //! **JetBrains Mono**（等宽）、**Lucide**（图标字体，见 [`crate::icons`]）。
 //! 中文从系统字体加载并作为 UI / 等宽两族的回退。
 
+use std::sync::Arc;
 use egui::{FontData, FontDefinitions, FontFamily};
 
 // 编译期内嵌的设计字体（crates/ferric-ui/assets/fonts）。
@@ -52,32 +53,32 @@ pub fn install_fonts(ctx: &egui::Context) {
 
     fonts
         .font_data
-        .insert("pjs".into(), FontData::from_static(PJS_REGULAR));
+        .insert("pjs".into(), Arc::new(FontData::from_static(PJS_REGULAR)));
     fonts
         .font_data
-        .insert("pjs-med".into(), FontData::from_static(PJS_MEDIUM));
+        .insert("pjs-med".into(), Arc::new(FontData::from_static(PJS_MEDIUM)));
     fonts
         .font_data
-        .insert("pjs-semi".into(), FontData::from_static(PJS_SEMIBOLD));
+        .insert("pjs-semi".into(), Arc::new(FontData::from_static(PJS_SEMIBOLD)));
     fonts
         .font_data
-        .insert("pjs-bold".into(), FontData::from_static(PJS_BOLD));
+        .insert("pjs-bold".into(), Arc::new(FontData::from_static(PJS_BOLD)));
     fonts
         .font_data
-        .insert("jbm".into(), FontData::from_static(JBM_REGULAR));
+        .insert("jbm".into(), Arc::new(FontData::from_static(JBM_REGULAR)));
     fonts
         .font_data
-        .insert("jbm-med".into(), FontData::from_static(JBM_MEDIUM));
+        .insert("jbm-med".into(), Arc::new(FontData::from_static(JBM_MEDIUM)));
     fonts
         .font_data
-        .insert("lucide".into(), FontData::from_static(LUCIDE));
+        .insert("lucide".into(), Arc::new(FontData::from_static(LUCIDE)));
 
     // 系统中文字体作为回退。
     let has_cjk = match load_first_cjk() {
         Some(bytes) => {
             fonts
                 .font_data
-                .insert("cjk".into(), FontData::from_owned(bytes));
+                .insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
             true
         }
         None => false,

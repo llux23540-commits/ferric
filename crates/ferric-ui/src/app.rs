@@ -7,7 +7,7 @@ use crate::tool::{Shared, Tool};
 use crate::{fonts, icons, views, widgets};
 use egui::{
     vec2, Align, Align2, CentralPanel, Color32, FontFamily, FontId, Frame, Key, Layout, Margin,
-    RichText, Rounding, ScrollArea, Sense, SidePanel, Stroke, TopBottomPanel,
+    CornerRadius, Panel, RichText, ScrollArea, Sense, Stroke,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -26,6 +26,8 @@ struct Persist {
     active_id: String,
     #[serde(default)]
     drafts: HashMap<String, String>,
+    #[serde(default)]
+    lang: crate::tool::Lang,
 }
 
 impl Default for Persist {
@@ -36,6 +38,7 @@ impl Default for Persist {
             favorites: Vec::new(),
             active_id: "json".to_owned(),
             drafts: HashMap::new(),
+            lang: crate::tool::Lang::default(),
         }
     }
 }
@@ -85,7 +88,11 @@ impl FerricApp {
             rail_filter: String::new(),
             focus_search: false,
             settings_open: false,
-            shared: Shared::new(theme),
+            shared: {
+                let mut s = Shared::new(theme);
+                s.lang = persist.lang;
+                s
+            },
         }
     }
 
@@ -119,10 +126,10 @@ impl FerricApp {
 
         // 搜索框
         ui.add_space(6.0);
-        Frame::none()
+        Frame::NONE
             .fill(theme.code_bg)
-            .rounding(Rounding::same(11.0))
-            .inner_margin(Margin::symmetric(12.0, 0.0))
+            .corner_radius(CornerRadius::same(11))
+            .inner_margin(Margin::symmetric(12, 0))
             .show(ui, |ui| {
                 ui.set_height(40.0);
                 ui.horizontal_centered(|ui| {
@@ -130,7 +137,7 @@ impl FerricApp {
                     ui.add_space(8.0);
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut self.rail_filter)
-                            .frame(false)
+                            .frame(egui::Frame::NONE)
                             .desired_width(f32::INFINITY)
                             .hint_text(RichText::new("搜索工具…  Ctrl K").color(theme.faint)),
                     );
@@ -143,15 +150,15 @@ impl FerricApp {
         ui.add_space(4.0);
 
         // 底部品牌 / 主题 / 关于 / 设置
-        TopBottomPanel::bottom("rail-foot")
-            .frame(Frame::none().inner_margin(Margin {
-                left: 2.0,
-                right: 2.0,
-                top: 10.0,
-                bottom: 4.0,
+        Panel::bottom("rail-foot")
+            .frame(Frame::NONE.inner_margin(Margin {
+                left: 2,
+                right: 2,
+                top: 10,
+                bottom: 4,
             }))
             .show_separator_line(false)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.painter().hline(
                     ui.max_rect().x_range(),
                     ui.max_rect().top(),
@@ -176,6 +183,22 @@ impl FerricApp {
                     }
                     if widgets::icon_btn(ui, &theme, icons::SETTINGS, 18.0).clicked() {
                         self.settings_open = true;
+                    }
+                    // 语言切换（显示当前语言，点击切换 中/EN）
+                    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
+                    }
+                    let lcol = if resp.hovered() { theme.fg } else { theme.muted };
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        self.shared.lang.short(),
+                        FontId::proportional(13.0),
+                        lcol,
+                    );
+                    if resp.on_hover_text("切换语言 / Language").clicked() {
+                        self.shared.lang = self.shared.lang.toggled();
                     }
                 });
             });
@@ -217,7 +240,7 @@ impl FerricApp {
         // 渐变方块 logo（用 accent 填色近似渐变）
         let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
         ui.painter()
-            .rect_filled(rect, Rounding::same(9.0), theme.accent);
+            .rect_filled(rect, CornerRadius::same(9), theme.accent);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
@@ -277,7 +300,7 @@ impl FerricApp {
             Color32::TRANSPARENT
         };
         if fill != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, Rounding::same(9.0), fill);
+            ui.painter().rect_filled(rect, CornerRadius::same(9), fill);
         }
         let icon_col = if selected { theme.accent } else { theme.muted };
         let text_col = if selected {
@@ -338,7 +361,7 @@ impl FerricApp {
                 ui.add_space(side);
                 let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                 if resp.hovered() {
-                    ui.painter().rect_filled(rect, Rounding::same(9.0), theme.border);
+                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
                 }
                 let hcol = if is_fav {
                     theme.accent
@@ -390,7 +413,7 @@ impl FerricApp {
             ui.horizontal(|ui| {
                 ui.add_space(side);
                 let (bar, _) = ui.allocate_exact_size(vec2(4.0, 34.0), Sense::hover());
-                ui.painter().rect_filled(bar, Rounding::same(3.0), theme.accent);
+                ui.painter().rect_filled(bar, CornerRadius::same(3), theme.accent);
                 ui.add_space(12.0);
                 ui.add(
                     egui::Label::new(RichText::new(meta.desc).size(14.0).color(theme.muted)).wrap(),
@@ -431,11 +454,11 @@ impl FerricApp {
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(
-                Frame::none()
+                Frame::NONE
                     .fill(theme.bg)
                     .stroke(Stroke::new(1.0_f32, theme.border_2))
-                    .rounding(Rounding::same(14.0))
-                    .inner_margin(Margin::same(18.0)),
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(18)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -498,10 +521,10 @@ impl FerricApp {
             egui::Area::new(egui::Id::new("toast"))
                 .anchor(Align2::CENTER_BOTTOM, [0.0, -30.0])
                 .show(ctx, |ui| {
-                    Frame::none()
+                    Frame::NONE
                         .fill(theme.fg)
-                        .rounding(Rounding::same(10.0))
-                        .inner_margin(Margin::symmetric(16.0, 9.0))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(Margin::symmetric(16, 9))
                         .show(ui, |ui| {
                             ui.label(RichText::new(&t.msg).color(theme.bg).size(13.0));
                         });
@@ -559,11 +582,14 @@ impl eframe::App for FerricApp {
             favorites: self.favorites.iter().cloned().collect(),
             active_id: self.tools[self.active].meta().id.to_owned(),
             drafts,
+            lang: self.shared.lang,
         };
         eframe::set_value(storage, eframe::APP_KEY, &persist);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
+        let ctx = &ctx;
         // Ctrl+K 聚焦搜索框
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::K)) {
             self.focus_search = true;
@@ -576,29 +602,29 @@ impl eframe::App for FerricApp {
         chrome::handle_resize(ctx);
 
         let theme = self.shared.theme;
-        let root = Frame::none().fill(theme.bg);
+        let root = Frame::NONE.fill(theme.bg);
 
-        CentralPanel::default().frame(root).show(ctx, |ui| {
-            TopBottomPanel::top("titlebar")
-                .exact_height(TITLE_BAR_HEIGHT)
-                .frame(Frame::none().fill(theme.titlebar))
+        CentralPanel::default().frame(root).show(root_ui, |ui| {
+            Panel::top("titlebar")
+                .exact_size(TITLE_BAR_HEIGHT)
+                .frame(Frame::NONE.fill(theme.titlebar))
                 .show_separator_line(false)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     chrome::title_bar_content(ui, &theme);
                 });
 
-            let rail_resp = SidePanel::left("rail")
+            let rail_resp = Panel::left("rail")
                 .resizable(true)
-                .min_width(RAIL_MIN)
-                .max_width(RAIL_MAX)
-                .default_width(self.rail_width)
+                .min_size(RAIL_MIN)
+                .max_size(RAIL_MAX)
+                .default_size(self.rail_width)
                 .frame(
-                    Frame::none()
+                    Frame::NONE
                         .fill(theme.rail)
-                        .inner_margin(Margin::symmetric(12.0, 6.0)),
+                        .inner_margin(Margin::symmetric(12, 6)),
                 )
                 .show_separator_line(false)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     // 右侧竖分隔线
                     ui.painter().vline(
                         ui.max_rect().right() + 12.0,
@@ -610,18 +636,18 @@ impl eframe::App for FerricApp {
             self.rail_width = rail_resp.response.rect.width();
 
             CentralPanel::default()
-                .frame(Frame::none().fill(theme.bg))
-                .show_inside(ui, |ui| {
-                    TopBottomPanel::top("topbar")
-                        .exact_height(60.0)
-                        .frame(Frame::none().fill(theme.bg))
+                .frame(Frame::NONE.fill(theme.bg))
+                .show(ui, |ui| {
+                    Panel::top("topbar")
+                        .exact_size(60.0)
+                        .frame(Frame::NONE.fill(theme.bg))
                         .show_separator_line(false)
-                        .show_inside(ui, |ui| {
+                        .show(ui, |ui| {
                             self.topbar_ui(ui);
                         });
                     CentralPanel::default()
-                        .frame(Frame::none().fill(theme.bg))
-                        .show_inside(ui, |ui| {
+                        .frame(Frame::NONE.fill(theme.bg))
+                        .show(ui, |ui| {
                             self.content_body(ui);
                         });
                 });

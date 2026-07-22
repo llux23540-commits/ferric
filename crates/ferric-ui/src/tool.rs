@@ -5,6 +5,43 @@
 //! 新增工具 = 加一个 `views/*.rs` + 在 `views::registry()` 注册一行。
 
 use crate::theme::Theme;
+use serde::{Deserialize, Serialize};
+
+/// 界面语言（轻量 i18n）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Lang {
+    #[default]
+    Zh,
+    En,
+}
+
+impl Lang {
+    /// 折叠摘要的「N 节点 / N node(s)」用词（英文含复数）。
+    #[allow(dead_code)]
+    pub fn nodes(self, n: usize) -> String {
+        match self {
+            Lang::Zh => format!("{n} 节点"),
+            Lang::En if n == 1 => "1 node".to_owned(),
+            Lang::En => format!("{n} nodes"),
+        }
+    }
+
+    /// 当前语言的短标签（用于切换按钮）。
+    pub fn short(self) -> &'static str {
+        match self {
+            Lang::Zh => "中",
+            Lang::En => "EN",
+        }
+    }
+
+    /// 切换到另一种语言。
+    pub fn toggled(self) -> Lang {
+        match self {
+            Lang::Zh => Lang::En,
+            Lang::En => Lang::Zh,
+        }
+    }
+}
 
 /// 工具元信息（用于侧栏、搜索、标题）。
 pub struct ToolMeta {
@@ -23,11 +60,13 @@ pub struct Shared {
     pub toasts: Vec<Toast>,
     /// 内容区可用高度（由外壳在进入滚动区前测得，供需要铺满高度的工具使用）。
     pub content_height: f32,
+    /// 界面语言。
+    pub lang: Lang,
 }
 
 impl Shared {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, toasts: Vec::new(), content_height: 0.0 }
+        Self { theme, toasts: Vec::new(), content_height: 0.0, lang: Lang::default() }
     }
 
     /// 弹一条提示。
@@ -38,7 +77,7 @@ impl Shared {
     /// 复制文本到剪贴板并提示。
     pub fn copy(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         let text = text.into();
-        ctx.output_mut(|o| o.copied_text = text);
+        ctx.copy_text(text);
         self.toast("已复制");
     }
 }
