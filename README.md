@@ -23,6 +23,30 @@
 | 国密 SM | SM4 对称、SM2 公钥加解密、SM3 摘要，一键生成 SM2 密钥对 |
 | 正则表达式 | g/i/m/s/x 标志，分组捕获展示，常用语法备忘单 |
 
+## 自动更新与插件市场
+
+客户端可对接 [ferric-server](https://github.com/llux23540/ferric-server)：检查/下载安装包、
+浏览并安装 WASM 插件。**没有 TLS，安全性靠三把独立的锁**，全部在编译期烘进二进制：
+
+| 编译期变量 | 作用 |
+|---|---|
+| `FERRIC_SERVER_URL` | 服务端地址（`…/api/v1`） |
+| `FERRIC_SERVER_PUBKEY` | 传输加密公钥（SM2）。客户端**永不**去 `/crypto/pubkey` 取——那等于让对方自报家门 |
+| `FERRIC_RELEASE_PUBKEY` | 发布验签公钥。私钥永不上服务器，**安装包与插件都必须验签** |
+
+```sh
+FERRIC_SERVER_URL=http://updates.example.com/api/v1 \
+FERRIC_SERVER_PUBKEY=04… FERRIC_RELEASE_PUBKEY=04… \
+  cargo build --release -p ferric-app
+```
+
+三个值缺省时相关功能整体禁用，**绝不回落到「去服务端问公钥」**；未烘入验签公钥的构建
+既装不了更新也装不了插件——无法验证来源时，唯一安全的行为是不装。
+
+插件跑在 wasmtime 沙箱里，但沙箱管的是「能碰到什么」，管不了「算出什么」（一个伪造的
+「加密工具」插件完全可以在沙箱内输出可预测的密文），所以插件与安装包走同一条离线签名链。
+签名清单绑定了 slug，**换个身份重放也不行**。
+
 ## 结构
 
 ```

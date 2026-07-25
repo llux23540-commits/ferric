@@ -71,14 +71,12 @@ impl MarketTool {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ui.ctx().clone();
-        let (slug, ver, sha, size) = (
-            it.slug.clone(),
-            it.version.clone(),
-            it.sha256.clone(),
-            it.size,
-        );
+        // 整条元数据一起搬到后台线程：sha256 / size / 版本 / 签名都要参与校验，
+        // 拆成散字段传迟早会漏掉一个
+        let item = it.clone();
         std::thread::spawn(move || {
-            let r = market::install(&profile, &slug, Some(&ver), &sha, size);
+            let slug = item.slug.clone();
+            let r = market::install(&profile, &item);
             let _ = tx.send(Msg::Installed(slug, r));
             ctx.request_repaint();
         });
@@ -147,7 +145,7 @@ impl Tool for MarketTool {
             id: "market",
             name: "插件市场",
             group: "插件",
-            desc: "浏览并安装 WASM 插件（全程走加密信道，安装前校验 sha256）",
+            desc: "浏览并安装 WASM 插件（全程走加密信道，安装前验离线签名并校验 sha256）",
             icon: icons::BOX,
             keywords: &["plugin", "market", "插件", "市场", "扩展"],
         }
@@ -246,6 +244,15 @@ impl Tool for MarketTool {
                             }
                             (None, _) => {}
                         }
+                        // 未签名的版本装不上（`market::install` 会拒），先在这里说清楚，
+                        // 别让用户点了才知道
+                        if it.signature.trim().is_empty() {
+                            ui.label(
+                                RichText::new("未签名 · 不可安装")
+                                    .size(11.0)
+                                    .color(theme.danger),
+                            );
+                        }
                     });
                     if !it.desc.is_empty() {
                         ui.label(RichText::new(&it.desc).size(11.5).color(theme.faint));
@@ -269,10 +276,13 @@ impl Tool for MarketTool {
                             (Some(_), false) => "重新安装",
                         };
                         let busy = self.loading || self.installing.is_some();
-                        ui.add_enabled_ui(!busy, |ui| {
+                        let installable = !it.signature.trim().is_empty();
+                        ui.add_enabled_ui(!busy && installable, |ui| {
                             if widgets::ghost_button(ui, &theme, label).clicked() {
                                 want_install = Some(it.clone());
                             }
+                        });
+                        ui.add_enabled_ui(!busy, |ui| {
                             if it.installed.is_some()
                                 && widgets::ghost_button(ui, &theme, "卸载").clicked()
                             {

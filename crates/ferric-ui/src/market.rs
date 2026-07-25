@@ -1,15 +1,25 @@
 //! 插件市场：浏览、检查更新、下载安装。
 //!
-//! 与应用自动更新（`updater`）共用同一条信任链：加密信道（`net`）+ 一次性下载票据 +
-//! **sha256 取自加密信道**（绝不用明文的 `X-Sha256` 响应头）。
+//! 与应用自动更新（`updater`）共用**同一条完整信任链**：加密信道（`net`）+ 一次性下载
+//! 票据 + **sha256 取自加密信道**（绝不用明文的 `X-Sha256` 响应头）+ **离线签名**。
 //!
-//! # 与应用安装包的一个区别：插件不做离线签名
+//! # 插件为什么也要验离线签名
 //!
-//! 应用安装包会被原生执行，所以必须验离线签名。插件是 wasm，跑在 wasmtime 沙箱里
-//! —— 无文件、无网络、无系统调用，还有燃料与内存上限（见 `plugin_host` 模块头）——
-//! 爆炸半径小得多，本轮先只做 sha256 校验。
-//! ⚠️ 但这不是「插件绝对安全」：一个恶意插件仍能返回错误的计算结果（比如伪造一个
-//! 「加密工具」给出可预测的输出）。给插件也加签名是明确的后续项。
+//! 沙箱管的是「插件能碰到什么」（无文件、无网络、无系统调用，还有燃料与内存上限，
+//! 见 `plugin_host` 模块头），管不了「插件算出什么」—— 一个恶意的「加密工具」插件
+//! 完全可以在沙箱内规规矩矩地输出可预测的密文。
+//!
+//! 而 sha256 只保证「拿到的确实是服务器库里那个文件」，服务器一旦被拿下，攻击者上传的
+//! 插件同样会让公钥固定 + sha256 + GCM 全部正常通过。所以插件走与安装包相同的离线签名：
+//! 私钥永不上服务器，沦陷后果从「向全网推恶意插件」降级为「拒绝服务」。
+//!
+//! 清单里绑了 slug（见 `release::plugin_signing_payload`），因此**换个身份重放**也不行 ——
+//! 拿「计算器」那份合法签名的 wasm 冒充「加密工具」下发，客户端按 slug 组装的待签字节
+//! 对不上，验签必失败。
+//!
+//! ⚠️ 签名挡不住的是**降级重放**：把某个仍有合法签名的旧版本当成最新版下发。
+//! 插件安装是用户主动发起、版本号就在界面上，加之服务端 `sort_key` 保证 latest 正确，
+//! 这里不额外做本地版本单调性校验（应用更新那边有 `build` 可比，插件没有可信的本地基准）。
 //!
 //! # 版本号从哪来
 //!
@@ -19,6 +29,7 @@
 
 use crate::net::{self, ServerProfile};
 use crate::plugin_host;
+use crate::release;
 use sha2::{Digest, Sha256};
 
 /// 一次能问的插件数上限，与服务端 `CHECK_UPDATES_MAX` 对齐。
@@ -36,6 +47,8 @@ pub struct MarketItem {
     pub api_version: i64,
     pub size: i64,
     pub sha256: String,
+    /// 离线签名（DER hex）。空串 = 服务端未给这个版本背书，本地一律拒绝安装。
+    pub signature: String,
     pub downloads: i64,
     /// 本地已装的版本；None 表示没装
     pub installed: Option<String>,
@@ -80,6 +93,7 @@ pub fn browse(profile: &ServerProfile, query: &str) -> Result<Vec<MarketItem>, S
             api_version: n("api_version"),
             size: n("size"),
             sha256: s("sha256"),
+            signature: s("signature"),
             downloads: n("downloads"),
             slug,
         });
@@ -121,15 +135,14 @@ pub fn check_updates(profile: &ServerProfile) -> Result<Vec<String>, String> {
 
 /// 下载并安装一个插件版本。
 ///
-/// `expect_sha256` 必须来自**加密信道**（列表或 check-updates 的响应），
-/// 绝不能用下载响应里的明文 `X-Sha256` 头 —— 那个头中间人可以连同内容一起改。
-pub fn install(
-    profile: &ServerProfile,
-    slug: &str,
-    version: Option<&str>,
-    expect_sha256: &str,
-    expect_size: i64,
-) -> Result<(), String> {
+/// 全部期望值（sha256 / size / signature / version / api_version）必须来自**加密信道**
+/// （列表或 check-updates 的响应），绝不能用下载响应里的明文 `X-Sha256` 头 ——
+/// 那个头中间人可以连同内容一起改。
+///
+/// 校验顺序：先用离线签名确认「这份元数据是发布者签发的」，再用其中的 sha256
+/// 确认「拿到的字节就是被签的那份」。两步都过才落盘。
+pub fn install(profile: &ServerProfile, it: &MarketItem) -> Result<(), String> {
+    let (slug, expect_sha256, expect_size) = (&it.slug, &it.sha256, it.size);
     if expect_sha256.len() != 64 {
         return Err("服务端未提供有效的 sha256，已中止安装".into());
     }
@@ -137,11 +150,33 @@ pub fn install(
         return Err(format!("插件大小异常：{expect_size} 字节"));
     }
 
-    // 换一次性票据（走加密信道）
-    let mut body = serde_json::json!({ "kind": "plugin", "slug": slug });
-    if let Some(v) = version {
-        body["version"] = serde_json::Value::String(v.to_owned());
+    // 验签放在联网之前：元数据没有背书就没有下载的必要。
+    // 待签字节全部由**本地**按已知字段组装，服务端只提供签名本身 ——
+    // 否则等于让对方自己决定「签的是什么」。
+    let Some(verify_pk) = release::builtin_pubkey() else {
+        return Err("本构建未烘入发布验签公钥，无法验证插件来源，已拒绝安装".into());
+    };
+    if it.signature.trim().is_empty() {
+        return Err(
+            "该插件版本未签名，已拒绝安装（沙箱限制的是能碰到什么，不是能算出什么）".into(),
+        );
     }
+    if it.version.trim().is_empty() {
+        return Err("服务端未提供插件版本号，已中止安装".into());
+    }
+    let payload = release::plugin_signing_payload(
+        slug,
+        &it.version,
+        it.api_version,
+        expect_sha256,
+        expect_size,
+    );
+    release::verify(verify_pk, &it.signature, &payload)
+        .map_err(|e| format!("插件签名校验不通过：{e}"))?;
+
+    // 换一次性票据（走加密信道）。票据绑定到**刚验过签的那个版本号**，
+    // 不给服务端「签的是 A、发的是 B」的空间。
+    let body = serde_json::json!({ "kind": "plugin", "slug": slug, "version": it.version });
     let t =
         net::call(profile, "POST", "/download-ticket", Some(&body)).map_err(|e| e.to_string())?;
     let url = t
@@ -208,21 +243,82 @@ mod tests {
         assert_eq!(urlencode("中"), "%E4%B8%AD");
     }
 
+    /// 造一条元数据齐全的市场条目（签名字段留给各用例自己填）。
+    fn item(sha: &str, size: i64, signature: &str) -> MarketItem {
+        MarketItem {
+            slug: "demo".into(),
+            name: "Demo".into(),
+            desc: String::new(),
+            version: "1.0.0".into(),
+            api_version: 1,
+            size,
+            sha256: sha.into(),
+            signature: signature.into(),
+            downloads: 0,
+            installed: None,
+            has_update: false,
+        }
+    }
+
+    fn unreachable_server() -> ServerProfile {
+        ServerProfile {
+            base_url: "http://127.0.0.1:1".into(), // 故意指向必然连不上的端口
+            pubkey: format!("04{}", "ab".repeat(64)),
+        }
+    }
+
     /// 校验和 / 大小的守卫必须在联网之前就把明显非法的输入挡掉。
     #[test]
     fn install_rejects_bad_metadata_before_network() {
-        let p = ServerProfile {
-            base_url: "http://127.0.0.1:1".into(), // 故意指向必然连不上的端口
-            pubkey: format!("04{}", "ab".repeat(64)),
-        };
+        let p = unreachable_server();
+        let sig = "3045";
         // sha256 长度不对 —— 必须在发起任何请求之前就失败
-        let e = install(&p, "demo", None, "abc", 10).unwrap_err();
+        let e = install(&p, &item("abc", 10, sig)).unwrap_err();
         assert!(e.contains("sha256"), "{e}");
         // 大小非法
-        let e = install(&p, "demo", None, &"a".repeat(64), 0).unwrap_err();
+        let e = install(&p, &item(&"a".repeat(64), 0, sig)).unwrap_err();
         assert!(e.contains("大小"), "{e}");
-        let e = install(&p, "demo", None, &"a".repeat(64), 99_000_000).unwrap_err();
+        let e = install(&p, &item(&"a".repeat(64), 99_000_000, sig)).unwrap_err();
         assert!(e.contains("大小"), "{e}");
+    }
+
+    /// 未签名的版本必须在**联网之前**就被拒 —— 不下载、不落盘。
+    ///
+    /// 这条挡的是「服务器被拿下后直接上架一个没有背书的恶意插件」：
+    /// 那种包的 sha256 与传输加密全都是对的，只有签名给不出来。
+    #[test]
+    fn install_refuses_unsigned_plugin() {
+        let p = unreachable_server();
+        let e = install(&p, &item(&"a".repeat(64), 100, "")).unwrap_err();
+        // 没烘入验签公钥的构建同样必须拒绝，只是理由不同 —— 两种都绝不能放行
+        assert!(
+            e.contains("未签名") || e.contains("未烘入"),
+            "未签名的插件必须被拒绝：{e}"
+        );
+        assert!(!e.contains("连接"), "必须在联网之前就拒绝：{e}");
+    }
+
+    /// 签名对不上必须拒绝，且待签字节由**本地**组装（服务端只能给签名本体）。
+    #[test]
+    fn install_rejects_signature_for_another_plugin() {
+        use libsm::sm2::signature::SigCtx;
+        let Some(builtin) = release::builtin_pubkey() else {
+            eprintln!("跳过：本构建未烘入验签公钥");
+            return;
+        };
+        let ctx = SigCtx::new();
+        let (pk, sk) = ctx.new_keypair().unwrap();
+        // 这把密钥不是烘入的那把 —— 相当于攻击者自签
+        assert_ne!(
+            hex::encode(ctx.serialize_pubkey(&pk, false).unwrap()),
+            builtin
+        );
+        let sha = "a".repeat(64);
+        let payload = release::plugin_signing_payload("demo", "1.0.0", 1, &sha, 100);
+        let sig = hex::encode(ctx.sign(&payload, &sk, &pk).unwrap().der_encode());
+
+        let e = install(&unreachable_server(), &item(&sha, 100, &sig)).unwrap_err();
+        assert!(e.contains("签名"), "自签的插件必须被拒绝：{e}");
     }
 }
 
@@ -259,9 +355,13 @@ mod e2e {
         );
         assert!(it.installed.is_none(), "起始状态应为未安装");
         assert_eq!(it.api_version, ferric_core::plugin::API_VERSION as i64);
+        assert!(
+            !it.signature.is_empty(),
+            "上架的插件必须带离线签名，否则客户端一律拒装"
+        );
 
-        // 安装：换票 → 下载 → sha256 校验 → wasm 魔数 → 落盘
-        install(&profile, &it.slug, Some(&it.version), &it.sha256, it.size).expect("安装失败");
+        // 安装：验签 → 换票 → 下载 → sha256 校验 → wasm 魔数 → 落盘
+        install(&profile, it).expect("安装失败");
 
         // 必须固定写成 <slug>.wasm，否则 load_all 的字典序陷阱会让旧版赢
         let path = plugin_host::plugins_dir().unwrap().join("url-codec.wasm");
@@ -292,12 +392,35 @@ mod e2e {
             "刚装的就是最新版，不该报有更新：{updatable:?}"
         );
 
-        // sha256 对不上必须拒绝（把 sha 改一位）
+        // sha256 对不上必须拒绝（把 sha 改一位）。
+        // 注意此时**先挂掉的是验签** —— 签名覆盖了 sha256，改一位签名就对不上了，
+        // 这正是我们要的：篡改在联网之前就被发现。
         let mut bad = it.sha256.clone();
         let last = bad.pop().unwrap();
         bad.push(if last == 'a' { 'b' } else { 'a' });
-        let e = install(&profile, &it.slug, Some(&it.version), &bad, it.size).unwrap_err();
-        assert!(e.contains("校验失败"), "sha256 不符必须拒绝：{e}");
+        let e = install(
+            &profile,
+            &MarketItem {
+                sha256: bad,
+                ..it.clone()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("签名") || e.contains("校验失败"),
+            "篡改必须拒绝：{e}"
+        );
+
+        // 冒名顶替：拿这个版本的合法签名去装成另一个 slug —— 清单绑了 slug，必须失败
+        let e = install(
+            &profile,
+            &MarketItem {
+                slug: "not-url-codec".into(),
+                ..it.clone()
+            },
+        )
+        .unwrap_err();
+        assert!(e.contains("签名"), "换 slug 必须验签失败：{e}");
 
         let _ = plugin_host::uninstall("url-codec");
         eprintln!("插件市场全链路通过");

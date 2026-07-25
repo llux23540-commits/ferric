@@ -23,6 +23,10 @@ use libsm::sm2::signature::{SigCtx, Signature};
 /// 否则新旧两端会各自算出不同的字节而谁也验不过谁。
 pub const PAYLOAD_TAG: &str = "ferric-update-v1";
 
+/// 插件清单的格式版本。**与安装包用不同的前缀**，这是刻意的域分离：两种清单进的是
+/// 同一把密钥，前缀不同才能保证一份签名不可能被搬去冒充另一种用途。
+pub const PLUGIN_PAYLOAD_TAG: &str = "ferric-plugin-v1";
+
 /// 组装待签字节。字段顺序、分隔符、行尾换行全部固定，无任何空白容错。
 pub fn signing_payload(
     version: &str,
@@ -38,8 +42,30 @@ pub fn signing_payload(
     .into_bytes()
 }
 
+/// 组装插件的待签字节。与服务端 `plugin_signing_payload` 逐字节等价。
+///
+/// # 为什么 slug 必须进清单
+///
+/// 插件固定装成 `<slug>.wasm`，**slug 决定了这份 wasm 顶替谁**。清单不绑 slug 的话，
+/// 一个被拿下的服务器就能把「计算器」那份合法签名的 wasm 当成「加密工具」下发 ——
+/// sha256、大小、签名全都对得上，装完却是另一个模块在处理你的密钥。
+///
+/// api_version 同理：它决定宿主加不加载这个模块。
+pub fn plugin_signing_payload(
+    slug: &str,
+    version: &str,
+    api_version: i64,
+    sha256: &str,
+    size: i64,
+) -> Vec<u8> {
+    format!(
+        "{PLUGIN_PAYLOAD_TAG}\nslug={slug}\nversion={version}\napi_version={api_version}\nsha256={sha256}\nsize={size}\n"
+    )
+    .into_bytes()
+}
+
 /// 编译期烘入的发布验签公钥（见 `build.rs`）。未配置则返回 None，
-/// 此时更新流程会拒绝执行任何安装包。
+/// 此时更新流程会拒绝执行任何安装包、插件市场也会拒绝安装。
 pub fn builtin_pubkey() -> Option<&'static str> {
     let k = env!("FERRIC_RELEASE_PUBKEY").trim();
     (!k.is_empty()).then_some(k)
@@ -81,6 +107,53 @@ mod tests {
             String::from_utf8(p).unwrap(),
             "ferric-update-v1\nversion=0.6.0\nbuild=60\nplatform=windows\narch=x86_64\nsha256=abc123\nsize=1024\n"
         );
+    }
+
+    /// 跨仓库的锚（插件版）：服务端有同名测试断言完全相同的字节。
+    #[test]
+    fn plugin_signing_payload_is_byte_exact() {
+        let p = plugin_signing_payload("url-codec", "1.2.0", 1, "abc123", 2048);
+        assert_eq!(
+            String::from_utf8(p).unwrap(),
+            "ferric-plugin-v1\nslug=url-codec\nversion=1.2.0\napi_version=1\nsha256=abc123\nsize=2048\n"
+        );
+    }
+
+    /// 一份插件签名不能被搬去冒充安装包签名（反之亦然）。
+    #[test]
+    fn plugin_and_app_payloads_are_domain_separated() {
+        assert_ne!(PAYLOAD_TAG, PLUGIN_PAYLOAD_TAG);
+        let ctx = SigCtx::new();
+        let (pk, sk) = ctx.new_keypair().unwrap();
+        let pk_hex = hex::encode(ctx.serialize_pubkey(&pk, false).unwrap());
+
+        let plugin = plugin_signing_payload("demo", "1.0.0", 1, "aa", 1);
+        let sig = hex::encode(ctx.sign(&plugin, &sk, &pk).unwrap().der_encode());
+        assert!(verify(&pk_hex, &sig, &plugin).is_ok());
+        // 同一把密钥签的插件清单，拿去当安装包签名必须验不过
+        let app = signing_payload("1.0.0", 1, "windows", "x86_64", "aa", 1);
+        assert!(verify(&pk_hex, &sig, &app).is_err());
+    }
+
+    /// slug 换一个签名就必须失效 —— 这条挡的是「A 插件的包冒充 B 插件」。
+    #[test]
+    fn plugin_signature_is_bound_to_slug_and_version() {
+        let ctx = SigCtx::new();
+        let (pk, sk) = ctx.new_keypair().unwrap();
+        let pk_hex = hex::encode(ctx.serialize_pubkey(&pk, false).unwrap());
+        let payload = plugin_signing_payload("calc", "1.0.0", 1, "deadbeef", 42);
+        let sig = hex::encode(ctx.sign(&payload, &sk, &pk).unwrap().der_encode());
+
+        assert!(verify(&pk_hex, &sig, &payload).is_ok());
+        for other in [
+            plugin_signing_payload("crypto-tool", "1.0.0", 1, "deadbeef", 42),
+            plugin_signing_payload("calc", "2.0.0", 1, "deadbeef", 42),
+            plugin_signing_payload("calc", "1.0.0", 2, "deadbeef", 42),
+            plugin_signing_payload("calc", "1.0.0", 1, "cafebabe", 42),
+            plugin_signing_payload("calc", "1.0.0", 1, "deadbeef", 43),
+        ] {
+            assert!(verify(&pk_hex, &sig, &other).is_err(), "改任一字段必须失效");
+        }
     }
 
     #[test]

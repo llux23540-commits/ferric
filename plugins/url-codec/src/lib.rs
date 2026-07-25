@@ -7,6 +7,10 @@
 //!
 //! ⚠️ MANIFEST 里的 `id` 必须与市场里的 slug 一致（宿主安装时固定写成 `<id>.wasm`），
 //! `version` 要与上架时提交的版本号一致，否则更新检查会一直认为「有新版」。
+//!
+//! 从市场安装时，客户端会先验**离线签名**：签名清单绑定了 slug / version / api_version /
+//! sha256 / size，任一处与这里的 MANIFEST 对不上，签名就发不出来或验不过 ——
+//! 所以上架前请确认三者一致（见服务端 `release-sign sign-plugin`）。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
