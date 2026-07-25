@@ -17,7 +17,18 @@ pub const API_VERSION: u32 = 1;
 pub struct Manifest {
     pub api_version: u32,
     /// 唯一 id（ASCII 字母数字 / `-` / `_`），用于草稿、收藏等持久化键。
+    ///
+    /// **同时也是插件市场里的 slug**：宿主安装插件时固定写成 `<id>.wasm`，
+    /// 更新检查也用它向服务端提问。两者必须一致，否则装完认不出是同一个插件。
     pub id: String,
+    /// 插件自身的语义版本号（如 `1.2.0`）。
+    ///
+    /// 加了 `serde(default)`，所以**老插件不带这个字段也能正常加载**，只是版本为空串 ——
+    /// 这正好对应服务端 `check-updates` 的约定「读不出来时传空串，一律按有更新处理」。
+    /// 版本号写在 wasm 内部而不是文件名/旁挂文件，是为了让它和代码物理绑定，
+    /// 不可能出现「文件说是 1.2.0、里面其实是 1.0.0」这种不一致。
+    #[serde(default)]
+    pub version: String,
     pub name: String,
     #[serde(default = "default_group")]
     pub group: String,
@@ -99,6 +110,20 @@ impl Manifest {
         if self.name.trim().is_empty() {
             return Err("name 不能为空".into());
         }
+        // 版本号可以不填（老插件），但填了就得像个版本号 —— 服务端上架时要求合法
+        // semver，这里只做轻量形状检查，避免为此引入 semver 依赖。
+        if !self.version.is_empty() {
+            let v = self.version.trim();
+            let shape_ok = v.split('.').count() >= 3
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+                && v.starts_with(|c: char| c.is_ascii_digit());
+            if !shape_ok {
+                return Err(format!(
+                    "version 须为 semver 形式（如 1.2.0），当前为「{v}」"
+                ));
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for o in &self.options {
             if o.key().is_empty() {
@@ -166,6 +191,35 @@ mod tests {
         assert!(m.validate().is_ok());
         assert_eq!(m.group, "插件"); // 默认分组
         assert_eq!(m.options.len(), 3);
+    }
+
+    /// 老插件（manifest 里没有 version）必须照常加载 —— 这是加字段时最重要的兼容性保证。
+    #[test]
+    fn legacy_manifest_without_version_still_loads() {
+        let m: Manifest =
+            serde_json::from_str(r#"{"api_version":1,"id":"legacy","name":"老插件"}"#)
+                .expect("缺 version 字段必须能解析");
+        assert_eq!(m.version, "", "缺省为空串，服务端据此按「有更新」处理");
+        m.validate().expect("空版本号必须校验通过");
+    }
+
+    /// 填了版本号就得像个版本号，避免上架时才被服务端拒。
+    #[test]
+    fn version_shape_is_checked_when_present() {
+        let mk = |v: &str| -> Manifest {
+            serde_json::from_str(&format!(
+                r#"{{"api_version":1,"id":"x","name":"x","version":"{v}"}}"#
+            ))
+            .unwrap()
+        };
+        for good in ["1.2.0", "0.0.1", "1.2.3-rc.1", "10.20.30"] {
+            mk(good)
+                .validate()
+                .unwrap_or_else(|e| panic!("{good} 应通过：{e}"));
+        }
+        for bad in ["v1.2.0", "1.2", "latest", "nightly", "-1.0.0"] {
+            assert!(mk(bad).validate().is_err(), "{bad} 应被拒");
+        }
     }
 
     #[test]

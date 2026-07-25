@@ -6,9 +6,13 @@ mod app;
 mod chrome;
 mod fonts;
 mod icons;
+mod market;
+mod net;
 mod plugin_host;
+mod release;
 mod theme;
 mod tool;
+mod updater;
 mod views;
 mod widgets;
 

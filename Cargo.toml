@@ -52,6 +52,18 @@ smcrypto = "0.3"
 # Platform
 directories = "5"
 
+# 自动更新：与服务端 ferric-server 走同一套国密传输加密。
+# 刻意选 libsm 而不是复用已有的 smcrypto —— 服务端用的就是 libsm，同库同线格式，
+# 三个跨实现的坑（C1C2C3 顺序、C1 的 04 前缀、16 字节 IV）直接不存在。
+# ⚠️ 二进制里因此同时存在 smcrypto（GM 工具视图）与 libsm（传输层），两者默认线格式不兼容，
+#    别为了「统一一下」把传输层换掉 —— 换了就静默打断协议。
+libsm = "0.6"
+# 阻塞式 HTTP，契合既有的「后台线程 + mpsc」模式，不引入 async runtime。
+# tls feature 走 rustls（不依赖系统 OpenSSL，交叉编译到 aarch64-pc-windows-msvc 不会踩 openssl-sys）。
+ureq = { version = "2", default-features = false, features = ["tls"] }
+sha2 = "0.10"
+hex = "0.4"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

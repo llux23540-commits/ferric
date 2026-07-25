@@ -4,6 +4,7 @@ mod crypto;
 mod diff;
 mod gm;
 mod json;
+mod market;
 mod regex;
 mod rsa;
 mod sql;
@@ -26,5 +27,6 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         Box::new(crypto::CryptoTool::default()),
         Box::new(gm::GmTool::default()),
         Box::new(regex::RegexTool::default()),
+        Box::new(market::MarketTool::default()),
     ]
 }

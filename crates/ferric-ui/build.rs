@@ -34,4 +34,35 @@ fn main() {
         }
     }
     println!("cargo:rerun-if-changed=Cargo.toml");
+
+    bake_update_pins();
+}
+
+/// 把「更新服务器身份」烘进二进制。
+///
+/// 这是「怎么保证调用的是我指定的服务」的地基：客户端**永远不会**去
+/// `/api/v1/crypto/pubkey` 取公钥（那样等于让对方自报家门），只用这里烘进来的值。
+/// 只有真服务端的私钥能解开客户端生成的会话密钥，因而只有它能产出通过 SM4-GCM
+/// 校验的响应 —— 假服务器只能造成拒绝服务，无法冒充。
+///
+/// 三个值都为空时，更新功能整体禁用（UI 会明说「本构建未配置更新服务器」），
+/// **绝不回落到「去服务端问公钥」**。
+///
+/// 发布构建示例：
+/// ```text
+/// FERRIC_SERVER_URL=http://updates.example.com/api/v1 \
+/// FERRIC_SERVER_PUBKEY=04ab… FERRIC_RELEASE_PUBKEY=04cd… cargo build --release
+/// ```
+fn bake_update_pins() {
+    for key in [
+        "FERRIC_SERVER_URL",
+        "FERRIC_SERVER_PUBKEY",
+        "FERRIC_RELEASE_PUBKEY",
+    ] {
+        // 没有这一行，改了环境变量重新编译不会重跑 build.rs，
+        // 二进制里会静默保留上一次的值——属于「发布了才发现」的坑。
+        println!("cargo:rerun-if-env-changed={key}");
+        let v = std::env::var(key).unwrap_or_default();
+        println!("cargo:rustc-env={key}={}", v.trim());
+    }
 }

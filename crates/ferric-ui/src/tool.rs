@@ -62,11 +62,20 @@ pub struct Shared {
     pub content_height: f32,
     /// 界面语言。
     pub lang: Lang,
+    /// 当前生效的更新/插件服务器（地址 + 固定公钥）。None = 本构建未配置。
+    /// 由外壳每帧写入，供插件市场视图使用。
+    pub server: Option<crate::net::ServerProfile>,
 }
 
 impl Shared {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, toasts: Vec::new(), content_height: 0.0, lang: Lang::default() }
+        Self {
+            theme,
+            toasts: Vec::new(),
+            content_height: 0.0,
+            lang: Lang::default(),
+            server: None,
+        }
     }
 
     /// 弹一条提示。

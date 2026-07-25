@@ -6,8 +6,8 @@ use crate::theme::Theme;
 use crate::tool::{Shared, Tool};
 use crate::{fonts, icons, views, widgets};
 use egui::{
-    vec2, Align, Align2, CentralPanel, Color32, FontFamily, FontId, Frame, Key, Layout, Margin,
-    CornerRadius, Panel, RichText, ScrollArea, Sense, Stroke,
+    vec2, Align, Align2, CentralPanel, Color32, CornerRadius, FontFamily, FontId, Frame, Key,
+    Layout, Margin, Panel, RichText, ScrollArea, Sense, Stroke,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -38,6 +38,13 @@ struct Persist {
     drafts: HashMap<String, String>,
     #[serde(default)]
     lang: crate::tool::Lang,
+    /// 自定义更新服务器（地址 + 公钥**作为整体**存取，禁止只改其一）。
+    /// None = 用编译期烘入的默认服务器。
+    ///
+    /// ⚠️ 这个 ron 文件是当前用户可写的，任何同用户进程都能静默改写它 ——
+    /// 所以一旦不是内置服务器，自动安装会被禁用（降级为仅通知），且 UI 挂持久告警。
+    #[serde(default)]
+    server: Option<crate::net::ServerProfile>,
 }
 
 impl Default for Persist {
@@ -50,6 +57,7 @@ impl Default for Persist {
             active_id: "json".to_owned(),
             drafts: HashMap::new(),
             lang: crate::tool::Lang::default(),
+            server: None,
         }
     }
 }
@@ -64,6 +72,11 @@ pub struct FerricApp {
     rail_filter: String,
     focus_search: bool,
     settings_open: bool,
+    /// 自定义更新服务器；None 表示用内置的
+    server_override: Option<crate::net::ServerProfile>,
+    /// 设置页里正在编辑的服务器草稿（未点「应用」前不生效）
+    server_draft: Option<(String, String)>,
+    updater: crate::updater::Updater,
     shared: Shared,
 }
 
@@ -90,6 +103,9 @@ impl FerricApp {
         };
         let theme = Theme::from_dark(dark);
         theme.apply(&cc.egui_ctx);
+
+        // 清掉上次遗留的更新暂存目录 —— 留在盘上的旧安装包本身就是个可被替换的靶子
+        crate::updater::cleanup_stale();
 
         let mut tools = views::registry();
         // WASM 插件：内置工具之后追加（加载失败只提示，不影响启动）
@@ -124,8 +140,26 @@ impl FerricApp {
             rail_filter: String::new(),
             focus_search: false,
             settings_open: false,
+            server_override: persist.server,
+            server_draft: None,
+            updater: crate::updater::Updater::default(),
             shared,
         }
+    }
+
+    /// 当前生效的更新服务器。None = 本构建未配置（更新功能整体禁用，
+    /// **绝不回落到「去问服务端要公钥」**，那等于让对方自报家门）。
+    fn server_profile(&self) -> Option<crate::net::ServerProfile> {
+        self.server_override
+            .clone()
+            .or_else(crate::net::ServerProfile::builtin)
+    }
+
+    /// 是不是编译期烘入的那个服务器。不是的话自动安装会被禁用。
+    fn server_is_builtin(&self) -> bool {
+        self.server_override
+            .as_ref()
+            .map_or(true, |p| p.is_builtin())
     }
 
     fn set_mode(&mut self, ctx: &egui::Context, mode: ThemeMode) {
@@ -248,9 +282,14 @@ impl FerricApp {
                     // 语言切换（显示当前语言，点击切换 中/EN）
                     let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                     if resp.hovered() {
-                        ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::same(9), theme.border);
                     }
-                    let lcol = if resp.hovered() { theme.fg } else { theme.muted };
+                    let lcol = if resp.hovered() {
+                        theme.fg
+                    } else {
+                        theme.muted
+                    };
                     ui.painter().text(
                         rect.center(),
                         Align2::CENTER_CENTER,
@@ -439,7 +478,8 @@ impl FerricApp {
                 ui.add_space(side);
                 let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                 if resp.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(9), theme.border);
                 }
                 let hcol = if is_fav {
                     theme.accent
@@ -491,7 +531,8 @@ impl FerricApp {
             ui.horizontal(|ui| {
                 ui.add_space(side);
                 let (bar, _) = ui.allocate_exact_size(vec2(4.0, 34.0), Sense::hover());
-                ui.painter().rect_filled(bar, CornerRadius::same(3), theme.accent);
+                ui.painter()
+                    .rect_filled(bar, CornerRadius::same(3), theme.accent);
                 ui.add_space(12.0);
                 ui.add(
                     egui::Label::new(RichText::new(meta.desc).size(14.0).color(theme.muted)).wrap(),
@@ -624,6 +665,8 @@ impl FerricApp {
                         }
                     });
                 });
+                ui.separator();
+                self.update_settings_ui(ui);
                 ui.add_space(10.0);
                 ui.label(
                     RichText::new(concat!(
@@ -631,7 +674,9 @@ impl FerricApp {
                         env!("CARGO_PKG_VERSION"),
                         ".",
                         env!("FERRIC_BUILD_NUMBER"),
-                        " · 全部数据仅存于本机，不上传"
+                        // 接入自动更新后，「不上传」不再成立：检查更新会把本机版本号
+                        // 发给更新服务器。文案要如实，不能留一句已经不真的宣称。
+                        " · 工具数据仅存于本机；仅检查更新时联网"
                     ))
                     .family(FontFamily::Monospace)
                     .size(11.0)
@@ -639,6 +684,227 @@ impl FerricApp {
                 );
             });
         self.settings_open = open;
+    }
+
+    /// 设置弹窗里的「软件更新」区块。
+    ///
+    /// 这里刻意把**服务器身份**摊开给用户看（地址 + 公钥指纹），因为自定义服务器的
+    /// 配置存在用户可写的 ron 文件里、能被同用户的恶意进程静默改写 —— 可见性是用户
+    /// 发现这件事的唯一途径。同理，非内置服务器时自动安装会被禁用。
+    fn update_settings_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::updater::Phase;
+        let theme = self.shared.theme;
+
+        let Some(profile) = self.server_profile() else {
+            widgets::field_label(ui, &theme, "软件更新");
+            ui.label(
+                RichText::new("本构建未配置更新服务器，自动更新不可用")
+                    .size(11.5)
+                    .color(theme.faint),
+            );
+            return;
+        };
+        let builtin = self.server_is_builtin();
+
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "软件更新");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let busy = self.updater.busy();
+                ui.add_enabled_ui(!busy, |ui| {
+                    if widgets::ghost_button(ui, &theme, "检查更新").clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.updater.check(profile.clone(), &ctx);
+                    }
+                });
+                if self.server_override.is_some()
+                    && widgets::ghost_button(ui, &theme, "恢复默认服务器").clicked()
+                {
+                    // 恢复默认必须同时重置地址与公钥 —— 它们是一个整体
+                    self.server_override = None;
+                    self.updater.phase = Phase::Idle;
+                    self.shared.toast("已恢复内置更新服务器");
+                }
+            });
+        });
+
+        // 服务器身份：地址 + 公钥指纹。指纹便于口头核对。
+        ui.label(
+            RichText::new(format!("服务器  {}", profile.base_url))
+                .family(FontFamily::Monospace)
+                .size(10.5)
+                .color(theme.faint),
+        );
+        ui.label(
+            RichText::new(format!("公钥指纹 {}", profile.fingerprint()))
+                .family(FontFamily::Monospace)
+                .size(10.5)
+                .color(if builtin { theme.faint } else { theme.danger }),
+        );
+        if !builtin {
+            ui.label(
+                RichText::new("⚠ 更新源已被修改，自动安装已禁用（只会提示新版本）")
+                    .size(11.0)
+                    .color(theme.danger),
+            );
+        }
+
+        // 上次成功检查时间：长期检查不成功要让用户看见 ——
+        // 这是对抗「中间人直接丢包压制更新」的唯一手段。
+        match self.updater.last_ok {
+            Some(t) => {
+                let days = t.elapsed().map(|d| d.as_secs() / 86400).unwrap_or(0);
+                let txt = if days == 0 {
+                    "上次成功检查：今天".to_owned()
+                } else {
+                    format!("上次成功检查：{days} 天前")
+                };
+                ui.label(RichText::new(txt).size(11.0).color(if days >= 14 {
+                    theme.danger
+                } else {
+                    theme.faint
+                }));
+            }
+            None => {
+                ui.label(
+                    RichText::new("尚未成功检查过更新")
+                        .size(11.0)
+                        .color(theme.faint),
+                );
+            }
+        }
+
+        // 自定义更新服务器。地址与公钥**一起改**，禁止只改其一 ——
+        // 「只把地址指向我的服务器」是最省事的一种攻击，数据结构上就不让它成立。
+        ui.collapsing(
+            RichText::new("自定义更新服务器")
+                .size(11.5)
+                .color(theme.faint),
+            |ui| {
+                let (url, key) = self
+                    .server_draft
+                    .get_or_insert_with(|| (profile.base_url.clone(), profile.pubkey.clone()));
+                ui.label(RichText::new("服务器地址").size(10.5).color(theme.faint));
+                ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY));
+                ui.label(
+                    RichText::new("SM2 公钥（04 开头 130 个 hex 字符，须完整粘贴）")
+                        .size(10.5)
+                        .color(theme.faint),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(key)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal(|ui| {
+                    if widgets::ghost_button(ui, &theme, "应用").clicked() {
+                        let candidate = crate::net::ServerProfile {
+                            base_url: url.trim().to_owned(),
+                            pubkey: key.split_whitespace().collect::<String>(),
+                        };
+                        match candidate.validate() {
+                            Ok(()) => {
+                                let is_builtin = candidate.is_builtin();
+                                self.server_override = (!is_builtin).then_some(candidate);
+                                self.updater.phase = Phase::Idle;
+                                self.shared.toast(if is_builtin {
+                                    "与内置服务器一致，已按内置处理"
+                                } else {
+                                    "已切换更新源；自动安装已禁用，仅提示新版本"
+                                });
+                            }
+                            Err(e) => self.shared.toast(format!("配置无效：{e}")),
+                        }
+                    }
+                });
+            },
+        );
+
+        // 状态。注意「检查失败」与「已是最新」必须可区分 ——
+        // 否则中间人只要丢包就能把自己伪装成「你已经是最新版」。
+        match self.updater.phase.clone() {
+            Phase::Idle => {}
+            Phase::Checking => {
+                ui.label(RichText::new("正在检查…").size(11.5).color(theme.faint));
+            }
+            Phase::UpToDate => {
+                widgets::status_line(ui, &theme, true, "已是最新版本");
+            }
+            Phase::Failed(e) => {
+                widgets::status_line(ui, &theme, false, &format!("检查失败：{e}"));
+            }
+            Phase::Downloading { done, total } => {
+                let pct = done
+                    .checked_mul(100)
+                    .and_then(|x| x.checked_div(total))
+                    .unwrap_or(0);
+                ui.label(
+                    RichText::new(format!("下载中 {pct}%（{done}/{total} 字节）"))
+                        .size(11.5)
+                        .color(theme.faint),
+                );
+            }
+            Phase::Available(info) => {
+                widgets::status_line(
+                    ui,
+                    &theme,
+                    true,
+                    &format!("发现新版本 v{}（build {}）", info.version, info.build),
+                );
+                if info.force {
+                    // 强制标记只作提示，**不做不可逃逸的模态框**：force 由本地重算，
+                    // 但服务端的 min_supported_build 可能被误配或被入侵者拉高，
+                    // 把用户锁死在打不开的状态是更坏的失败模式。
+                    ui.label(
+                        RichText::new("此为强制更新：当前版本已低于服务端声明的最低支持版本")
+                            .size(11.0)
+                            .color(theme.danger),
+                    );
+                }
+                if !info.notes.trim().is_empty() {
+                    ui.label(RichText::new(&info.notes).size(11.0).color(theme.faint));
+                }
+                ui.horizontal(|ui| {
+                    if builtin {
+                        if widgets::ghost_button(ui, &theme, "下载并校验").clicked() {
+                            let ctx = ui.ctx().clone();
+                            self.updater.download(profile.clone(), info.clone(), &ctx);
+                        }
+                    } else {
+                        // 自定义服务器：只通知，不下载不执行
+                        ui.label(
+                            RichText::new("请自行前往更新源手动下载安装")
+                                .size(11.0)
+                                .color(theme.faint),
+                        );
+                    }
+                });
+            }
+            Phase::Ready { info, file } => {
+                widgets::status_line(
+                    ui,
+                    &theme,
+                    true,
+                    &format!("v{} 已下载，签名与校验和均已通过", info.version),
+                );
+                // 各平台行为并不一致，文案要如实说明
+                let hint = match std::env::consts::OS {
+                    "windows" => "将启动安装程序并退出 Ferric",
+                    "macos" => "将打开安装包，需你手动完成安装",
+                    _ => "将交给系统的软件安装器，可能需要授权",
+                };
+                ui.label(RichText::new(hint).size(11.0).color(theme.faint));
+                if widgets::ghost_button(ui, &theme, "立即安装").clicked() {
+                    match crate::updater::launch(&file) {
+                        Ok(()) => {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        Err(e) => {
+                            self.updater.phase = Phase::Failed(e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn toasts_ui(&mut self, ctx: &egui::Context) {
@@ -716,6 +982,7 @@ impl eframe::App for FerricApp {
             active_id: self.tools[self.active].meta().id.to_owned(),
             drafts,
             lang: self.shared.lang,
+            server: self.server_override.clone(),
         };
         eframe::set_value(storage, eframe::APP_KEY, &persist);
     }
@@ -725,6 +992,12 @@ impl eframe::App for FerricApp {
         let ctx = &ctx;
         // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
         self.sync_theme(ctx);
+
+        // 更新进度轮询必须在**外壳顶层**，不能挂在某个视图里 ——
+        // 更新是全局的，挂在视图里会导致用户不切到那页就永远收不到结果。
+        self.updater.poll(ctx);
+        // 插件市场视图需要知道当前服务器；每帧同步，覆盖设置后立刻生效
+        self.shared.server = self.server_profile();
 
         // Ctrl+K 聚焦搜索框
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::K)) {

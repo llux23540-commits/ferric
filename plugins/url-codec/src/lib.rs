@@ -2,7 +2,11 @@
 //!
 //! 构建：`cargo build --release --target wasm32-unknown-unknown`
 //! 产物：`target/wasm32-unknown-unknown/release/ferric_plugin_url_codec.wasm`
-//! 安装：拷贝到 `%APPDATA%/ferric/plugins/`，重启 Ferric 即出现在侧栏「插件」分组。
+//! 安装：从 Ferric 的「插件市场」一键安装，或手工拷到 `%APPDATA%/ferric/plugins/`；
+//! 两种方式都需重启 Ferric 才会出现在侧栏「插件」分组。
+//!
+//! ⚠️ MANIFEST 里的 `id` 必须与市场里的 slug 一致（宿主安装时固定写成 `<id>.wasm`），
+//! `version` 要与上架时提交的版本号一致，否则更新检查会一直认为「有新版」。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -10,6 +14,7 @@ use std::collections::BTreeMap;
 const MANIFEST: &str = r#"{
     "api_version": 1,
     "id": "url-codec",
+    "version": "0.1.0",
     "name": "URL 编解码",
     "group": "插件",
     "desc": "URL 百分号编码 / 解码（RFC 3986）",

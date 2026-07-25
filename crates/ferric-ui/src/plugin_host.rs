@@ -468,6 +468,89 @@ pub fn plugins_dir() -> Option<PathBuf> {
     Some(base.join("plugins"))
 }
 
+/// 已装插件的一条记录。`slug` 即 manifest 的 `id`，与服务端市场的 slug 同名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub slug: String,
+    /// 老插件没有版本号时为空串 —— 服务端 `check-updates` 约定此时一律按「有更新」处理。
+    pub version: String,
+    pub name: String,
+}
+
+/// 枚举插件目录里已装的插件（只读 manifest，不常驻实例）。
+///
+/// 直接扫磁盘而不是读内存里的 tools 向量：装完插件立刻就能查到，
+/// 不必等重启；也不会因为「清除草稿」重建 tools 而丢失。
+pub fn installed() -> Vec<Installed> {
+    let Some(dir) = plugins_dir() else {
+        return Vec::new();
+    };
+    let mut cfg = Config::new();
+    cfg.consume_fuel(true);
+    let Ok(engine) = Engine::new(&cfg) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut paths: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("wasm"))
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        if let Ok((_, m)) = WasmPlugin::load(&engine, &path) {
+            if !out.iter().any(|i: &Installed| i.slug == m.id) {
+                out.push(Installed {
+                    slug: m.id,
+                    version: m.version,
+                    name: m.name,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// 安装/更新一个插件：**固定写成 `<slug>.wasm`**。
+///
+/// 文件名固定这一点不是洁癖 —— [`load_all`] 对重复 id 是「路径字典序先到先得」，
+/// 若把新版本写成 `foo-2.0.0.wasm` 而旧的 `foo-1.0.0.wasm` 还在，
+/// 加载到的会是**旧版**，用户只会看到一条「id 重复，已跳过」的提示。
+/// 同名覆盖从根上规避这个陷阱。
+///
+/// 先写临时文件再 rename，避免写到一半的 wasm 被下次启动加载。
+pub fn install(slug: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("非法的插件标识：{slug}"));
+    }
+    let dir = plugins_dir().ok_or("无法定位插件目录")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
+    let final_path = dir.join(format!("{slug}.wasm"));
+    let tmp = dir.join(format!("{slug}.wasm.tmp"));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("写入插件失败：{e}"))?;
+    std::fs::rename(&tmp, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("安装插件失败：{e}")
+    })?;
+    Ok(final_path)
+}
+
+/// 卸载：删掉 `<slug>.wasm`。
+pub fn uninstall(slug: &str) -> Result<(), String> {
+    let dir = plugins_dir().ok_or("无法定位插件目录")?;
+    std::fs::remove_file(dir.join(format!("{slug}.wasm"))).map_err(|e| format!("卸载失败：{e}"))
+}
+
 /// 扫描插件目录并加载全部 .wasm 插件；返回 (工具, 加载警告)。
 /// 目录不存在则创建后返回空——首次运行即准备好放置插件的位置。
 pub fn load_all() -> (Vec<PluginTool>, Vec<String>) {
