@@ -40,6 +40,8 @@ pub const SEARCH: char = '\u{e151}';
 pub const COPY: char = '\u{e09e}';
 pub const CHECK: char = '\u{e06c}';
 pub const GIT_COMPARE: char = '\u{e359}';
+// 预留字形：当前没有视图用到，但属于已内嵌的 Lucide 子集，保留备用。
+#[allow(dead_code)]
 pub const CHEVRON_DOWN: char = '\u{e06d}';
 pub const CHEVRON_RIGHT: char = '\u{e06f}';
 pub const FILE_DOWN: char = '\u{e318}';
@@ -49,6 +51,8 @@ pub const REFRESH_CW: char = '\u{e145}';
 pub const UNDO_2: char = '\u{e2a1}';
 pub const REDO_2: char = '\u{e2a0}';
 pub const ALIGN_LEFT: char = '\u{e185}';
+// 预留字形：当前没有视图用到，但属于已内嵌的 Lucide 子集，保留备用。
+#[allow(dead_code)]
 pub const LIST_TREE: char = '\u{e408}';
 pub const INDENT_INCREASE: char = '\u{e108}';
 pub const WRAP_TEXT: char = '\u{e248}';
