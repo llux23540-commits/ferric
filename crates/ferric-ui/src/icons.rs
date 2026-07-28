@@ -55,7 +55,10 @@ pub const ALIGN_LEFT: char = '\u{e185}';
 #[allow(dead_code)]
 pub const LIST_TREE: char = '\u{e408}';
 pub const INDENT_INCREASE: char = '\u{e108}';
+/// Lucide `text-wrap` —— 自动换行开关。
 pub const WRAP_TEXT: char = '\u{e248}';
+/// Lucide `fold-vertical` —— 把多行压缩成一行。
+pub const FOLD_VERTICAL: char = '\u{e43c}';
 pub const FOLDER_OPEN: char = '\u{e247}';
 pub const PLUS: char = '\u{e13d}';
 pub const ARROW_UP_A_Z: char = '\u{e41a}';

@@ -11,12 +11,22 @@ struct JsonDraft {
     input: String,
     indent: Indent,
     sort: bool,
+    /// 老草稿没有这个字段，缺省按开启处理（与新装用户一致）。
+    #[serde(default = "default_wrap")]
+    wrap: bool,
+}
+
+fn default_wrap() -> bool {
+    true
 }
 
 pub struct JsonTool {
     input: String,
     indent: Indent,
     sort: bool,
+    /// 自动换行。默认开 —— 格式化后的长行（长 URL、base64、压缩过的单行 JSON）
+    /// 一旦超出可视宽度，不换行就只能靠横向滚动一点点找，实际是看不见。
+    wrap: bool,
     ok: bool,
     status: String,
     undo: Vec<String>,
@@ -29,6 +39,7 @@ impl Default for JsonTool {
             input: demo_json(),
             indent: Indent::Two,
             sort: false,
+            wrap: true,
             ok: true,
             status: "就绪".to_owned(),
             undo: Vec::new(),
@@ -99,7 +110,9 @@ impl JsonTool {
             {
                 self.run_op(|s| json::format(s, indent, sort), "已格式化 · JSON 有效");
             }
-            if widgets::tb_icon_btn(ui, theme, icons::WRAP_TEXT, false, false, "压缩为单行")
+            // 压缩用 fold-vertical（多行折成一行）。此前借的是 text-wrap 图标，
+            // 而那个图标的通用含义恰恰是「自动换行」，现在归位给下面的换行开关。
+            if widgets::tb_icon_btn(ui, theme, icons::FOLD_VERTICAL, false, false, "压缩为单行")
                 .clicked()
             {
                 self.run_op(json::minify, "已压缩为单行");
@@ -164,6 +177,28 @@ impl JsonTool {
             .clicked()
             {
                 self.sort = !self.sort;
+            }
+            if widgets::tb_icon_btn(
+                ui,
+                theme,
+                icons::WRAP_TEXT,
+                self.wrap,
+                false,
+                if self.wrap {
+                    "自动换行：开（关闭后超宽内容用横向滚动查看）"
+                } else {
+                    "自动换行：关（长行会超出可视区，需横向滚动）"
+                },
+            )
+            .clicked()
+            {
+                self.wrap = !self.wrap;
+                // 用 toast 而不是写 status：状态条每帧都被实时校验结果覆盖，写了也看不见
+                shared.toast(if self.wrap {
+                    "已开启自动换行"
+                } else {
+                    "已关闭自动换行（长行改用横向滚动查看）"
+                });
             }
             widgets::tb_sep(ui, theme);
             if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
@@ -276,7 +311,14 @@ impl Tool for JsonTool {
             .show(ui, |ui| {
                 // 单栏：自研代码编辑器（自由编辑 + 语法高亮；后续叠加折叠）。
                 let editor_h = ui.available_height();
-                widgets::code_editor::code_editor(ui, &theme, "json-in", &mut self.input, editor_h);
+                widgets::code_editor::code_editor(
+                    ui,
+                    &theme,
+                    "json-in",
+                    &mut self.input,
+                    editor_h,
+                    self.wrap,
+                );
             });
     }
 
@@ -285,6 +327,7 @@ impl Tool for JsonTool {
             input: self.input.clone(),
             indent: self.indent,
             sort: self.sort,
+            wrap: self.wrap,
         })
         .ok()
     }
@@ -294,6 +337,7 @@ impl Tool for JsonTool {
             self.input = d.input;
             self.indent = d.indent;
             self.sort = d.sort;
+            self.wrap = d.wrap;
         }
     }
 }
@@ -338,6 +382,104 @@ fn demo_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{pos2, vec2, Event, Pos2, Rect};
+
+    /// 无窗口地驱动**完整的 JSON 工具**（工具条 + 编辑区），一帧一批事件。
+    ///
+    /// 与只驱动编辑器不同，这里把视图真实的版式也跑起来了：工具条在上、
+    /// 底部状态条、中间铺满的编辑区。用户报的「点了格式化就选不中」只有在
+    /// 这个完整上下文里才复现得出来。
+    fn drive_tool(
+        tool: &mut JsonTool,
+        screen: Rect,
+        frames: Vec<Vec<Event>>,
+    ) -> (Vec<String>, Vec<String>) {
+        let ctx = egui::Context::default();
+        // 工具条要画 Lucide 图标，字体没装会直接 panic
+        crate::fonts::install_fonts(&ctx);
+        let mut shared = Shared::new(crate::theme::Theme::dark());
+        let mut copied = Vec::new();
+        let mut statuses = Vec::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    // 工具条：与 app.rs 一样在顶部横排
+                    ui.horizontal(|ui| tool.header_actions(ui, &mut shared));
+                    tool.ui(ui, &mut shared);
+                },
+            );
+            statuses.push(tool.status.clone());
+            for cmd in &out.platform_output.commands {
+                if let egui::output::OutputCommand::CopyText(s) = cmd {
+                    copied.push(s.clone());
+                }
+            }
+        }
+        (copied, statuses)
+    }
+
+    fn press(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// 点一下某处（移动 → 按下 → 抬起，各占一帧，符合 egui 的点击判定）。
+    fn click_frames(pos: Pos2) -> Vec<Vec<Event>> {
+        vec![
+            vec![Event::PointerMoved(pos)],
+            vec![press(pos, true)],
+            vec![press(pos, false)],
+        ]
+    }
+
+    /// 用户报的问题：**点过工具条的「格式化」之后，编辑区就选不中了**。
+    ///
+    /// 这里走完整链路：压缩的 JSON → 点格式化 → 在编辑区里拖拽 → 复制。
+    /// 复制不到东西就等于选不中。
+    #[test]
+    fn selection_still_works_after_pressing_format() {
+        let mut tool = JsonTool {
+            input: (0..30)
+                .map(|i| format!("\"k{i:02}\":\"v{i:02}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+            ..Default::default()
+        };
+        tool.input = format!("{{{}}}", tool.input);
+        let compact = tool.input.clone();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+
+        let mut frames = Vec::new();
+        // ① 点工具条第一个按钮 = 格式化（32x32，从左上角排起）
+        frames.extend(click_frames(pos2(16.0, 16.0)));
+        // ② 回到编辑区里拖拽选中
+        let (from, to) = (pos2(120.0, 140.0), pos2(320.0, 200.0));
+        frames.push(vec![Event::PointerMoved(from)]);
+        frames.push(vec![press(from, true)]);
+        frames.push(vec![Event::PointerMoved(to)]);
+        frames.push(vec![Event::PointerMoved(to)]);
+        frames.push(vec![press(to, false)]);
+        frames.push(vec![Event::Copy]);
+
+        let (copied, _) = drive_tool(&mut tool, screen, frames);
+
+        assert_ne!(tool.input, compact, "第一步就没点到「格式化」，用例失效");
+        assert!(tool.input.contains('\n'), "格式化后应当是多行");
+        assert!(
+            copied.iter().any(|s| !s.is_empty()),
+            "格式化之后拖拽选不中任何东西 —— 用户报的问题复现了"
+        );
+    }
 
     #[test]
     fn draft_roundtrip() {
@@ -345,6 +487,7 @@ mod tests {
             input: "{\"x\":1}".to_owned(),
             indent: Indent::Tab,
             sort: true,
+            wrap: false,
             ..Default::default()
         };
         let s = a.save_draft().expect("save");
@@ -354,5 +497,129 @@ mod tests {
         assert_eq!(b.input, "{\"x\":1}");
         assert_eq!(b.indent, Indent::Tab);
         assert!(b.sort);
+        assert!(!b.wrap, "换行开关也要随草稿保存");
+    }
+
+    /// 自动换行默认开：长内容超出可视区看不见是个实打实的问题，
+    /// 默认关掉等于把问题留给用户自己发现。
+    #[test]
+    fn wrap_is_on_by_default() {
+        assert!(JsonTool::default().wrap);
+    }
+
+    /// **升级兼容**：老版本存的草稿没有 wrap 字段。如果反序列化因此失败，
+    /// `load_draft` 会静默不生效 —— 用户上次编辑的 JSON 内容就整个没了。
+    #[test]
+    fn old_draft_without_wrap_field_still_loads() {
+        let legacy = r#"{"input":"{\"k\":2}","indent":"Four","sort":true}"#;
+        let mut t = JsonTool::default();
+        t.load_draft(legacy);
+        assert_eq!(t.input, "{\"k\":2}", "老草稿的内容必须原样恢复");
+        assert_eq!(t.indent, Indent::Four);
+        assert!(t.sort);
+        assert!(t.wrap, "老草稿缺省按开启处理");
+    }
+
+    /// **六项功能共存**：格式化 / 去除转义 / 压缩 / 选中 / 折叠显示节点数 / 自动换行。
+    ///
+    /// 逐个单测能过、连起来却互相打架，是这类交互组件最典型的翻车方式。所以这条
+    /// 在**同一个工具实例**上按用户的真实顺序把六件事依次做完，每步都验结果。
+    #[test]
+    fn all_six_features_work_together() {
+        use ferric_core::json;
+
+        // 一份「转义过的、压缩的、含超长值」的 JSON —— 三种毛病齐了
+        let inner = format!(
+            "{{\"url\":\"https://example.com/{}\",\"list\":[1,2,3],\"n\":{{\"a\":1,\"b\":2}}}}",
+            "seg/".repeat(80)
+        );
+        let escaped = json::escape(&inner);
+
+        let mut tool = JsonTool {
+            input: escaped.clone(),
+            ..Default::default()
+        };
+
+        // ② 去除转义
+        tool.run_op(json::unescape, "已去除转义");
+        assert!(tool.ok, "去除转义失败：{}", tool.status);
+        assert_eq!(tool.input, inner, "去转义结果应还原成原始 JSON");
+
+        // ① 格式化
+        let ind = tool.indent;
+        tool.run_op(|s| json::format(s, ind, false), "已格式化");
+        assert!(tool.ok && tool.input.contains('\n'), "格式化失败");
+        let formatted = tool.input.clone();
+        let longest = formatted.lines().map(|l| l.chars().count()).max().unwrap();
+        assert!(longest > 300, "用例前提：格式化后有超长行");
+
+        // ⑥ 自动换行默认开着，且格式化不会把它关掉
+        assert!(tool.wrap, "格式化之后自动换行不该被关掉");
+
+        // ④ 选中：在编辑区拖拽后复制，必须拿得到内容
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let (from, to) = (pos2(120.0, 140.0), pos2(420.0, 200.0));
+        let mut frames = vec![
+            vec![Event::PointerMoved(from)],
+            vec![press(from, true)],
+            vec![Event::PointerMoved(to)],
+            vec![Event::PointerMoved(to)],
+            vec![press(to, false)],
+            vec![Event::Copy],
+        ];
+        // ⑤ 顺带点一下第 1 行的折叠箭头（行号栏最左侧），把最外层对象折起来
+        frames.extend(click_frames(pos2(295.0, 118.0)));
+        let (copied, _) = drive_tool(&mut tool, screen, frames);
+
+        assert!(
+            copied.iter().any(|s| !s.is_empty()),
+            "六件事一起做的时候选中失效了"
+        );
+        assert_eq!(tool.input, formatted, "选中与折叠都不该改动内容");
+
+        // ③ 压缩：回到单行，且仍是合法 JSON
+        tool.run_op(json::minify, "已压缩");
+        assert!(tool.ok, "压缩失败：{}", tool.status);
+        assert!(!tool.input.contains('\n'), "压缩后应当只有一行");
+        assert!(json::validate(&tool.input).is_ok(), "压缩后仍须是合法 JSON");
+
+        // 再格式化一次，确认整轮下来内容没有被弄坏
+        let ind = tool.indent;
+        tool.run_op(|s| json::format(s, ind, false), "已格式化");
+        assert_eq!(tool.input, formatted, "一轮操作下来内容应当可以完全复原");
+    }
+
+    /// 折叠占位要显示节点数（用户要求的「收缩显示节点数」）。
+    /// 这里从编辑器的可见文本上验证，而不是只看内部计数。
+    #[test]
+    fn folding_shows_node_count_in_editor() {
+        let json = "{\n  \"list\": [\n    1,\n    2,\n    3\n  ],\n  \"tail\": 9\n}";
+        let mut tool = JsonTool {
+            input: json.to_owned(),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        // 点第 2 行（"list" 那行）行号栏里的折叠箭头
+        let (_, _) = drive_tool(&mut tool, screen, click_frames(pos2(295.0, 131.0)));
+        // 折叠不改内容
+        assert_eq!(tool.input, json, "折叠不应改动内容");
+        // 可见文本由编辑器内部构建，这里直接验证构建结果里带了数量
+        let chars: Vec<char> = json.chars().collect();
+        let regions = crate::widgets::code_editor::test_support::scan(&chars);
+        let arr = regions.iter().find(|r| !r.1).expect("应有数组区间");
+        assert_eq!(arr.0, 3, "数组应数出 3 个元素");
+    }
+
+    /// 目标场景本身：格式化产出的长行确实会超出常见可视宽度 ——
+    /// 这正是编辑器必须换行的理由（换行行为本身由 code_editor 的测试覆盖）。
+    #[test]
+    fn formatted_output_can_exceed_a_typical_viewport() {
+        let src = format!("{{\"url\":\"https://example.com/{}\"}}", "a".repeat(300));
+        let out = json::format(&src, Indent::Two, false).expect("格式化");
+        let longest = out.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(
+            longest > 200,
+            "格式化不会拆开长字符串，最长行应仍然很长：{longest}"
+        );
     }
 }

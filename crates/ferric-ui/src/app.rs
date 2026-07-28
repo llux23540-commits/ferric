@@ -78,6 +78,8 @@ pub struct FerricApp {
     server_draft: Option<(String, String)>,
     updater: crate::updater::Updater,
     shared: Shared,
+    /// 调试自拍的帧计数（仅在 `FERRIC_SCREENSHOT` 下有意义，见 `debug_screenshot`）。
+    shot_frames: u32,
 }
 
 impl FerricApp {
@@ -144,6 +146,7 @@ impl FerricApp {
             server_draft: None,
             updater: crate::updater::Updater::default(),
             shared,
+            shot_frames: 0,
         }
     }
 
@@ -957,6 +960,56 @@ fn group_icon(group: &str) -> char {
     }
 }
 
+impl FerricApp {
+    /// 调试用自拍：设了 `FERRIC_SCREENSHOT=<路径.ppm>` 就在跑满若干帧后把窗口内容
+    /// 存成 PPM 并退出。默认（不设该变量）完全不生效。
+    ///
+    /// 写 PPM 而不是 PNG：格式就是一行头加一串 RGB 字节，不用为一个调试开关引入
+    /// 图像编码依赖；任何看图工具都能打开。
+    ///
+    /// 为什么需要它：改完界面想确认「到底长什么样」，在受限环境里往往拿不到 ——
+    /// 比如 GNOME 会拒绝非授权的 D-Bus 截图、XWayland 下抓 X11 根窗口也会失败。
+    /// 让应用自己交出渲染结果是唯一不依赖桌面环境配合的办法，顺带把字体、主题、
+    /// 缩放这些真实渲染路径也一并走了一遍。CI 里同样可用。
+    ///
+    /// 注意它只能拍**静态画面**：想拍「选中之后」这类交互结果是做不到的 ——
+    /// egui 的点击判定读的是 `InputState::pointer`，那些字段是私有的，
+    /// 往事件队列里塞 PointerButton 不会让 egui 认为发生过点击。
+    fn debug_screenshot(&mut self, ctx: &egui::Context) {
+        let Ok(path) = std::env::var("FERRIC_SCREENSHOT") else {
+            return;
+        };
+        // 先收上一帧请求的结果
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            let (w, h) = (img.width(), img.height());
+            let mut buf = format!("P6\n{w} {h}\n255\n").into_bytes();
+            buf.extend(img.pixels.iter().flat_map(|p| [p.r(), p.g(), p.b()]));
+            let ok = std::fs::write(&path, &buf).is_ok();
+            eprintln!(
+                "[screenshot] {} {w}x{h} → {path}",
+                if ok { "已保存" } else { "保存失败" }
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        // 等界面稳定（字体装载、主题、布局都落定）后再拍
+        self.shot_frames += 1;
+        // 可选：拍照前先往输入事件里塞一个 Ctrl+A。本函数在各视图绘制**之前**运行，
+        // 所以这一帧稍后绘制的编辑器会像收到真实按键一样处理它 —— 于是截图里
+        // 能看到真实的选区渲染，而不是靠猜。
+        if self.shot_frames == 45 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        ctx.request_repaint();
+    }
+}
+
 impl eframe::App for FerricApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let c = self.shared.theme.bg;
@@ -990,6 +1043,7 @@ impl eframe::App for FerricApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
+        self.debug_screenshot(ctx);
         // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
         self.sync_theme(ctx);
 

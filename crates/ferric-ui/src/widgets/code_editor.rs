@@ -8,6 +8,21 @@
 //! 复用 egui 0.35 公开工具：`TextBuffer`（改写源串）、`CCursorRange::on_key_press`
 //! （光标移动）、`TextCursorState::pointer_interaction`（鼠标选择）、
 //! `paint_text_selection`/`paint_cursor_end`（选区/光标绘制）、`Galley::cursor_from_pos`。
+//!
+//! # 自动换行
+//!
+//! `wrap = true` 时把 galley 的 `wrap.max_width` 设成可视宽度，长行折到下一视觉行；
+//! `wrap = false` 时不换行，改由 `ScrollArea` 提供横向滚动。**两者必须二选一** ——
+//! 此前是「不换行 + 只有纵向滚动」，超出可视区域的内容既看不到也滚不到，等于被吞掉。
+//!
+//! 开了换行之后，「一个逻辑行 = 一个 galley 行」这个前提就不成立了（一行可以折成很多
+//! 视觉行），所以行号与折叠箭头的定位都不能再靠数换行符：
+//! - 行号：沿 `galley.rows` 累加每行字符数得到该行在可见文本中的起点，并且只在
+//!   **逻辑行的首个视觉行**上打号（续行留空，与 VS Code 一致）；
+//! - 折叠箭头：直接用 `galley.pos_from_cursor()` 拿开括号所在位置的 y，与折行无关。
+//!
+//! 换行宽度也是 `break_anywhere` 的：JSON 里一个 base64 / URL 长串中间没有空格，
+//! 只按词断的话它照样会冲出可视区。
 
 use crate::theme::Theme;
 use egui::text::{CCursor, CharIndex};
@@ -46,6 +61,11 @@ struct Region {
     br: usize,    // 开括号 '{' / '[' 自身下标
     open: usize,  // 开括号之后（隐藏内容起点）
     close: usize, // 匹配的闭括号 '}' / ']' 下标（隐藏内容终点，闭括号本身可见）
+    /// 直接子节点数：对象是键的个数，数组是元素个数（不含更深层）。
+    /// 折起来之后就是靠它告诉你「这里面收了多少东西」。
+    count: usize,
+    /// 是不是对象（`{`）。决定占位里用「项」还是「个」。
+    obj: bool,
 }
 
 /// 可见文本的一段：真实源文本段，或折叠占位段。
@@ -65,15 +85,41 @@ struct Seg {
     kind: SegKind,
 }
 
-const PLACEHOLDER: &str = " ⋯ ";
+/// 折叠占位。带上直接子节点数 —— 折起来之后光看一个 `⋯` 不知道里面收了多少东西，
+/// 数量是判断「要不要展开」最有用的一条信息。
+///
+/// 对象里数的是键、数组里数的是元素，都只数**直接**子节点（不含更深层）。
+fn placeholder_for(count: usize, obj: bool) -> String {
+    let unit = if obj { "项" } else { "个" };
+    format!(" ⋯ {count} {unit} ⋯ ")
+}
 
 /// 渲染一个可编辑、语法高亮、可折叠的 JSON 代码编辑器，铺满 `height`，返回交互 `Response`。
+///
+/// `wrap = true` 时长行自动换行（不出现横向滚动条）；`false` 时保持长行不断，
+/// 由横向滚动条查看超出部分。
 pub fn code_editor(
     ui: &mut Ui,
     theme: &Theme,
     id_source: &str,
     text: &mut String,
     height: f32,
+    wrap: bool,
+) -> Response {
+    // 整体套一层 scope：下面要改滚动条样式与滑块配色，而 `Ui::visuals_mut` 改的是
+    // 调用方那个 Ui 的样式 —— 不隔离的话会外溢到别的界面元素上（实测把侧栏的
+    // 分隔线染成了深灰）。scope 里的样式改动出了这个函数就作废。
+    ui.scope(|ui| code_editor_inner(ui, theme, id_source, text, height, wrap))
+        .inner
+}
+
+fn code_editor_inner(
+    ui: &mut Ui,
+    theme: &Theme,
+    id_source: &str,
+    text: &mut String,
+    height: f32,
+    wrap: bool,
 ) -> Response {
     let id = ui.make_persistent_id(id_source);
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
@@ -83,11 +129,32 @@ pub fn code_editor(
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, '0'));
     let inner_h = height.max(60.0);
 
+    // 滚动条改成**常驻实心**，不用 egui 默认的浮动样式。
+    //
+    // 浮动滚动条要鼠标靠近才浮现，而且在浅色主题下淡到几乎看不见（实测是白底上的
+    // (252,252,253)）。对代码编辑器来说这等于「有长行但没人知道能左右滚」——
+    // 关掉自动换行后，横向滚动是查看超宽内容的唯一手段，它必须一眼可见、随时可拖。
+    // 必须在算 view_w 之前设置：实心样式的条更宽，宽度预留要用新值。
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    // 滑块颜色单独定：全局 widget 配色里的 inactive 底是 code_bg（本就接近白），
+    // 拿来当滑块等于白底画白条 —— 实测是 (247,248,250)，看不见。这里换成
+    // 有实际反差的中性灰，并保证悬停/拖动时更明显。
+    {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.bg_fill = theme.faint.gamma_multiply(0.55);
+        w.hovered.bg_fill = theme.muted;
+        w.active.bg_fill = theme.muted;
+    }
+
+    // 在**进入 ScrollArea 之前**量可视宽度：进去以后开了横向滚动的 ui 宽度不再是视口宽度。
+    // 预留纵向滚动条的位置，否则换行后最右侧一列字会钻到滚动条底下。
+    let view_w = (ui.available_width() - ui.spacing().scroll.allocated_width() - 2.0).max(120.0);
+
     let mut state: EditorState = ui
         .data_mut(|d| d.get_temp::<EditorState>(id))
         .unwrap_or_default();
 
-    let out = egui::ScrollArea::vertical()
+    let out = egui::ScrollArea::new([!wrap, true])
         .id_salt((id, "sc"))
         .max_height(inner_h)
         .auto_shrink([false, false])
@@ -103,26 +170,60 @@ pub fn code_editor(
             // ---- 2. 构建可见文本 + 段映射 ----
             let (vis, segs) = build_visible(&chars, n, &regions, &state.folded);
             let vis_chars_len = vis.chars().count();
-            let vis_nl = newline_positions_str(&vis);
 
-            // ---- 3. 高亮 galley（不换行）----
-            let mut job = crate::widgets::json_highlight(&vis, &font_id, theme);
-            job.wrap.max_width = f32::INFINITY;
-            let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
-
-            // 行号栏宽度（含折叠箭头区）。
+            // 行号栏宽度（含折叠箭头区）。先算它，换行宽度要把它扣掉。
             let last_line = src_nl.len() + 1;
             let digits = last_line.to_string().len().max(2);
             let gutter_w = char_w * digits as f32 + 26.0;
 
+            // ---- 3. 高亮 galley ----
+            let mut job = crate::widgets::json_highlight(&vis, &font_id, theme);
+            job.wrap.max_width = if wrap {
+                // 末尾留一个字符宽：行尾光标要有地方画，否则它会贴在边界上被裁掉
+                (view_w - gutter_w - char_w - 12.0).max(char_w * 8.0)
+            } else {
+                f32::INFINITY
+            };
+            // JSON 里的长 token（base64 / URL / 长字符串）中间没有空格，只按词断等于不断
+            job.wrap.break_anywhere = wrap;
+            let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+
+            // 横向滚动条会不会出现（关了换行、且正文确实比视口宽）。
+            let full_w = gutter_w + galley.size().x + 12.0;
+            let needs_hbar = !wrap && full_w > view_w;
+
+            // 高度的下限要**扣掉横向滚动条占的那一条**。
+            //
+            // 不扣的话：内容明明只有几行、纵向完全放得下，可横向条一出现就吃掉底部十几像素，
+            // 于是「内容高度(满高) > 视口高度(满高-条宽)」，凭空多出一根只能滚十几像素的
+            // 纵向滚动条 —— 看起来就是「右边这条的高度跟内容对不上」。
+            // 用 egui 自己的 allocated_width()：实心条实际占的是
+            // 内边距 + 条宽 + 外边距，只扣 bar_width 会少扣一截，假滚动条照样出现。
+            let bar_use = ui.spacing().scroll.allocated_width();
+            let min_h = if needs_hbar {
+                (inner_h - bar_use).max(40.0)
+            } else {
+                inner_h
+            };
+
+            // 宽度至少铺满视口：短内容时右侧那片空白也要属于编辑器，
+            // 否则点在空白处既不聚焦也不落光标，看着像编辑器坏了（这是本来就有的毛病）。
+            // 换行时正好等于视口宽，也就不会因为几像素误差冒出横向滚动条。
             let content = Vec2::new(
-                gutter_w + galley.size().x + 12.0,
-                galley.size().y.max(inner_h),
+                if wrap { view_w } else { full_w.max(view_w) },
+                galley.size().y.max(min_h),
             );
             let (rect, _) = ui.allocate_exact_size(content, Sense::hover());
             // 用本编辑器自己的 id 交互，`id` 才会被注册为「可聚焦」。
             let resp = ui.interact(rect, id, Sense::click_and_drag());
             let text_origin = rect.min + vec2(gutter_w, 0.0);
+
+            // 行号栏钉在**视口**左边，而不是内容左边。
+            //
+            // 关掉自动换行后内容可以比视口宽得多，横向滚动时内容整体左移；行号栏若跟着走，
+            // 滚到右边就直接滑出屏幕 —— 于是「能滚」但不知道自己在第几行，等于白滚。
+            // 不滚动时 clip_rect 左边就等于 rect 左边，外观与从前一致。
+            let gutter_x = ui.clip_rect().left().max(rect.left());
 
             // ---- 4. 待映射源光标（上一帧结构编辑后）→ 可见坐标 ----
             if let Some(src) = state.pending.take() {
@@ -139,12 +240,11 @@ pub fn code_editor(
                     continue; // 该 header 被上层折叠盖住，不显示箭头
                 }
                 let v = map_src(&segs, r.br, vis_chars_len);
-                let row = vis_nl.partition_point(|&p| p < v);
-                if row >= galley.rows.len() {
-                    continue;
-                }
-                let y = text_origin.y + galley.rows[row].pos.y;
-                let hit = Rect::from_min_size(pos2(rect.left() + 2.0, y), vec2(16.0, row_h));
+                // 直接问 galley 这个字符画在哪一行 —— 开了换行以后「第几个换行符」
+                // 不再等于「第几个视觉行」，只有 galley 自己知道答案
+                let y = text_origin.y + galley.pos_from_cursor(CCursor::new(v)).top();
+                // 箭头跟着钉住的行号栏走，否则横向滚动后点不到
+                let hit = Rect::from_min_size(pos2(gutter_x + 2.0, y), vec2(16.0, row_h));
                 arrows.push((hit, r.br, state.folded.contains(&r.br)));
             }
 
@@ -222,18 +322,21 @@ pub fn code_editor(
                 });
             }
 
-            // 鼠标：定位光标 / 选择（仅在正文区，避免行号栏拖拽误选）。
+            // 鼠标：定位光标 / 选择。
+            //
+            // 行号栏的 x 守卫只对**按下那一刻**生效（避免点行号误落光标）；一旦拖起来就
+            // 不再限制 —— 否则往左拖到行号栏上，选区就卡住不动了，而「从行尾往左拖到
+            // 行首」恰恰是最常见的选择方式之一。
             if !gutter_click {
                 if let Some(ptr) = resp.interact_pointer_pos() {
-                    if ptr.x >= text_origin.x - 2.0 {
+                    let dragging = resp.dragged();
+                    // 用**钉住的**行号栏右边界做判断：横向滚动后 text_origin.x 会变成负数，
+                    // 拿它当界限的话，点在行号栏上也会被当成点正文
+                    if dragging || ptr.x >= gutter_x + gutter_w - 2.0 {
                         let cursor_at = galley.cursor_from_pos(ptr - text_origin);
-                        state.cursor.pointer_interaction(
-                            ui,
-                            &resp,
-                            cursor_at,
-                            &galley,
-                            resp.dragged(),
-                        );
+                        state
+                            .cursor
+                            .pointer_interaction(ui, &resp, cursor_at, &galley, dragging);
                     }
                 }
             }
@@ -332,23 +435,46 @@ pub fn code_editor(
             }
 
             // ---- 8. 绘制：选区 → 文本 → 行号/箭头 → 光标 ----
+            //
+            // 选区**失焦后也要继续画**（只是淡一些）。此前只在有焦点时画，于是点一下
+            // 工具条的「格式化 / 复制」按钮，刚选好的内容就当场消失 —— 用起来就是
+            // 「格式化之后选不中了」。所有正经编辑器都保留失焦选区，这里对齐。
             let mut galley = galley;
-            if has_focus {
-                if let Some(r) = state.cursor.range(&galley) {
-                    paint_text_selection(&mut galley, ui.visuals(), &r, None);
+            if let Some(r) = state.cursor.range(&galley) {
+                if !r.is_empty() {
+                    let mut vis = ui.visuals().clone();
+                    if !has_focus {
+                        vis.selection.bg_fill = vis.selection.bg_fill.gamma_multiply(0.5);
+                    }
+                    paint_text_selection(&mut galley, &vis, &r, None);
                 }
             }
             let painter = ui.painter().clone();
             painter.galley(text_origin, galley.clone(), theme.fg);
 
+            // 行号栏底：横向滚动时正文会从行号栏下面穿过去，必须先铺一层不透明底色盖住。
+            // 只在真的滚开了才铺，避免在不滚动的常态下多画一层。
+            if gutter_x > rect.left() + 0.5 {
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        pos2(gutter_x, ui.clip_rect().top()),
+                        vec2(gutter_w, ui.clip_rect().height()),
+                    ),
+                    0.0,
+                    theme.bg,
+                );
+            }
+
             // 行号：逐可见行显示对应的**源**行号（折叠处号码跳变，如 VS Code）。
-            for (i, prow) in galley.rows.iter().enumerate() {
-                let y = text_origin.y + prow.pos.y;
-                let vstart = if i == 0 { 0 } else { vis_nl[i - 1] + 1 };
+            for (i, (vstart, is_first)) in row_starts(&galley).into_iter().enumerate() {
+                if !is_first {
+                    continue; // 折行产生的续行不打号，否则一屏全是重复数字
+                }
+                let y = text_origin.y + galley.rows[i].pos.y;
                 let (src_ci, _) = map_vis(&segs, vstart, n);
                 let src_line = src_nl.partition_point(|&p| p < src_ci) + 1;
                 painter.text(
-                    pos2(text_origin.x - 8.0, y),
+                    pos2(gutter_x + gutter_w - 8.0, y),
                     Align2::RIGHT_TOP,
                     src_line.to_string(),
                     font_id.clone(),
@@ -413,12 +539,34 @@ pub fn code_editor(
     out.inner
 }
 
+/// 给其它模块的测试用：把折叠区间的节点数暴露出来（(count, is_object)）。
+#[cfg(test)]
+pub mod test_support {
+    pub fn scan(chars: &[char]) -> Vec<(usize, bool)> {
+        super::scan_regions(chars)
+            .into_iter()
+            .map(|r| (r.count, r.obj))
+            .collect()
+    }
+}
+
 // ============================ 折叠 / 映射 辅助 ============================
 
 /// 扫描源文本，找出所有跨行的括号配对（可折叠区间），忽略字符串内的括号。
+///
+/// 顺带数出每个区间的**直接**子节点数：只统计当前层的逗号，嵌套层的逗号由它自己那层数。
+/// 空容器（`{}` / `[]`，中间只有空白）记 0，而不是 1。
 fn scan_regions(chars: &[char]) -> Vec<Region> {
+    /// 栈帧：(开括号下标, 开括号所在行, 本层逗号数, 本层是否有非空白内容, 是否对象)
+    struct Frame {
+        br: usize,
+        line: usize,
+        commas: usize,
+        has_content: bool,
+        obj: bool,
+    }
     let mut regions = Vec::new();
-    let mut stack: Vec<(usize, usize)> = Vec::new(); // (开括号下标, 行号)
+    let mut stack: Vec<Frame> = Vec::new();
     let mut line = 0usize;
     let mut in_str = false;
     let mut esc = false;
@@ -436,16 +584,46 @@ fn scan_regions(chars: &[char]) -> Vec<Region> {
             }
             continue;
         }
+        // 只要当前层出现了非空白字符，这个容器就不是空的
+        if !c.is_whitespace() && !matches!(c, '{' | '[' | '}' | ']') {
+            if let Some(f) = stack.last_mut() {
+                f.has_content = true;
+            }
+        }
         match c {
-            '"' => in_str = true,
-            '{' | '[' => stack.push((i, line)),
+            '"' => {
+                in_str = true;
+                if let Some(f) = stack.last_mut() {
+                    f.has_content = true;
+                }
+            }
+            '{' | '[' => {
+                // 容器本身也算父层的内容
+                if let Some(f) = stack.last_mut() {
+                    f.has_content = true;
+                }
+                stack.push(Frame {
+                    br: i,
+                    line,
+                    commas: 0,
+                    has_content: false,
+                    obj: c == '{',
+                });
+            }
+            ',' => {
+                if let Some(f) = stack.last_mut() {
+                    f.commas += 1;
+                }
+            }
             '}' | ']' => {
-                if let Some((bi, bline)) = stack.pop() {
-                    if bline != line {
+                if let Some(f) = stack.pop() {
+                    if f.line != line {
                         regions.push(Region {
-                            br: bi,
-                            open: bi + 1,
+                            br: f.br,
+                            open: f.br + 1,
                             close: i,
+                            count: if f.has_content { f.commas + 1 } else { 0 },
+                            obj: f.obj,
                         });
                     }
                 }
@@ -481,7 +659,6 @@ fn build_visible(
         cover_end = r.close;
     }
 
-    let ph_len = PLACEHOLDER.chars().count();
     let mut vis = String::new();
     let mut segs: Vec<Seg> = Vec::new();
     let mut si = 0usize;
@@ -497,6 +674,10 @@ fn build_visible(
             vis.extend(&chars[si..r.open]);
             vlen += len;
         }
+        // 占位长度随节点数变化（"⋯ 3 项 ⋯" 与 "⋯ 128 项 ⋯" 不一样长），
+        // 所以逐段记录实际长度，可见↔源的映射全靠它
+        let ph = placeholder_for(r.count, r.obj);
+        let ph_len = ph.chars().count();
         segs.push(Seg {
             vis_start: vlen,
             len: ph_len,
@@ -506,7 +687,7 @@ fn build_visible(
                 close: r.close,
             },
         });
-        vis.push_str(PLACEHOLDER);
+        vis.push_str(&ph);
         vlen += ph_len;
         si = r.close;
     }
@@ -574,22 +755,31 @@ fn is_hidden(br: usize, segs: &[Seg]) -> bool {
     false
 }
 
+/// 逐视觉行给出 `(该行在可见文本中的起始 char 下标, 是否为逻辑行的首行)`。
+///
+/// 开了自动换行后，「第 i 个视觉行」与「第 i 个换行符」不再一一对应：一个逻辑行会摊成
+/// 多个视觉行。所以行起点必须沿 galley 逐行累加字符数得到 —— 靠数换行符不但错位，
+/// 行数超过换行符数时还会直接越界 panic。
+///
+/// `ends_with_newline` 为真表示该行以真正的 `\n` 结束，于是下一行是新的逻辑行；
+/// 因折行而断开的续行该标志为假。
+fn row_starts(galley: &egui::Galley) -> Vec<(usize, bool)> {
+    let mut out = Vec::with_capacity(galley.rows.len());
+    let mut start = 0usize;
+    let mut is_first = true;
+    for prow in galley.rows.iter() {
+        out.push((start, is_first));
+        start += prow.char_count_including_newline().0;
+        is_first = prow.ends_with_newline;
+    }
+    out
+}
+
 fn newline_positions(chars: &[char]) -> Vec<usize> {
     chars
         .iter()
         .enumerate()
         .filter(|(_, &c)| c == '\n')
-        .map(|(i, _)| i)
-        .collect()
-}
-fn newline_positions_str(s: &str) -> Vec<usize> {
-    s.char_indices()
-        .scan(0usize, |ci, (_, c)| {
-            let cur = *ci;
-            *ci += 1;
-            Some((cur, c))
-        })
-        .filter(|(_, c)| *c == '\n')
         .map(|(i, _)| i)
         .collect()
 }
@@ -719,6 +909,25 @@ fn edit_ime(
     vrange: &CCursorRange,
     ime: &egui::ImeEvent,
 ) -> bool {
+    // ⚠️ 没有在组字时的「空事件」必须原地返回，**一个字段都不能碰**。
+    //
+    // Linux 上的 ibus（以及别的输入法）在文本框聚焦期间会持续发送 `Preedit("")` /
+    // `Enabled` / `Disabled` 这类心跳。如果借这些事件去写 `state.pending`，下一帧开头
+    // 就会把光标塌成 `CCursorRange::one(pending)` —— 正在进行的拖拽选区于是每帧被
+    // 压回一个点，再被拖拽扩一格，表现就是「怎么拖都只选中一两个字」。
+    // 这也是它只在真机（有输入法）复现、测试里却好好的原因。
+    let composing = state.ime.is_some();
+    if !composing {
+        let idle = match ime {
+            egui::ImeEvent::Preedit { text: t, .. } => t.is_empty(),
+            egui::ImeEvent::Commit(t) => t.is_empty(),
+            _ => true, // Enabled / Disabled：与文本无关
+        };
+        if idle {
+            return false;
+        }
+    }
+
     // 起点优先级：① 有活动预编辑 → 复用其起点并先删旧串；② 同一帧内上一个 IME 事件遗留
     // 的锚点（关键：`Preedit("")` + `Commit(text)` 常同帧到达，提交须接在清空之后的位置）；
     // ③ 全新组字 → 由当前光标映射到源。
@@ -796,4 +1005,1318 @@ fn draw_arrow(painter: &egui::Painter, hit: Rect, folded: bool, color: Color32) 
         color,
         egui::Stroke::NONE,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在无窗口环境下跑一帧，拿到可用的字体系统，然后按给定宽度排版一段文本。
+    ///
+    /// 排版是纯 CPU 的（不碰 GPU），所以 headless 可跑；这让「换行到底生效没有」
+    /// 能被真正验证，而不是只看代码。
+    fn layout(text: &str, wrap_w: f32) -> std::sync::Arc<egui::Galley> {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let font_id = egui::FontId::monospace(12.0);
+        let mut job = egui::text::LayoutJob::single_section(
+            text.to_owned(),
+            egui::TextFormat::simple(font_id, egui::Color32::WHITE),
+        );
+        job.wrap.max_width = wrap_w;
+        job.wrap.break_anywhere = wrap_w.is_finite();
+        let galley = ctx.fonts_mut(|f| f.layout_job(job));
+        let _ = ctx.end_pass();
+        galley
+    }
+
+    /// 这条是本次修复要证明的核心事实：不换行时内容会冲出可视宽度，
+    /// 换行后必须收进去。此前编辑器恒为「不换行 + 只有纵向滚动」，
+    /// 超出的部分既看不见也滚不到。
+    #[test]
+    fn wrapping_keeps_long_lines_inside_the_viewport() {
+        // 一行很长的 JSON 字符串值（模拟长 URL / base64），中间没有空格
+        let long = format!("{{\n  \"token\": \"{}\"\n}}", "abcd1234".repeat(40));
+        let view_w = 300.0;
+
+        let no_wrap = layout(&long, f32::INFINITY);
+        assert!(
+            no_wrap.size().x > view_w,
+            "前提不成立：这段文本本来就没超宽（{} px）",
+            no_wrap.size().x
+        );
+
+        let wrapped = layout(&long, view_w);
+        assert!(
+            wrapped.size().x <= view_w + 0.5,
+            "换行后仍然超出可视宽度：{} > {}",
+            wrapped.size().x,
+            view_w
+        );
+        assert!(
+            wrapped.rows.len() > no_wrap.rows.len(),
+            "没有真的折行：{} 行 vs {} 行",
+            wrapped.rows.len(),
+            no_wrap.rows.len()
+        );
+    }
+
+    /// 中间没有空格的长 token 必须能从中间断开。JSON 里这是常态（base64 / URL），
+    /// 只按词断的话它照样冲出可视区 —— 所以 break_anywhere 是必需项而非偏好。
+    #[test]
+    fn long_token_without_spaces_still_wraps() {
+        let token = "x".repeat(500);
+        let g = layout(&token, 200.0);
+        assert!(g.rows.len() > 1, "无空格长串没有被断开");
+        assert!(g.size().x <= 200.5, "宽度仍然超限：{}", g.size().x);
+    }
+
+    /// 行号定位：续行不重复打号，且每个逻辑行的起点算得准。
+    #[test]
+    fn row_starts_marks_only_logical_line_beginnings() {
+        // 三个逻辑行，中间那行足够长会被折成多行
+        let text = format!("a\n{}\nc", "b".repeat(200));
+        let g = layout(&text, 120.0);
+
+        let starts = row_starts(&g);
+        assert_eq!(starts.len(), g.rows.len(), "每个视觉行都要有一项");
+
+        let firsts: Vec<usize> = starts
+            .iter()
+            .filter(|(_, is_first)| *is_first)
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(firsts.len(), 3, "只应有 3 个逻辑行首：{firsts:?}");
+        // 起点应落在 "a\n" 之后与最后一行 "c" 之前
+        assert_eq!(firsts[0], 0);
+        assert_eq!(firsts[1], 2, "第二个逻辑行从 'a\\n' 之后开始");
+        assert_eq!(firsts[2], 2 + 200 + 1, "第三个逻辑行紧跟长行的换行符");
+
+        // 视觉行数必须多于逻辑行数，否则这个用例没测到折行
+        assert!(g.rows.len() > 3, "长行没有被折开，用例失去意义");
+    }
+
+    /// 不换行时逻辑行与视觉行一一对应 —— 保证关掉开关后行号行为与从前一致。
+    #[test]
+    fn row_starts_is_identity_without_wrapping() {
+        let text = "one\ntwo\nthree";
+        let g = layout(text, f32::INFINITY);
+        let starts = row_starts(&g);
+        assert_eq!(
+            starts,
+            vec![(0, true), (4, true), (8, true)],
+            "不换行时每个视觉行都该是逻辑行首"
+        );
+    }
+
+    /// 无窗口地驱动**真实的** `code_editor` 组件跑若干帧，把事件喂进去。
+    ///
+    /// 排版与交互都是纯 CPU 的，所以这里跑的是货真价实的组件代码路径（含换行、
+    /// 光标可见↔源映射、编辑落盘），不是另写一份模拟逻辑。
+    ///
+    /// 前三帧模拟一次真实点击以取得焦点：**按下与抬起必须分属不同帧、且时间要推进** ——
+    /// 挤在同一帧、时间恒为 0 时 egui 不会判定为 click，焦点也就拿不到。
+    fn drive(text: &mut String, wrap: bool, width: f32, per_frame: Vec<Vec<Event>>) {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+        // 点在正文区靠右处（避开左侧行号 / 折叠箭头栏），落点即插入点
+        let click_at = pos2(width * 0.6, 20.0);
+        let btn = |pressed: bool| Event::PointerButton {
+            pos: click_at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+
+        let mut frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(click_at)],
+            vec![btn(true)],
+            vec![btn(false)],
+        ];
+        frames.extend(per_frame);
+
+        for (i, events) in frames.into_iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(i as f64 * 0.05),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                code_editor(ui, &theme, "test-editor", text, 300.0, wrap);
+            });
+        }
+    }
+
+    /// 跑一帧组件，返回所有被画出去的文字的最右边界。
+    ///
+    /// 这是在没有 GPU、截不了图的环境里，最接近「看一眼界面」的检查：
+    /// 直接问渲染输出里的文字画到了哪儿。换行宽度算式（要扣掉行号栏、滚动条、
+    /// 行尾光标位）一旦算歪，这里立刻能看出来。
+    fn painted_text_right_edge(text: &str, wrap: bool, width: f32) -> f32 {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        let mut buf = text.to_owned();
+        let mut right = f32::NEG_INFINITY;
+        // 跑两帧：第一帧建立布局，第二帧的输出才是稳定的
+        for i in 0..2 {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0))),
+                    time: Some(i as f64 * 0.05),
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "paint-probe", &mut buf, 300.0, wrap);
+                },
+            );
+            if i == 1 {
+                for cs in &out.shapes {
+                    if matches!(cs.shape, Shape::Text(_)) {
+                        right = right.max(cs.shape.visual_bounding_rect().right());
+                    }
+                }
+            }
+        }
+        right
+    }
+
+    /// 开着换行时，画出去的文字**一个字都不能越过可视区右边界**。
+    /// 这正是用户看到的症状：超出去的部分被裁掉，既看不见也够不着。
+    #[test]
+    fn wrapped_text_never_paints_past_the_viewport() {
+        let long = format!("{{\n  \"u\": \"https://x.dev/{}\"\n}}", "p".repeat(400));
+        let width = 480.0;
+
+        let wrapped = painted_text_right_edge(&long, true, width);
+        assert!(wrapped.is_finite(), "没有画出任何文字，用例本身失效了");
+        assert!(
+            wrapped <= width,
+            "开着换行仍然画到了可视区之外：右边界 {wrapped} > 视宽 {width}"
+        );
+
+        // 反面对照：关掉换行时文字确实会冲出去（此时靠横向滚动查看）
+        let unwrapped = painted_text_right_edge(&long, false, width);
+        assert!(
+            unwrapped > width,
+            "对照组不成立：不换行时本应超出可视区（{unwrapped}）"
+        );
+    }
+
+    /// 目标场景的正面验证：**开着自动换行时仍然可以编辑**。
+    /// 键入的字符必须落到点击处，而不是被换行改动坐标后落到别处。
+    #[test]
+    fn text_is_editable_while_wrapping() {
+        let mut text = format!("{{\n  \"v\": \"{}\"\n}}", "z".repeat(400));
+        let before = text.clone();
+        drive(
+            &mut text,
+            true,
+            420.0,
+            vec![vec![Event::Text("Q".to_owned())]],
+        );
+        assert_ne!(text, before, "开着换行时键入没有生效");
+        assert_eq!(
+            text.chars().filter(|c| *c == 'Q').count(),
+            1,
+            "应当正好插入一个字符：{}",
+            &text[..text.len().min(60)]
+        );
+        // 点击落在折行后的某个视觉行上，Q 会插进 z 串中间 —— 这正是要的：
+        // 换行后点哪儿就改哪儿。原有内容一个字符都不能丢。
+        assert_eq!(
+            text.chars().filter(|c| *c == 'z').count(),
+            400,
+            "原有内容被改坏了"
+        );
+        assert!(text.starts_with("{\n  \"v\": \""));
+        assert!(text.ends_with("\"\n}"));
+    }
+
+    /// 连续键入 + 退格：换行状态下的多次编辑必须逐次落到正确位置。
+    #[test]
+    fn successive_edits_land_correctly_while_wrapping() {
+        let mut text = format!("[\n  \"{}\"\n]", "w".repeat(300));
+        drive(
+            &mut text,
+            true,
+            360.0,
+            vec![
+                vec![Event::Text("A".to_owned())],
+                vec![Event::Text("B".to_owned())],
+                vec![Event::Key {
+                    key: Key::Backspace,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            ],
+        );
+        assert_eq!(text.chars().filter(|c| *c == 'A').count(), 1, "A 没留下");
+        assert_eq!(
+            text.chars().filter(|c| *c == 'B').count(),
+            0,
+            "退格没有删掉刚输入的 B"
+        );
+    }
+
+    /// 模拟「按住左键从 A 拖到 B」再发一个 Copy，返回被放进剪贴板的文本。
+    ///
+    /// 用复制内容来断言选区，是因为选区本身在组件私有状态里；而复制正是用户
+    /// 选中之后最常做的事 —— 复制拿不到东西，就等于选中没生效。
+    fn drag_select_and_copy(text: &str, wrap: bool, width: f32, from: Pos2, to: Pos2) -> String {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        let mut buf = text.to_owned();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(from)],
+            vec![btn(from, true)],         // 按下
+            vec![Event::PointerMoved(to)], // 拖动
+            vec![Event::PointerMoved(to)], // 多给一帧让拖拽状态稳定
+            vec![btn(to, false)],          // 松开 → 选区定型
+            vec![Event::Copy],
+        ];
+        let mut copied = String::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "sel-probe", &mut buf, 300.0, wrap);
+                },
+            );
+            for cmd in &out.platform_output.commands {
+                if let egui::output::OutputCommand::CopyText(s) = cmd {
+                    copied = s.clone();
+                }
+            }
+        }
+        copied
+    }
+
+    /// 用户报的问题：**格式化之后选不中**。格式化会让内容变高、超出视口，
+    /// 所以这条用一份「远高于视口」的内容来复现。
+    #[test]
+    fn selection_works_when_content_overflows_viewport() {
+        // 40 行，远超 300px 高的视口
+        let mut lines = vec!["{".to_owned()];
+        for i in 0..40 {
+            lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
+        }
+        lines.push("  \"last\": 1".to_owned());
+        lines.push("}".to_owned());
+        let text = lines.join("\n");
+
+        let copied = drag_select_and_copy(
+            &text,
+            true,
+            520.0,
+            pos2(80.0, 20.0),  // 第二行行首附近
+            pos2(300.0, 60.0), // 往右下拖几行
+        );
+        assert!(
+            !copied.is_empty(),
+            "内容超出视口后拖拽选不中任何东西（用户报的问题）"
+        );
+        assert!(copied.contains("key"), "选中的内容不对：{copied:?}");
+    }
+
+    /// 更贴近用户操作顺序：**先在编辑器外点一下（比如点工具条上的「格式化」），
+    /// 再回到编辑器里拖拽选中**。点工具条会让编辑器失焦，失焦之后还能不能选，
+    /// 正是用户报的「格式化后选不中」。
+    #[test]
+    fn selection_works_after_clicking_outside_first() {
+        let mut lines = vec!["{".to_owned()];
+        for i in 0..40 {
+            lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
+        }
+        lines.push("}".to_owned());
+        let text = lines.join("\n");
+
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        let mut buf = text.clone();
+        // 屏幕比编辑器高，底部留出「编辑器之外」的地方可点
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 460.0));
+        let outside = pos2(260.0, 440.0);
+        let (from, to) = (pos2(80.0, 20.0), pos2(300.0, 60.0));
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let frames: Vec<Vec<Event>> = vec![
+            // ① 先在编辑器里点一下（正常使用会先聚焦）
+            vec![Event::PointerMoved(from)],
+            vec![btn(from, true)],
+            vec![btn(from, false)],
+            // ② 点编辑器外面（等价于点工具条按钮）→ 编辑器失焦
+            vec![Event::PointerMoved(outside)],
+            vec![btn(outside, true)],
+            vec![btn(outside, false)],
+            // ③ 回到编辑器里拖拽选中
+            vec![Event::PointerMoved(from)],
+            vec![btn(from, true)],
+            vec![Event::PointerMoved(to)],
+            vec![Event::PointerMoved(to)],
+            vec![btn(to, false)],
+            vec![Event::Copy],
+        ];
+        let mut copied = String::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "sel-after-outside", &mut buf, 300.0, true);
+                },
+            );
+            for cmd in &out.platform_output.commands {
+                if let egui::output::OutputCommand::CopyText(s) = cmd {
+                    copied = s.clone();
+                }
+            }
+        }
+        assert_eq!(buf, text, "整个过程不该改动内容");
+        assert!(
+            !copied.is_empty(),
+            "在编辑器外点过之后就再也选不中了 —— 正是用户报的现象"
+        );
+        assert!(copied.contains("key"), "选中的内容不对：{copied:?}");
+    }
+
+    /// 选中之后，选区底色必须**真的画出来**。
+    ///
+    /// 前面几条测试证明的是选区「状态」对（复制拿得到内容），但用户看到的是像素：
+    /// 选区若没被画进 galley 网格，操作再正确也等于「选不中」。这里扫描渲染输出里
+    /// 有没有选区底色的顶点。
+    #[test]
+    fn selection_highlight_is_actually_painted() {
+        let theme = crate::theme::Theme::dark();
+        let sel_color = theme.accent.gamma_multiply(0.35);
+        let mut lines = vec!["{".to_owned()];
+        for i in 0..40 {
+            lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
+        }
+        lines.push("}".to_owned());
+        let mut buf = lines.join("\n");
+
+        let ctx = egui::Context::default();
+        // 必须把主题装上：选区底色取自 ui.visuals().selection.bg_fill，
+        // 不装主题扫到的就是 egui 的默认色，等于没测
+        theme.apply(&ctx);
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0));
+        let (from, to) = (pos2(80.0, 20.0), pos2(300.0, 60.0));
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(from)],
+            vec![btn(from, true)],
+            vec![Event::PointerMoved(to)],
+            vec![Event::PointerMoved(to)],
+            vec![btn(to, false)],
+            vec![], // 松开后再画一帧，这一帧就该看到选区
+        ];
+        let mut painted = false;
+        for (i, events) in frames.into_iter().enumerate() {
+            let last = i == 5;
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "sel-paint", &mut buf, 300.0, true);
+                },
+            );
+            if last {
+                for cs in &out.shapes {
+                    if let Shape::Text(t) = &cs.shape {
+                        for row in t.galley.rows.iter() {
+                            if row
+                                .visuals
+                                .mesh
+                                .vertices
+                                .iter()
+                                .any(|v| v.color == sel_color)
+                            {
+                                painted = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(painted, "选区底色没有被画出来 —— 用户会觉得「选不中」");
+    }
+
+    /// 跑一串事件后返回被复制的文本（用来断言各种「选中」手势的结果）。
+    fn run_events(text: &str, wrap: bool, width: f32, frames: Vec<Vec<Event>>) -> String {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        theme.apply(&ctx);
+        let mut buf = text.to_owned();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+        let mut copied = String::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "gesture", &mut buf, 300.0, wrap);
+                },
+            );
+            for cmd in &out.platform_output.commands {
+                if let egui::output::OutputCommand::CopyText(s) = cmd {
+                    copied = s.clone();
+                }
+            }
+        }
+        copied
+    }
+
+    fn key(k: Key, cmd: bool) -> Event {
+        Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: cmd,
+                ctrl: cmd,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// 全选（Ctrl/Cmd+A）→ 复制，必须拿到全文。
+    /// 这是最常用的「选中」手势，比拖拽还常用。
+    #[test]
+    fn select_all_then_copy_returns_whole_text() {
+        let text = "{\n  \"a\": 1,\n  \"b\": [1, 2, 3]\n}";
+        let at = pos2(200.0, 20.0);
+        let btn = |p: bool| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: p,
+            modifiers: Default::default(),
+        };
+        let copied = run_events(
+            text,
+            true,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(at)],
+                vec![btn(true)],
+                vec![btn(false)],
+                vec![key(Key::A, true)],
+                vec![Event::Copy],
+            ],
+        );
+        assert_eq!(copied, text, "全选后复制应当拿到完整内容");
+    }
+
+    /// 双击选词：双击一个 key 名，应当选中那个词而不是空。
+    #[test]
+    fn double_click_selects_a_word() {
+        let text = "{\n  \"service\": \"gateway\"\n}";
+        let at = pos2(70.0, 20.0); // 第二行的 "service" 附近
+        let btn = |p: bool| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: p,
+            modifiers: Default::default(),
+        };
+        let copied = run_events(
+            text,
+            true,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(at)],
+                vec![btn(true)],
+                vec![btn(false)],
+                vec![btn(true)], // 第二次按下 → 双击
+                vec![btn(false)],
+                vec![Event::Copy],
+            ],
+        );
+        assert!(!copied.is_empty(), "双击没有选中任何东西");
+    }
+
+    /// Shift + 方向键扩选，然后复制。
+    #[test]
+    fn shift_arrow_extends_selection() {
+        let text = "{\n  \"abc\": 1\n}";
+        let at = pos2(40.0, 20.0);
+        let btn = |p: bool| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: p,
+            modifiers: Default::default(),
+        };
+        let shift_right = Event::Key {
+            key: Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        let copied = run_events(
+            text,
+            true,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(at)],
+                vec![btn(true)],
+                vec![btn(false)],
+                vec![shift_right.clone(), shift_right.clone(), shift_right],
+                vec![Event::Copy],
+            ],
+        );
+        assert_eq!(
+            copied.chars().count(),
+            3,
+            "Shift+→ 三次应当选中 3 个字符：{copied:?}"
+        );
+    }
+
+    /// 失焦之后选区仍要留在屏幕上（只是淡一点）。
+    ///
+    /// 这条对应用户报的现象：点一下工具条的按钮（编辑器随之失焦），刚选好的东西
+    /// 就看不见了 —— 用起来就是「格式化之后选不中」。
+    #[test]
+    fn selection_stays_visible_after_losing_focus() {
+        let theme = crate::theme::Theme::dark();
+        let sel = theme.accent.gamma_multiply(0.35);
+        let dim = sel.gamma_multiply(0.5);
+        let mut buf = "{\n  \"a\": 1,\n  \"b\": 2\n}".to_owned();
+
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        // 屏幕比编辑器高，底部可以点到「编辑器之外」
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 460.0));
+        let (from, to, outside) = (pos2(60.0, 20.0), pos2(200.0, 20.0), pos2(260.0, 440.0));
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(from)],
+            vec![btn(from, true)],
+            vec![Event::PointerMoved(to)],
+            vec![Event::PointerMoved(to)],
+            vec![btn(to, false)],
+            // 到这里选区已经形成；接着点编辑器外面（等价于点工具条按钮）
+            vec![Event::PointerMoved(outside)],
+            vec![btn(outside, true)],
+            vec![btn(outside, false)],
+            vec![], // 失焦之后再画一帧
+        ];
+        let mut found = false;
+        for (i, events) in frames.into_iter().enumerate() {
+            let last = i == 8;
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "sel-blur", &mut buf, 300.0, true);
+                },
+            );
+            if last {
+                for cs in &out.shapes {
+                    if let Shape::Text(t) = &cs.shape {
+                        for row in t.galley.rows.iter() {
+                            if row
+                                .visuals
+                                .mesh
+                                .vertices
+                                .iter()
+                                .any(|v| v.color == dim || v.color == sel)
+                            {
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found,
+            "编辑器失焦后选区就不见了 —— 点一下工具条按钮就等于白选"
+        );
+    }
+
+    /// 折叠区间要数出**直接**子节点数：对象数键、数组数元素，嵌套层各数各的。
+    #[test]
+    fn regions_count_direct_children() {
+        let json = "{\n  \"a\": 1,\n  \"b\": {\n    \"x\": 1,\n    \"y\": 2,\n    \"z\": 3\n  },\n  \"c\": [\n    10,\n    20\n  ]\n}";
+        let chars: Vec<char> = json.chars().collect();
+        let rs = scan_regions(&chars);
+        // 按起点排序：最外层对象、内层对象 b、数组 c
+        let mut rs = rs;
+        rs.sort_by_key(|r| r.br);
+        assert_eq!(rs.len(), 3, "应识别出 3 个可折叠区间");
+        assert_eq!(
+            (rs[0].count, rs[0].obj),
+            (3, true),
+            "外层对象有 a/b/c 三个键"
+        );
+        assert_eq!((rs[1].count, rs[1].obj), (3, true), "内层对象 b 有三个键");
+        assert_eq!((rs[2].count, rs[2].obj), (2, false), "数组 c 有两个元素");
+    }
+
+    /// 空容器要数成 0，不能因为「没有逗号」就算成 1。
+    #[test]
+    fn empty_containers_count_zero() {
+        let json = "{\n  \"empty_obj\": {\n  },\n  \"empty_arr\": [\n  ]\n}";
+        let chars: Vec<char> = json.chars().collect();
+        let mut rs = scan_regions(&chars);
+        rs.sort_by_key(|r| r.br);
+        assert_eq!(rs[1].count, 0, "空对象应为 0 项");
+        assert_eq!(rs[2].count, 0, "空数组应为 0 个");
+        // 但外层对象自己有两个键
+        assert_eq!(rs[0].count, 2);
+    }
+
+    /// 字符串里的括号和逗号不能参与计数。
+    #[test]
+    fn commas_inside_strings_do_not_count() {
+        let json = "{\n  \"csv\": \"a,b,c,d\",\n  \"brace\": \"{[\"\n}";
+        let chars: Vec<char> = json.chars().collect();
+        let rs = scan_regions(&chars);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].count, 2, "字符串里的逗号不算键：{}", rs[0].count);
+    }
+
+    /// 折叠之后，可见文本里必须出现节点数，且可见↔源的映射仍然对得上。
+    #[test]
+    fn folded_placeholder_shows_count_and_mapping_holds() {
+        let json = "{\n  \"list\": [\n    1,\n    2,\n    3\n  ],\n  \"tail\": 9\n}";
+        let chars: Vec<char> = json.chars().collect();
+        let n = chars.len();
+        let regions = scan_regions(&chars);
+        // 折叠那个数组
+        let arr = regions.iter().find(|r| !r.obj).expect("应有一个数组区间");
+        let folded: HashSet<usize> = [arr.br].into_iter().collect();
+        let (vis, segs) = build_visible(&chars, n, &regions, &folded);
+
+        assert!(vis.contains("3 个"), "折叠占位里应显示元素数：{vis}");
+        assert!(!vis.contains("\n    1,"), "被折叠的内容不该还在可见文本里");
+        assert!(vis.contains("\"tail\": 9"), "折叠区间之外的内容必须保留");
+
+        // 占位之后的字符要能正确映回源：拿 "tail" 在可见文本里的位置换算回源，
+        // 源里同一位置也应当是 "tail"
+        let vpos = vis.chars().collect::<Vec<_>>();
+        let tail_v = vis
+            .char_indices()
+            .scan(0usize, |ci, (_, c)| {
+                let cur = *ci;
+                *ci += 1;
+                Some((cur, c))
+            })
+            .position(|(i, _)| vpos[i..].starts_with(&['t', 'a', 'i', 'l']))
+            .expect("可见文本里应有 tail");
+        let (src_ci, _) = map_vis(&segs, tail_v, n);
+        let src: String = chars[src_ci..(src_ci + 4).min(n)].iter().collect();
+        assert_eq!(src, "tail", "占位长度变化后映射错位了");
+    }
+
+    /// **输入法在场时的拖拽选择**。
+    ///
+    /// Linux 上 ibus 之类的输入法会在文本框聚焦期间持续发送**空的 Preedit**
+    /// （「当前没有在组字」的心跳）。这类事件必须当作无事发生 —— 一旦借它去动光标，
+    /// 正在进行的拖拽选区就会每帧被塌回一个点，用户看到的就是「怎么拖都只选中一两个字」。
+    ///
+    /// 这条用例把空 Preedit 混进拖拽过程，断言选区照样能拉开。
+    #[test]
+    fn drag_selection_survives_empty_ime_preedit() {
+        let mut lines = vec!["{".to_owned()];
+        for i in 0..20 {
+            lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
+        }
+        lines.push("}".to_owned());
+        let text = lines.join("\n");
+
+        let ime_noise = Event::Ime(egui::ImeEvent::Preedit {
+            text: String::new(),
+            active_range_chars: None,
+        });
+        let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let (from, mid, to) = (pos2(70.0, 20.0), pos2(180.0, 20.0), pos2(300.0, 20.0));
+
+        let copied = run_events(
+            &text,
+            true,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(from), ime_noise.clone()],
+                vec![btn(from, true), ime_noise.clone()],
+                // 拖拽过程中输入法一直在发空 Preedit
+                vec![Event::PointerMoved(mid), ime_noise.clone()],
+                vec![Event::PointerMoved(mid), ime_noise.clone()],
+                vec![Event::PointerMoved(to), ime_noise.clone()],
+                vec![Event::PointerMoved(to), ime_noise.clone()],
+                vec![btn(to, false), ime_noise.clone()],
+                vec![Event::Copy],
+            ],
+        );
+        assert!(
+            copied.chars().count() > 5,
+            "输入法发空 Preedit 时拖拽只能选中 {} 个字符：{copied:?}",
+            copied.chars().count()
+        );
+    }
+
+    /// 中文输入不能被上面那条「空事件原地返回」的修复误伤。
+    ///
+    /// 走一遍真实的组字流程：逐步 Preedit（预编辑串上屏又被替换）→
+    /// Preedit("") + Commit(汉字)（这两个常在**同一帧**到达）。
+    #[test]
+    fn chinese_ime_composition_still_commits() {
+        // 第二行是一段较长的字符串值，这样点在中间必然落在引号**内部**，
+        // 插入的中文不会破坏 JSON 结构
+        let text = "{\n  \"k\": \"AAAAAAAAAAAAAAAAAAAA\"\n}";
+        let at = pos2(140.0, 20.0);
+        let btn = |p: bool| Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: p,
+            modifiers: Default::default(),
+        };
+        let pre = |s: &str| {
+            Event::Ime(egui::ImeEvent::Preedit {
+                text: s.to_owned(),
+                active_range_chars: None,
+            })
+        };
+
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        theme.apply(&ctx);
+        let mut buf = text.to_owned();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0));
+        let frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(at)],
+            vec![btn(true)],
+            vec![btn(false)],
+            vec![pre("n")],
+            vec![pre("ni")],
+            vec![pre("nih")],
+            vec![pre("你")],
+            // 清空预编辑 + 提交，同一帧到达（真实输入法就是这么发的）
+            vec![
+                pre(""),
+                Event::Ime(egui::ImeEvent::Commit("你好".to_owned())),
+            ],
+        ];
+        for (i, events) in frames.into_iter().enumerate() {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "ime-cn", &mut buf, 300.0, true);
+                },
+            );
+        }
+        assert!(buf.contains("你好"), "中文没能上屏：{buf:?}");
+        assert!(
+            !buf.contains("nih") && !buf.contains("ni\""),
+            "预编辑的拼音残留在正文里了：{buf:?}"
+        );
+        assert!(
+            ferric_core::json::validate(&buf).is_ok(),
+            "输入后结构被破坏：{buf:?}"
+        );
+    }
+
+    /// 跑若干帧，返回每帧**正文首个文字**被画在哪个 x 上。
+    ///
+    /// 横向滚动生效与否，看的就是这个 x 有没有随滚动左移 —— 比断言内部偏移量更贴近
+    /// 用户实际看到的东西。
+    fn painted_text_left_edges(
+        text: &str,
+        wrap: bool,
+        width: f32,
+        frames: Vec<Vec<Event>>,
+    ) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::dark();
+        theme.apply(&ctx);
+        let mut buf = text.to_owned();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+        let mut out_x = Vec::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "hscroll", &mut buf, 300.0, wrap);
+                },
+            );
+            let mut left = f32::INFINITY;
+            for cs in &out.shapes {
+                if let Shape::Text(t) = &cs.shape {
+                    // 行号是逐个画的小段文字，正文是一整块；取最宽的那块即正文
+                    if t.galley.size().x > 200.0 {
+                        left = left.min(t.pos.x);
+                    }
+                }
+            }
+            out_x.push(left);
+        }
+        out_x
+    }
+
+    fn hscroll(dx: f32) -> Event {
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(dx, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// **关掉自动换行时，左右滚动必须真的能滚**。
+    ///
+    /// 不换行的长行会伸到可视区之外，此时唯一的查看手段就是横向滚动；
+    /// 滚不动就等于那部分内容根本看不到。
+    #[test]
+    fn horizontal_scrolling_works_when_wrap_is_off() {
+        let long = format!("{{\n  \"v\": \"{}\"\n}}", "0123456789".repeat(60));
+        let width = 520.0;
+        // 先让指针停在编辑区内（滚动事件要落到这个 ScrollArea 上）
+        let hover = pos2(300.0, 60.0);
+        let xs = painted_text_left_edges(
+            &long,
+            false,
+            width,
+            vec![
+                vec![Event::PointerMoved(hover)],
+                vec![Event::PointerMoved(hover)],
+                vec![hscroll(-200.0)],
+                vec![],
+                vec![hscroll(-200.0)],
+                vec![],
+            ],
+        );
+        let first = xs[1];
+        let last = *xs.last().unwrap();
+        assert!(first.is_finite() && last.is_finite(), "没找到正文文字块");
+        assert!(
+            last < first - 50.0,
+            "关掉换行后横向滚不动：正文左边界从 {first} 变到 {last}"
+        );
+    }
+
+    /// **Shift + 滚轮**必须能左右滚。绝大多数鼠标只有纵向滚轮，
+    /// 这是台式机用户查看长行的主要方式。
+    #[test]
+    fn shift_wheel_scrolls_horizontally_when_wrap_is_off() {
+        let long = format!("{{\n  \"v\": \"{}\"\n}}", "0123456789".repeat(60));
+        let hover = pos2(300.0, 60.0);
+        let shift_wheel = |dy: f32| Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        };
+        let xs = painted_text_left_edges(
+            &long,
+            false,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(hover)],
+                vec![Event::PointerMoved(hover)],
+                vec![shift_wheel(-200.0)],
+                vec![],
+                vec![shift_wheel(-200.0)],
+                vec![],
+            ],
+        );
+        let (first, last) = (xs[1], *xs.last().unwrap());
+        assert!(
+            last < first - 50.0,
+            "Shift+滚轮没能横向滚动：{first} → {last}"
+        );
+    }
+
+    /// 数一帧里画出的滚动条：返回 (有横向条, 有纵向条)。
+    fn scrollbars_shown(text: &str, wrap: bool, w: f32, h: f32) -> (bool, bool) {
+        let theme = crate::theme::Theme::dark();
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        let mut buf = text.to_owned();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
+        let (mut hb, mut vb) = (false, false);
+        for i in 0..3 {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "bars", &mut buf, h - 20.0, wrap);
+                },
+            );
+            if i == 2 {
+                for cs in &out.shapes {
+                    let r = cs.shape.visual_bounding_rect();
+                    if !r.is_finite() || r.width() <= 0.0 || r.height() <= 0.0 {
+                        continue;
+                    }
+                    // 横向条：扁而宽、贴底；纵向条：窄而高、贴右
+                    if r.width() > 60.0 && r.height() <= 12.0 && r.bottom() > h - 60.0 {
+                        hb = true;
+                    }
+                    if r.height() > 60.0 && r.width() <= 12.0 && r.right() > w - 60.0 {
+                        vb = true;
+                    }
+                }
+            }
+        }
+        (hb, vb)
+    }
+
+    /// **短而宽的内容不该冒出纵向滚动条**。
+    ///
+    /// 横向滚动条一出现就会吃掉底部十几像素；若内容高度仍按满高算，就会出现
+    /// 「内容高 > 视口高」，凭空多一根只能滚十几像素的纵向条 —— 用户看到的是
+    /// 「右边这条的高度跟内容对不上」。
+    #[test]
+    fn short_but_wide_content_gets_only_a_horizontal_bar() {
+        // 只有几行，但有一条很长的行
+        let text = format!("{{\n  \"v\": \"{}\",\n  \"n\": 1\n}}", "x".repeat(400));
+        let (h_bar, v_bar) = scrollbars_shown(&text, false, 520.0, 400.0);
+        assert!(h_bar, "关掉换行、内容超宽，应当有横向滚动条");
+        assert!(
+            !v_bar,
+            "内容只有几行却冒出了纵向滚动条（横向条占位没被扣掉）"
+        );
+    }
+
+    /// 又高又宽时两条都要有 —— 上一条修复不能把该有的纵向条也修没了。
+    #[test]
+    fn tall_and_wide_content_gets_both_bars() {
+        let mut lines = vec!["{".to_owned()];
+        lines.push(format!("  \"v\": \"{}\",", "x".repeat(400)));
+        for i in 0..60 {
+            lines.push(format!("  \"k{i:02}\": {i},"));
+        }
+        lines.push("  \"last\": 0\n}".to_owned());
+        let (h_bar, v_bar) = scrollbars_shown(&lines.join("\n"), false, 520.0, 400.0);
+        assert!(h_bar && v_bar, "又高又宽时两条滚动条都该出现");
+    }
+
+    /// 编辑器改的样式（滚动条形态、滑块配色）**不能外溢**给调用方。
+    ///
+    /// `Ui::visuals_mut` 改的是调用方那个 Ui 的样式，不隔离的话会污染后面画的东西 ——
+    /// 实测曾把侧栏分隔线染成深灰。这条守住那层 scope。
+    #[test]
+    fn editor_does_not_leak_style_to_caller() {
+        let theme = crate::theme::Theme::dark();
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        let mut buf = "{\n  \"a\": 1\n}".to_owned();
+        let mut before = None;
+        let mut after = None;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0))),
+                ..Default::default()
+            },
+            |ui| {
+                before = Some((
+                    ui.spacing().scroll.floating,
+                    ui.visuals().widgets.inactive.bg_fill,
+                ));
+                code_editor(ui, &theme, "leak", &mut buf, 200.0, false);
+                after = Some((
+                    ui.spacing().scroll.floating,
+                    ui.visuals().widgets.inactive.bg_fill,
+                ));
+            },
+        );
+        assert_eq!(before, after, "编辑器把样式改动泄漏给了调用方");
+    }
+
+    /// 关掉换行且有长行时，**横向滚动条要真的画出来** —— 看不见就等于用户不知道能滚。
+    #[test]
+    fn horizontal_scrollbar_is_visible_when_wrap_is_off() {
+        let long = format!("{{\n  \"v\": \"{}\"\n}}", "0123456789".repeat(60));
+        let width = 520.0;
+        let theme = crate::theme::Theme::dark();
+
+        let count_bottom_bars = |wrap: bool| {
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let mut buf = long.clone();
+            let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+            let mut found = false;
+            for i in 0..3 {
+                let out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(i as f64 * 0.05),
+                        events: vec![Event::PointerMoved(pos2(300.0, 60.0))],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        code_editor(ui, &theme, "hbar", &mut buf, 300.0, wrap);
+                    },
+                );
+                if i == 2 {
+                    for cs in &out.shapes {
+                        let r = cs.shape.visual_bounding_rect();
+                        // 横向滚动条：又宽又扁，贴在底部
+                        if r.width() > 60.0 && r.height() < 16.0 && r.top() > 240.0 {
+                            found = true;
+                        }
+                    }
+                }
+            }
+            found
+        };
+
+        assert!(
+            count_bottom_bars(false),
+            "关掉换行、内容超宽，却没有画出横向滚动条"
+        );
+
+        // 滚动条必须是**常驻**的，不能是 egui 默认那种「鼠标靠近才浮现」的浮动条：
+        // 浮动条在浅色主题下淡到几乎看不见（实测白底上是 (252,252,253)），
+        // 用户根本不知道内容可以左右滚。
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        let mut buf = long.clone();
+        let mut floating = true;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0))),
+                ..Default::default()
+            },
+            |ui| {
+                code_editor(ui, &theme, "hbar2", &mut buf, 300.0, false);
+                // 进到编辑器内部看它实际用的样式
+                ui.scope(|ui| {
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                    floating = ui.spacing().scroll.floating;
+                });
+            },
+        );
+        assert!(!floating, "滚动条应当是常驻实心样式");
+    }
+
+    /// 横向滚动时，**行号栏必须钉住不动**，只有正文左右移动。
+    ///
+    /// 行号跟着内容一起滑出屏幕的话，滚到右边就再也不知道自己在第几行 ——
+    /// 横向滚动虽然「能滚」，用起来却是废的。所有代码编辑器都钉住行号栏。
+    #[test]
+    fn gutter_stays_pinned_while_scrolling_horizontally() {
+        let long = format!("{{\n  \"v\": \"{}\"\n}}", "0123456789".repeat(60));
+        let width = 520.0;
+        let hover = pos2(300.0, 60.0);
+        let theme = crate::theme::Theme::dark();
+
+        let ctx = egui::Context::default();
+        theme.apply(&ctx);
+        let mut buf = long.clone();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
+        let frames: Vec<Vec<Event>> = vec![
+            vec![Event::PointerMoved(hover)],
+            vec![Event::PointerMoved(hover)],
+            vec![hscroll(-250.0)],
+            vec![],
+            vec![hscroll(-250.0)],
+            vec![],
+        ];
+        // 每帧记录 (行号文字最左 x, 正文最左 x)
+        let mut samples: Vec<(f32, f32)> = Vec::new();
+        for (i, events) in frames.into_iter().enumerate() {
+            let out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_editor(ui, &theme, "gutter-pin", &mut buf, 300.0, false);
+                },
+            );
+            let (mut num_x, mut body_x) = (f32::INFINITY, f32::INFINITY);
+            for cs in &out.shapes {
+                if let Shape::Text(t) = &cs.shape {
+                    if t.galley.size().x > 200.0 {
+                        body_x = body_x.min(t.pos.x); // 正文（很宽的一整块）
+                    } else if t.galley.text().trim().parse::<u32>().is_ok() {
+                        num_x = num_x.min(t.pos.x); // 行号（纯数字小段）
+                    }
+                }
+            }
+            samples.push((num_x, body_x));
+        }
+
+        let (n0, b0) = samples[1];
+        let (n1, b1) = *samples.last().unwrap();
+        assert!(n0.is_finite() && b0.is_finite(), "没采到行号或正文");
+        assert!(b1 < b0 - 50.0, "正文没有横向滚动：{b0} → {b1}");
+        assert!(
+            (n1 - n0).abs() < 1.0,
+            "行号栏跟着正文一起滚走了：{n0} → {n1}（应当钉住不动）"
+        );
+    }
+
+    /// 开着换行时不该出现横向滚动（内容本来就收在可视区里，滚了也没意义）。
+    #[test]
+    fn no_horizontal_scrolling_when_wrapping() {
+        let long = format!("{{\n  \"v\": \"{}\"\n}}", "0123456789".repeat(60));
+        let hover = pos2(300.0, 60.0);
+        let xs = painted_text_left_edges(
+            &long,
+            true,
+            520.0,
+            vec![
+                vec![Event::PointerMoved(hover)],
+                vec![Event::PointerMoved(hover)],
+                vec![hscroll(-200.0)],
+                vec![],
+            ],
+        );
+        let first = xs[1];
+        let last = *xs.last().unwrap();
+        assert!(
+            (last - first).abs() < 1.0,
+            "开着换行却发生了横向滚动：{first} → {last}"
+        );
+    }
+
+    /// 目标场景的完整串联：**压缩的长 JSON → 格式化 → 在换行状态下继续编辑**。
+    ///
+    /// 逐条对应诉求：格式化出来的长行不再冲出可视区；此时点进去照样能改；
+    /// 改完内容仍是可以再次格式化的合法 JSON。
+    #[test]
+    fn format_then_edit_while_wrapped() {
+        // 只放一个键，保证格式化后的第 2 行就是那条超长行 ——
+        // `drive` 点在第二个视觉行上，正好落进这个字符串值里面
+        let src = format!("{{\"url\":\"https://example.com/{}\"}}", "s".repeat(320));
+        // 1) 格式化
+        let formatted =
+            ferric_core::json::format(&src, ferric_core::json::Indent::Two, false).expect("格式化");
+        let width = 520.0;
+        let longest = formatted.lines().map(|l| l.chars().count()).max().unwrap();
+        assert!(longest > 300, "用例前提：格式化后仍有超长行");
+        assert!(
+            formatted.lines().nth(1).unwrap().chars().count() == longest,
+            "用例前提：第 2 行就是那条长行"
+        );
+
+        // 2) 这一长行开着换行时不会画到可视区之外
+        let right = painted_text_right_edge(&formatted, true, width);
+        assert!(
+            right <= width,
+            "格式化结果仍然溢出可视区：{right} > {width}"
+        );
+
+        // 3) 换行状态下继续编辑
+        let mut text = formatted.clone();
+        drive(
+            &mut text,
+            true,
+            width,
+            vec![vec![Event::Text("X".to_owned())]],
+        );
+        assert_ne!(text, formatted, "格式化之后就改不动了");
+
+        // 4) 编辑发生在字符串值内部，因此结果依然是合法 JSON，可以再次格式化
+        ferric_core::json::validate(&text).expect("编辑后应仍是合法 JSON（改的是字符串值内部）");
+        assert!(
+            ferric_core::json::format(&text, ferric_core::json::Indent::Four, false).is_ok(),
+            "改完之后应当还能再格式化一次"
+        );
+    }
+
+    /// 关掉换行同样能编辑 —— 保证开关只影响排版，不影响编辑通路。
+    #[test]
+    fn text_is_editable_without_wrapping() {
+        let mut text = "{\n  \"a\": 1\n}".to_owned();
+        drive(
+            &mut text,
+            false,
+            420.0,
+            vec![vec![Event::Text("7".to_owned())]],
+        );
+        assert!(text.contains('7'), "关掉换行后键入没有生效：{text}");
+    }
+
+    /// 折叠箭头改用 galley 直接定位，必须能对上目标字符所在的视觉行。
+    /// 这是从前那套「数换行符」的做法在换行后会错位的地方。
+    #[test]
+    fn cursor_position_tracks_wrapped_rows() {
+        let text = format!("{{\n  \"k\": \"{}\"\n}}", "y".repeat(300));
+        let g = layout(&text, 150.0);
+        let last_brace = text.chars().count() - 1; // 结尾的 '}'
+        let y = g.pos_from_cursor(CCursor::new(last_brace)).top();
+        let first_y = g.pos_from_cursor(CCursor::new(0)).top();
+        assert!(y > first_y, "末尾的 }} 应当排在首行之下（折行后依然成立）");
+        // 该位置必须落在最后一个视觉行上
+        let last_row_y = g.rows.last().expect("有行").pos.y;
+        assert!(
+            (y - last_row_y).abs() < 1.0,
+            "定位没落到最后一行：{y} vs {last_row_y}"
+        );
+    }
 }
