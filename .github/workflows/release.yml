@@ -50,19 +50,31 @@ jobs:
       - name: Collect artifacts
         shell: bash
         run: |
+          echo "== packages 目录内容 =="
+          find packages -type f -print || true
           mkdir -p dist
-          case "${{ matrix.target }}" in
+          tag="${GITHUB_REF_NAME}"
+          tgt="${{ matrix.target }}"
+          copy_one() { # copy_one <查找模式> <目标文件名>
+            src=$(find packages -maxdepth 1 -type f -name "$1" | head -n 1)
+            if [ -z "$src" ]; then
+              echo "::error::未找到匹配 $1 的打包产物"
+              exit 1
+            fi
+            cp "$src" "dist/$2"
+          }
+          case "$tgt" in
             windows-*)
-              cp packages/*setup*.exe "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}-setup.exe"
+              copy_one "*.exe" "ferric-${tag}-${tgt}-setup.exe"
               # 免安装便携版：单二进制直接分发
-              cp target/release/ferric.exe "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}-portable.exe"
+              cp target/release/ferric.exe "dist/ferric-${tag}-${tgt}-portable.exe"
               ;;
             macos-*)
-              cp packages/*.dmg "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.dmg"
+              copy_one "*.dmg" "ferric-${tag}-${tgt}.dmg"
               ;;
             linux-*)
-              cp packages/*.deb "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.deb"
-              cp packages/*.AppImage "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.AppImage"
+              copy_one "*.deb" "ferric-${tag}-${tgt}.deb"
+              copy_one "*.AppImage" "ferric-${tag}-${tgt}.AppImage"
               ;;
           esac
           ls -l dist

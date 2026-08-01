@@ -4,3 +4,4 @@ plugins/*/target
 Cargo.lock.orig
 .DS_Store
 /dist
+/packages
