@@ -1,0 +1,86 @@
+name: Release
+
+# 推送 v* 标签触发发版：
+#   git tag v0.5.0 && git push origin v0.5.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x86_64
+            formats: nsis
+          # 首发只出 Windows；发全平台时取消下面注释
+          # - os: macos-latest
+          #   target: macos-aarch64
+          #   formats: dmg
+          # - os: macos-13
+          #   target: macos-x86_64
+          #   formats: dmg
+          # - os: ubuntu-latest
+          #   target: linux-x86_64
+          #   formats: deb,appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 构建号 = git 提交数（ferric-ui/build.rs），浅克隆会算错
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p ferric-app
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+      - name: Package installers
+        run: cargo packager --release --formats ${{ matrix.formats }} --out-dir packages
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          case "${{ matrix.target }}" in
+            windows-*)
+              cp packages/*setup*.exe "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}-setup.exe"
+              # 免安装便携版：单二进制直接分发
+              cp target/release/ferric.exe "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}-portable.exe"
+              ;;
+            macos-*)
+              cp packages/*.dmg "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.dmg"
+              ;;
+            linux-*)
+              cp packages/*.deb "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.deb"
+              cp packages/*.AppImage "dist/ferric-${GITHUB_REF_NAME}-${{ matrix.target }}.AppImage"
+              ;;
+          esac
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
