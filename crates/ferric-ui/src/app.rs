@@ -6,8 +6,8 @@ use crate::theme::Theme;
 use crate::tool::{Shared, Tool};
 use crate::{fonts, icons, views, widgets};
 use egui::{
-    vec2, Align, Align2, CentralPanel, Color32, FontFamily, FontId, Frame, Key, Layout, Margin,
-    CornerRadius, Panel, RichText, ScrollArea, Sense, Stroke,
+    vec2, Align, Align2, CentralPanel, Color32, CornerRadius, FontFamily, FontId, Frame, Key,
+    Layout, Margin, Panel, RichText, ScrollArea, Sense, Stroke,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -248,9 +248,14 @@ impl FerricApp {
                     // 语言切换（显示当前语言，点击切换 中/EN）
                     let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                     if resp.hovered() {
-                        ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::same(9), theme.border);
                     }
-                    let lcol = if resp.hovered() { theme.fg } else { theme.muted };
+                    let lcol = if resp.hovered() {
+                        theme.fg
+                    } else {
+                        theme.muted
+                    };
                     ui.painter().text(
                         rect.center(),
                         Align2::CENTER_CENTER,
@@ -439,7 +444,8 @@ impl FerricApp {
                 ui.add_space(side);
                 let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                 if resp.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(9), theme.border);
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(9), theme.border);
                 }
                 let hcol = if is_fav {
                     theme.accent
@@ -491,7 +497,8 @@ impl FerricApp {
             ui.horizontal(|ui| {
                 ui.add_space(side);
                 let (bar, _) = ui.allocate_exact_size(vec2(4.0, 34.0), Sense::hover());
-                ui.painter().rect_filled(bar, CornerRadius::same(3), theme.accent);
+                ui.painter()
+                    .rect_filled(bar, CornerRadius::same(3), theme.accent);
                 ui.add_space(12.0);
                 ui.add(
                     egui::Label::new(RichText::new(meta.desc).size(14.0).color(theme.muted)).wrap(),

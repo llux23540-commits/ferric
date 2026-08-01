@@ -52,7 +52,11 @@ struct Region {
 #[derive(Clone, Copy)]
 enum SegKind {
     Real(usize), // 对应源字符起点
-    Fold { br: usize, open: usize, close: usize },
+    Fold {
+        br: usize,
+        open: usize,
+        close: usize,
+    },
 }
 #[derive(Clone, Copy)]
 struct Seg {
@@ -79,7 +83,9 @@ pub fn code_editor(
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, '0'));
     let inner_h = height.max(60.0);
 
-    let mut state: EditorState = ui.data_mut(|d| d.get_temp::<EditorState>(id)).unwrap_or_default();
+    let mut state: EditorState = ui
+        .data_mut(|d| d.get_temp::<EditorState>(id))
+        .unwrap_or_default();
 
     let out = egui::ScrollArea::vertical()
         .id_salt((id, "sc"))
@@ -121,7 +127,9 @@ pub fn code_editor(
             // ---- 4. 待映射源光标（上一帧结构编辑后）→ 可见坐标 ----
             if let Some(src) = state.pending.take() {
                 let v = map_src(&segs, src, vis_chars_len);
-                state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(v))));
+                state
+                    .cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(v))));
             }
 
             // ---- 5. 折叠箭头命中框 ----
@@ -219,9 +227,13 @@ pub fn code_editor(
                 if let Some(ptr) = resp.interact_pointer_pos() {
                     if ptr.x >= text_origin.x - 2.0 {
                         let cursor_at = galley.cursor_from_pos(ptr - text_origin);
-                        state
-                            .cursor
-                            .pointer_interaction(ui, &resp, cursor_at, &galley, resp.dragged());
+                        state.cursor.pointer_interaction(
+                            ui,
+                            &resp,
+                            cursor_at,
+                            &galley,
+                            resp.dragged(),
+                        );
                     }
                 }
             }
@@ -380,7 +392,8 @@ pub fn code_editor(
             // 光标 + 输入法候选框定位。
             if has_focus {
                 if let Some(r) = state.cursor.range(&galley) {
-                    let cr = cursor_rect(&galley, &r.primary, row_h).translate(text_origin.to_vec2());
+                    let cr =
+                        cursor_rect(&galley, &r.primary, row_h).translate(text_origin.to_vec2());
                     paint_cursor_end(&painter, ui.visuals(), cr);
                     // 上报候选框位置：焦点期间恒定，OS 才会把输入法窗贴到光标处并开启 IME。
                     ui.ctx().output_mut(|o| {
@@ -452,7 +465,11 @@ fn build_visible(
     folded: &HashSet<usize>,
 ) -> (String, Vec<Seg>) {
     // 取出已折叠区间，按 open 排序，剔除被外层折叠盖住的嵌套区间。
-    let mut active: Vec<Region> = regions.iter().copied().filter(|r| folded.contains(&r.br)).collect();
+    let mut active: Vec<Region> = regions
+        .iter()
+        .copied()
+        .filter(|r| folded.contains(&r.br))
+        .collect();
     active.sort_by_key(|r| r.open);
     let mut top: Vec<Region> = Vec::new();
     let mut cover_end = 0usize;
@@ -774,5 +791,9 @@ fn draw_arrow(painter: &egui::Painter, hit: Rect, folded: bool, color: Color32) 
             pos2(c.x, c.y + 4.0),
         ]
     };
-    painter.add(Shape::convex_polygon(pts.to_vec(), color, egui::Stroke::NONE));
+    painter.add(Shape::convex_polygon(
+        pts.to_vec(),
+        color,
+        egui::Stroke::NONE,
+    ));
 }

@@ -3,8 +3,8 @@
 use crate::icons;
 use crate::theme::Theme;
 use egui::{
-    vec2, Align, Align2, Button, Color32, DragValue, FontId, Frame, Layout, Margin,
-    Response, RichText, CornerRadius, Sense, Stroke, TextEdit, Ui,
+    vec2, Align, Align2, Button, Color32, CornerRadius, DragValue, FontId, Frame, Layout, Margin,
+    Response, RichText, Sense, Stroke, TextEdit, Ui,
 };
 
 pub mod code_editor;
@@ -54,7 +54,11 @@ pub(crate) fn json_highlight(text: &str, font_id: &FontId, theme: &Theme) -> egu
                 k += 1;
             }
             let is_key = k < n && b[k] == b':';
-            let col = if is_key { theme.accent_strong } else { theme.ok };
+            let col = if is_key {
+                theme.accent_strong
+            } else {
+                theme.ok
+            };
             job.append(&text[start..end], 0.0, mk(col));
             run = end;
         } else if c == b'-' || c.is_ascii_digit() {
@@ -344,7 +348,8 @@ pub fn num_field(
 fn icon_flat(ui: &mut Ui, theme: &Theme, ch: char, w: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 44.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, theme.border);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, theme.border);
     }
     let color = if resp.hovered() {
         theme.fg
@@ -599,7 +604,6 @@ pub fn code_area_diff(
     }
     out.inner
 }
-
 
 /// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。返回复制点击。
 pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usize) -> bool {

@@ -66,7 +66,12 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(theme: Theme) -> Self {
-        Self { theme, toasts: Vec::new(), content_height: 0.0, lang: Lang::default() }
+        Self {
+            theme,
+            toasts: Vec::new(),
+            content_height: 0.0,
+            lang: Lang::default(),
+        }
     }
 
     /// 弹一条提示。

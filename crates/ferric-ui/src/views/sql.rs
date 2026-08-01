@@ -84,11 +84,9 @@ impl Tool for SqlTool {
                                 .color(theme.faint),
                         );
                     });
-                Frame::NONE
-                    .inner_margin(Margin::same(4))
-                    .show(ui, |ui| {
-                        widgets::code_area(ui, "sql-in", &mut self.input, true, 16);
-                    });
+                Frame::NONE.inner_margin(Margin::same(4)).show(ui, |ui| {
+                    widgets::code_area(ui, "sql-in", &mut self.input, true, 16);
+                });
             });
 
         ui.add_space(8.0);
