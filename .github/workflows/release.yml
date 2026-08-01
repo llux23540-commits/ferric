@@ -42,9 +42,15 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
       - uses: Swatinem/rust-cache@v2
+        with:
+          # 失败的运行也保存缓存，避免下次全量重编译
+          cache-on-failure: true
       - run: cargo build --release -p ferric-app
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
       - name: Install cargo-packager
-        run: cargo install cargo-packager --locked
+        # binstall 直接下载预编译二进制，比 cargo install 从源码编译快一个数量级
+        run: cargo binstall -y cargo-packager
       - name: Package installers
         run: cargo packager --release --formats ${{ matrix.formats }} --out-dir packages
       - name: Collect artifacts
