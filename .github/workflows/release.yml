@@ -53,8 +53,9 @@ jobs:
         run: cargo binstall -y cargo-packager
       - name: Package installers
         shell: bash
-        # out-dir 必须用绝对路径：相对路径会被解析到 crate 目录而非仓库根
-        run: cargo packager --release --formats ${{ matrix.formats }} --out-dir "$PWD/packages"
+        # out-dir 必须用绝对路径（相对路径会被解析到 crate 目录），
+        # 且要用 GITHUB_WORKSPACE 的原生路径格式（$PWD 在 Windows bash 下是 POSIX 风格，原生程序解析不了）
+        run: cargo packager --release --formats ${{ matrix.formats }} --out-dir "$GITHUB_WORKSPACE/packages"
       - name: Collect artifacts
         shell: bash
         run: |
