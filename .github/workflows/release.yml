@@ -52,6 +52,7 @@ jobs:
         # binstall 直接下载预编译二进制，比 cargo install 从源码编译快一个数量级
         run: cargo binstall -y cargo-packager
       - name: Package installers
+        shell: bash
         run: cargo packager --release --formats ${{ matrix.formats }} --out-dir packages
       - name: Collect artifacts
         shell: bash
@@ -62,16 +63,19 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           tgt="${{ matrix.target }}"
           copy_one() { # copy_one <查找模式> <目标文件名>
-            src=$(find packages -maxdepth 1 -type f -name "$1" | head -n 1)
+            src=$(find packages -maxdepth 2 -type f -name "$1" 2>/dev/null | head -n 1)
+            [ -z "$src" ] && src=$(find target/release -maxdepth 1 -type f -name "$1" 2>/dev/null | head -n 1)
+            [ -z "$src" ] && src=$(find . -maxdepth 3 -type f -name "$1" -not -path './target/*' 2>/dev/null | head -n 1)
             if [ -z "$src" ]; then
-              echo "::error::未找到匹配 $1 的打包产物"
+              echo "::error::未找到匹配 $1 的产物；全盘搜索：$(find . -maxdepth 4 -name "$1" 2>/dev/null | tr '\n' ' ')"
               exit 1
             fi
+            echo "::notice::找到产物 $src"
             cp "$src" "dist/$2"
           }
           case "$tgt" in
             windows-*)
-              copy_one "*.exe" "ferric-${tag}-${tgt}-setup.exe"
+              copy_one "*setup*.exe" "ferric-${tag}-${tgt}-setup.exe"
               # 免安装便携版：单二进制直接分发
               cp target/release/ferric.exe "dist/ferric-${tag}-${tgt}-portable.exe"
               ;;
