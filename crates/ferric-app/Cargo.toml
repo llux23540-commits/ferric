@@ -40,3 +40,11 @@ icons = [
     "icons/icon.ico",
     "icons/icon.icns",
 ]
+
+[package.metadata.packager.macos]
+# ad-hoc 签名（"-"，不需要 Apple 证书）。cargo-packager 不配 signing-identity 就
+# **完全不签**，而 Apple Silicon 对未签名 .app 直接判「已损坏，无法打开」，连
+# 放行入口都没有（v0.2.1 拆包实证：bundle 里没有 _CodeSignature）。ad-hoc 之后
+# 首次打开走「系统设置 → 隐私与安全性 → 仍要打开」。将来有 Developer ID 证书时，
+# 这里换成证书名并在 CI 配 APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD。
+signing-identity = "-"
