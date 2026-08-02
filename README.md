@@ -10,10 +10,15 @@
 
 | 你的机器 | 下载哪个 |
 |---|---|
-| Windows 10/11（x64） | `…windows-x86_64-setup.exe`（安装版）或 `…-portable.exe`（免安装单文件） |
-| **Mac · Apple 芯片（M1–M4）** | `…macos-aarch64.dmg`（aarch64 = ARM64 = Apple Silicon） |
+| Windows · Intel / AMD（x64，最常见） | `…windows-x86_64-setup.exe`（安装版）或 `…-portable.exe`（免安装单文件） |
+| Windows · ARM（骁龙 Snapdragon 本） | `…windows-aarch64-setup.exe` 或对应 portable |
+| Mac · Apple 芯片（M1–M4） | `…macos-aarch64.dmg` |
 | Mac · Intel | `…macos-x86_64.dmg` |
-| Linux（x64） | `…linux-x86_64.deb`（Debian/Ubuntu）或 `.AppImage`（任意发行版） |
+| Linux · Intel / AMD（x64） | `…linux-x86_64.deb`（Debian/Ubuntu）或 `.AppImage`（任意发行版） |
+| Linux · ARM64（树莓派等） | `…linux-aarch64.deb` 或对应 `.AppImage` |
+
+> x64 = x86_64 = amd64 是同一个东西的三种叫法，Intel 和 AMD 的处理器都用它；
+> aarch64 = ARM64（Apple 芯片、骁龙、树莓派同属这一架构，但系统各自要装各自的包）。
 
 ## 已实现（10 工具）
 

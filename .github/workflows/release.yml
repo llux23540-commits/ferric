@@ -22,6 +22,11 @@ jobs:
           - os: windows-latest
             target: windows-x86_64
             formats: nsis
+          # Windows on ARM（骁龙本等）。x64 版靠模拟也能跑，原生包性能/续航更好。
+          # NSIS 的 makensis 是 x86 程序，在 ARM Windows 上走模拟执行，可用。
+          - os: windows-11-arm
+            target: windows-aarch64
+            formats: nsis
           - os: macos-latest
             target: macos-aarch64
             formats: dmg
@@ -31,6 +36,11 @@ jobs:
             formats: dmg
           - os: ubuntu-latest
             target: linux-x86_64
+            formats: deb,appimage
+          # Linux ARM64（树莓派 / ARM 服务器 / Asahi 等）。
+          # arm64 的 AppImage 打包链路已在 aarch64 开发机上预飞行验证。
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
             formats: deb,appimage
     runs-on: ${{ matrix.os }}
     steps:
@@ -143,7 +153,11 @@ jobs:
             ## 下载指引
             | 你的机器 | 下载哪个 |
             |---|---|
-            | Windows 10/11（x64） | `*-windows-x86_64-setup.exe`（安装版）· `*-portable.exe`（免安装） |
-            | **Mac · Apple 芯片（M1–M4）** | `*-macos-aarch64.dmg` |
+            | Windows · Intel / AMD（x64，最常见） | `*-windows-x86_64-setup.exe`（安装版）· `*-portable.exe`（免安装） |
+            | Windows · ARM（骁龙 Snapdragon 本） | `*-windows-aarch64-setup.exe` · 对应 portable |
+            | Mac · Apple 芯片（M1–M4） | `*-macos-aarch64.dmg` |
             | Mac · Intel | `*-macos-x86_64.dmg` |
-            | Linux（x64） | `*.deb`（Debian/Ubuntu）· `*.AppImage`（任意发行版） |
+            | Linux · Intel / AMD（x64） | `*-linux-x86_64.deb`（Debian/Ubuntu）· `.AppImage`（任意发行版） |
+            | Linux · ARM64（树莓派等） | `*-linux-aarch64.deb` · 对应 `.AppImage` |
+
+            > x64 = x86_64 = amd64，同一个东西的三种叫法：Intel 与 AMD 的处理器都用它。
