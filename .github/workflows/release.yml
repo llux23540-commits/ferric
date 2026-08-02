@@ -47,8 +47,10 @@ jobs:
           # 守卫必须在替换**成功**后才置位。
           perl -pi -e '$done ||= s/^version = "[^"]+"/version = "'"$v"'"/' Cargo.toml
           grep -q "^version = \"$v\"" Cargo.toml || { echo "::error::版本覆写失败"; exit 1; }
-          # 序号自查：按「上一个末位 +1、满千进位」推出期望值，不符只提醒不拦截
-          prev=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -n1)
+          # 序号自查：按「上一个末位 +1、满千进位」推出期望值，不符只提醒不拦截。
+          # 结尾 || true 必须有：首个发布时列表筛掉自己后为空，grep 退出码 1，
+          # GitHub 的 bash 是 -eo pipefail，没有它整步直接判死（v0.2.1 首跑就栽在这）。
+          prev=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -n1 || true)
           prev=${prev:-v0.2.0}
           IFS=. read -r a b c <<< "${prev#v}"
           c=$((c+1)); if [ "$c" -ge 1000 ]; then b=$((b+1)); c=0; fi
