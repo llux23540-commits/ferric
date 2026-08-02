@@ -5,10 +5,11 @@ members = ["crates/ferric-core", "crates/ferric-ui", "crates/ferric-app"]
 exclude = ["plugins"]
 
 [workspace.package]
-# 只有主版本（首段）是手写的；后两位 = 构建号/1000 . 构建号%1000（每次 build 末位
-# +1，满千进位）。UI 显示的版本由 ferric-ui/build.rs 推导，安装包元数据由发版 CI
-# 在打包前用同一公式覆写（.github/workflows/release.yml「推导版本号」步）。
-version = "0.0.0"
+# 占位/锚点：真实版本 = 最近一次发布 tag（vX.Y.Z），由 ferric-ui/build.rs 读给 UI、
+# 发版 CI 写回这里供打包（release.yml「按标签定版」步）。规则：下一个 tag = 上一个
+# 末位 +1，满千进位第二位；从 v0.2.1 起步（衔接已发布的 v0.2，避免版本倒挂）。
+# 本地没有任何三段式 tag 时，UI 显示的就是这个锚点值。
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

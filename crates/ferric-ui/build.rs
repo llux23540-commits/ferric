@@ -1,12 +1,14 @@
 //! 构建号 = git 提交数（`git rev-list --count HEAD`），以 FERRIC_BUILD_NUMBER
 //! 环境变量注入编译期。随每次 commit 自增、所有机器/clone 一致、git pull 不产生
-//! 冲突——无需本地计数文件。非 git 环境（如发行版源码包）取不到时回退为 0。
+//! 冲突——无需本地计数文件。仅供更新器比较新旧，不体现在版本号里。
+//! 非 git 环境（如发行版源码包）取不到时回退为 0。
 //!
-//! 版本号 FERRIC_VERSION 由构建号推导：`主版本.构建号/1000.构建号%1000`——
-//! 末位每次 build +1，满 1000 进位到第二位。主版本是唯一手写的部分（workspace
-//! Cargo.toml 的 version 首段）；后两位 Cargo.toml 里只是占位，发版 CI 在打包前
-//! 用同一公式覆写（见 .github/workflows/release.yml「推导版本号」步），保证安装包
-//! 元数据与 UI 显示一致。覆写只动后两位、主版本不变，所以这里的推导是幂等的。
+//! 版本号 FERRIC_VERSION = 最近一次**发布 tag**（vX.Y.Z，去掉 v）。版本只在发版
+//! 打 tag 时前进，平时提交不动它——发版是显式动作，不跟提交数挂钩。
+//! 「末位每发一版 +1、满千进位第二位」的规则作用在发布序号上，落在生成下一个
+//! tag 的命令里（见 .github/workflows/release.yml 头部注释），此外无需任何算术。
+//! 旧式两段 tag（v0.1 / v0.2）不匹配三段 glob，自动忽略。
+//! 取不到 tag（无 git / 浅克隆 / 尚未发过版）回退 Cargo.toml 的占位版本。
 
 use std::process::Command;
 
@@ -22,17 +24,42 @@ fn main() {
         .unwrap_or_else(|| "0".to_owned());
     println!("cargo:rustc-env=FERRIC_BUILD_NUMBER={n}");
 
-    // 版本号推导（公式与 release.yml 的「推导版本号」步保持一致）
-    let major = std::env::var("CARGO_PKG_VERSION")
+    // 版本号 = 最近的三段式发布 tag；发版 CI 打包前会把同一值写进 Cargo.toml
+    // （release.yml「按标签定版」步），安装包元数据与这里显示的一致。
+    let ver = Command::new("git")
+        .args([
+            "describe",
+            "--tags",
+            "--abbrev=0",
+            "--match",
+            "v[0-9]*.[0-9]*.[0-9]*",
+        ])
+        .output()
         .ok()
-        .and_then(|v| v.split('.').next().map(str::to_owned))
-        .unwrap_or_else(|| "0".to_owned());
-    let n_num: u64 = n.parse().unwrap_or(0);
-    println!(
-        "cargo:rustc-env=FERRIC_VERSION={major}.{}.{}",
-        n_num / 1000,
-        n_num % 1000
-    );
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().trim_start_matches('v').to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into()));
+    println!("cargo:rustc-env=FERRIC_VERSION={ver}");
+
+    // 打 tag / fetch 到新 tag 时重跑，刷新版本号（松散 tag 在 refs/tags/ 下，
+    // fetch 来的多半进 packed-refs；两处都盯）。
+    for p in ["refs/tags", "packed-refs"] {
+        if let Ok(out) = Command::new("git")
+            .args(["rev-parse", "--git-path", p])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(p) = String::from_utf8(out.stdout) {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        println!("cargo:rerun-if-changed={p}");
+                    }
+                }
+            }
+        }
+    }
 
     // HEAD 移动（提交 / 切换分支）时重跑本脚本刷新构建号。
     // logs/HEAD 每次 commit/checkout/reset 都会追加，是可靠的触发点；
