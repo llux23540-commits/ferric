@@ -68,7 +68,10 @@ impl RsaTool {
                     self.rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    ui.ctx().request_repaint(); // 继续轮询
+                    // 100ms 轮询而不是每帧 request_repaint()：后者等于生成期间整个
+                    // 应用满帧率空转（生成要跑好几秒）。结果晚 ≤100ms 显示，无感。
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 Err(_) => {
                     self.status = "生成线程意外中断".to_owned();

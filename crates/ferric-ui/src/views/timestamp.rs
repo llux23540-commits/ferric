@@ -90,14 +90,20 @@ impl Tool for TimestampTool {
 
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
-        // 实时刷新：对齐到下一个 100ms 边界再重绘（+5ms 余量确保跨过边界）。
-        // 相比固定间隔，采样点不会在秒内漂移，长时间挂着也不会出现跳秒 / 卡顿。
-        // 暂停时显示定格值，且不再请求重绘（零开销）。
+        // 实时刷新：对齐到下一个**秒**边界再重绘（+5ms 余量确保跨过边界）。
+        // 曾经是 100ms 一跳 —— 即时模式下这等于整个应用以 10Hz 无限重绘（完整布局
+        // + 渲染管线），挂着这个工具 CPU 就下不来。秒级显示 1Hz 就是精准的；毫秒行
+        // 退化为每秒采样，但**复制拿的是点击瞬间的新值**（见下），显示陈旧无害。
+        // 窗口失焦时干脆不调度：后台零重绘，回到前台时 egui 自动补帧追上。
+        // 暂停时显示定格值，同样零调度。
+        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
         let now_ms = if self.running {
             let v = timestamp::now(Precision::Millis);
-            let wait = 100 - (v % 100) + 5;
-            ui.ctx()
-                .request_repaint_after(Duration::from_millis(wait as u64));
+            if focused {
+                let wait = 1000 - (v % 1000) + 5;
+                ui.ctx()
+                    .request_repaint_after(Duration::from_millis(wait as u64));
+            }
             v
         } else {
             self.paused_ms
@@ -111,7 +117,8 @@ impl Tool for TimestampTool {
                 if widgets::pill_toggle(ui, &theme, self.running, "实时刷新") {
                     self.running = !self.running;
                     if !self.running {
-                        self.paused_ms = now_ms; // 定格当前值
+                        // 定格**点击瞬间**的值，而不是本帧开头采的样（可能已陈旧近 1s）
+                        self.paused_ms = timestamp::now(Precision::Millis);
                     }
                 }
                 if !self.running {
@@ -120,9 +127,12 @@ impl Tool for TimestampTool {
                 }
             });
             ui.add_space(6.0);
-            let rows: [(&str, i64); 2] =
-                [("秒级 · 10 位", now_ms / 1000), ("毫秒级 · 13 位", now_ms)];
-            for (label, value) in rows {
+            // (标签, 显示值, 毫秒→该精度的除数)。除数同时服务显示与复制，两处不会岔开。
+            let rows: [(&str, i64, i64); 2] = [
+                ("秒级 · 10 位", now_ms / 1000, 1000),
+                ("毫秒级 · 13 位", now_ms, 1),
+            ];
+            for (label, value, div) in rows {
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [96.0, 20.0],
@@ -142,7 +152,15 @@ impl Tool for TimestampTool {
                     if widgets::subtle_button(ui, &theme, Some(crate::icons::COPY), "复制")
                         .clicked()
                     {
-                        shared.copy(ui.ctx(), value.to_string());
+                        // 运行中复制点击瞬间的新值（显示是 1Hz 采样，可能滞后近 1 秒）；
+                        // 暂停时复制的就是定格值本身。
+                        let fresh = if self.running {
+                            timestamp::now(Precision::Millis)
+                        } else {
+                            self.paused_ms
+                        };
+                        let v = fresh / div;
+                        shared.copy(ui.ctx(), v.to_string());
                     }
                 });
             }
@@ -328,6 +346,65 @@ impl Tool for TimestampTool {
 mod tests {
     use super::*;
     use egui::{vec2, Event, Pos2, Rect};
+
+    /// 重绘节奏的合同：实时时钟每秒最多唤醒一次，暂停后零调度。
+    /// 锁的是 CPU 账单本身 —— 这里曾是 100ms 一跳，等于整个应用常驻 10Hz 重绘。
+    ///
+    /// 断言方式防 flaky：秒对齐的单次等待值本身在 5–1005ms 间取决于起跑相位，
+    /// 单帧下限断言必然间歇性失败。改为间隔 137ms 采 5 帧取 max —— 相位共扫过
+    /// 548ms，秒对齐时 max ≥ 1005-452 ≈ 553ms 恒成立；100ms 节奏时恒 ≤105ms。
+    #[test]
+    fn live_clock_wakes_at_most_once_per_second_and_pause_is_free() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let theme = crate::theme::Theme::light();
+        theme.apply(&ctx);
+        let mut shared = Shared::new(theme);
+        let mut tool = TimestampTool::default();
+
+        let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+                    time: Some(t),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| tool.ui(ui, shared));
+                },
+            )
+        };
+
+        // 预热 3 帧：首帧前后 egui 自身的过场动画（fade-in 等）也会请求短间隔重绘，
+        // repaint_delay 是全部请求的 min，混进采样会把时钟的真实节奏遮住。
+        for i in 0..3 {
+            let _ = frame(&mut tool, &mut shared, i as f64 * 0.02);
+        }
+
+        let mut max_delay = Duration::ZERO;
+        for i in 0..5 {
+            // 模拟时间接在预热帧之后递增 —— 时间倒流会让 egui 重新起动画
+            let out = frame(&mut tool, &mut shared, 0.1 + i as f64 * 0.15);
+            let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            max_delay = max_delay.max(d);
+            std::thread::sleep(Duration::from_millis(137));
+        }
+        assert!(
+            max_delay >= Duration::from_millis(500),
+            "时钟唤醒过密（max {max_delay:?}）：应对齐秒边界、每秒一次，而不是高频轮询"
+        );
+        assert!(
+            max_delay <= Duration::from_millis(1100),
+            "时钟不再刷新（max {max_delay:?}）"
+        );
+
+        // 暂停后：一次重绘都不许再调度
+        tool.running = false;
+        tool.paused_ms = 1_700_000_000_000;
+        let out = frame(&mut tool, &mut shared, 10.0);
+        let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(d > Duration::from_secs(3600), "暂停后仍在调度重绘：{d:?}");
+    }
 
     fn press(pos: Pos2, pressed: bool) -> Event {
         Event::PointerButton {
