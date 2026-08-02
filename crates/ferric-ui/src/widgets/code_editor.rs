@@ -33,6 +33,7 @@ use egui::{
     pos2, vec2, Align2, Color32, Event, EventFilter, Key, Pos2, Rect, Response, Sense, Shape,
     TextBuffer, Ui, Vec2,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// 编辑器持久状态（光标 + 折叠集 + 待映射源光标）。
@@ -94,6 +95,69 @@ fn placeholder_for(count: usize, obj: bool) -> String {
     format!(" ⋯ {count} {unit} ⋯ ")
 }
 
+/// 编辑区的排版设置（字号 / 字重 / 行距）。
+///
+/// 单独拎出来而不是沿用全局 `TextStyle::Monospace`：JSON 要么是密密麻麻几千行、
+/// 要么是需要逐字核对的密钥串，合适的字号与行距因人因内容而异；而这只该影响这块
+/// 编辑区，不该动到整个界面的字号。
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FontCfg {
+    /// 字号（px）。
+    pub size: f32,
+    /// 用中黑（JetBrains Mono Medium）而不是常规字重 —— 小字号下细体容易发虚。
+    pub medium: bool,
+    /// 行距倍数（相对字号）。
+    pub line_scale: f32,
+}
+
+impl Default for FontCfg {
+    fn default() -> Self {
+        // 与改动前的观感一致：egui 默认 Monospace 正是 13px；
+        // 1.35 是 JetBrains Mono 在这个字号下比较耐看的密度。
+        Self {
+            size: 13.0,
+            medium: false,
+            line_scale: 1.35,
+        }
+    }
+}
+
+impl FontCfg {
+    /// 字号范围。下限保证标点还分得清，上限避免一屏放不下几行。
+    pub const MIN_SIZE: f32 = 10.0;
+    pub const MAX_SIZE: f32 = 22.0;
+    /// 行距档位：紧凑 / 标准 / 宽松。
+    pub const LINE_SCALES: [(f32, &'static str); 3] =
+        [(1.15, "紧凑"), (1.35, "标准"), (1.6, "宽松")];
+
+    pub fn font_id(&self) -> egui::FontId {
+        let family = if self.medium {
+            egui::FontFamily::Name(crate::fonts::MONO_MEDIUM.into())
+        } else {
+            egui::FontFamily::Monospace
+        };
+        egui::FontId::new(self.size, family)
+    }
+
+    /// 实际行高（px）。
+    pub fn row_height(&self) -> f32 {
+        (self.size * self.line_scale).max(1.0)
+    }
+
+    /// 夹到合法范围。草稿是用户可写的 ron，脏值不能直接拿去排版。
+    pub fn clamped(mut self) -> Self {
+        if !self.size.is_finite() {
+            self.size = Self::default().size;
+        }
+        if !self.line_scale.is_finite() {
+            self.line_scale = Self::default().line_scale;
+        }
+        self.size = self.size.clamp(Self::MIN_SIZE, Self::MAX_SIZE);
+        self.line_scale = self.line_scale.clamp(1.0, 2.0);
+        self
+    }
+}
+
 /// 渲染一个可编辑、语法高亮、可折叠的 JSON 代码编辑器，铺满 `height`，返回交互 `Response`。
 ///
 /// `wrap = true` 时长行自动换行（不出现横向滚动条）；`false` 时保持长行不断，
@@ -105,11 +169,12 @@ pub fn code_editor(
     text: &mut String,
     height: f32,
     wrap: bool,
+    font: FontCfg,
 ) -> Response {
     // 整体套一层 scope：下面要改滚动条样式与滑块配色，而 `Ui::visuals_mut` 改的是
     // 调用方那个 Ui 的样式 —— 不隔离的话会外溢到别的界面元素上（实测把侧栏的
     // 分隔线染成了深灰）。scope 里的样式改动出了这个函数就作废。
-    ui.scope(|ui| code_editor_inner(ui, theme, id_source, text, height, wrap))
+    ui.scope(|ui| code_editor_inner(ui, theme, id_source, text, height, wrap, font))
         .inner
 }
 
@@ -120,10 +185,13 @@ fn code_editor_inner(
     text: &mut String,
     height: f32,
     wrap: bool,
+    font: FontCfg,
 ) -> Response {
     let id = ui.make_persistent_id(id_source);
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
+    // 排版一律走 FontCfg，不再读全局 TextStyle —— 字号/行距只影响这块编辑区
+    let font = font.clamped();
+    let font_id = font.font_id();
+    let row_h = font.row_height();
     let num_color = ui.visuals().weak_text_color();
     let arrow_color = theme.muted;
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, '0'));
@@ -177,7 +245,7 @@ fn code_editor_inner(
             let gutter_w = char_w * digits as f32 + 26.0;
 
             // ---- 3. 高亮 galley ----
-            let mut job = crate::widgets::json_highlight(&vis, &font_id, theme);
+            let mut job = crate::widgets::json_highlight(&vis, &font_id, theme, Some(row_h));
             job.wrap.max_width = if wrap {
                 // 末尾留一个字符宽：行尾光标要有地方画，否则它会贴在边界上被裁掉
                 (view_w - gutter_w - char_w - 12.0).max(char_w * 8.0)
@@ -1144,7 +1212,15 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                code_editor(ui, &theme, "test-editor", text, 300.0, wrap);
+                code_editor(
+                    ui,
+                    &theme,
+                    "test-editor",
+                    text,
+                    300.0,
+                    wrap,
+                    FontCfg::default(),
+                );
             });
         }
     }
@@ -1168,7 +1244,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "paint-probe", &mut buf, 300.0, wrap);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "paint-probe",
+                        &mut buf,
+                        300.0,
+                        wrap,
+                        FontCfg::default(),
+                    );
                 },
             );
             if i == 1 {
@@ -1295,7 +1379,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "sel-probe", &mut buf, 300.0, wrap);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "sel-probe",
+                        &mut buf,
+                        300.0,
+                        wrap,
+                        FontCfg::default(),
+                    );
                 },
             );
             for cmd in &out.platform_output.commands {
@@ -1386,7 +1478,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "sel-after-outside", &mut buf, 300.0, true);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "sel-after-outside",
+                        &mut buf,
+                        300.0,
+                        true,
+                        FontCfg::default(),
+                    );
                 },
             );
             for cmd in &out.platform_output.commands {
@@ -1450,7 +1550,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "sel-paint", &mut buf, 300.0, true);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "sel-paint",
+                        &mut buf,
+                        300.0,
+                        true,
+                        FontCfg::default(),
+                    );
                 },
             );
             if last {
@@ -1491,7 +1599,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "gesture", &mut buf, 300.0, wrap);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "gesture",
+                        &mut buf,
+                        300.0,
+                        wrap,
+                        FontCfg::default(),
+                    );
                 },
             );
             for cmd in &out.platform_output.commands {
@@ -1656,7 +1772,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "sel-blur", &mut buf, 300.0, true);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "sel-blur",
+                        &mut buf,
+                        300.0,
+                        true,
+                        FontCfg::default(),
+                    );
                 },
             );
             if last {
@@ -1860,7 +1984,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "ime-cn", &mut buf, 300.0, true);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "ime-cn",
+                        &mut buf,
+                        300.0,
+                        true,
+                        FontCfg::default(),
+                    );
                 },
             );
         }
@@ -1900,7 +2032,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "hscroll", &mut buf, 300.0, wrap);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "hscroll",
+                        &mut buf,
+                        300.0,
+                        wrap,
+                        FontCfg::default(),
+                    );
                 },
             );
             let mut left = f32::INFINITY;
@@ -2009,7 +2149,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "bars", &mut buf, h - 20.0, wrap);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "bars",
+                        &mut buf,
+                        h - 20.0,
+                        wrap,
+                        FontCfg::default(),
+                    );
                 },
             );
             if i == 2 {
@@ -2061,6 +2209,150 @@ mod tests {
         assert!(h_bar && v_bar, "又高又宽时两条滚动条都该出现");
     }
 
+    /// 字号设置必须真的改变排版：字号越大，同一段文本画得越宽越高。
+    #[test]
+    fn font_size_changes_layout() {
+        let text = "{\n  \"key\": \"value\",\n  \"n\": 12345\n}";
+        let measure = |size: f32| {
+            let theme = crate::theme::Theme::dark();
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let mut buf = text.to_owned();
+            let mut wh = (0.0f32, 0.0f32);
+            for i in 0..2 {
+                let out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+                        time: Some(i as f64 * 0.05),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        code_editor(
+                            ui,
+                            &theme,
+                            "fsize",
+                            &mut buf,
+                            300.0,
+                            false,
+                            FontCfg {
+                                size,
+                                ..Default::default()
+                            },
+                        );
+                    },
+                );
+                if i == 1 {
+                    for cs in &out.shapes {
+                        if let Shape::Text(t) = &cs.shape {
+                            if t.galley.text().contains("value") {
+                                wh = (t.galley.size().x, t.galley.size().y);
+                            }
+                        }
+                    }
+                }
+            }
+            wh
+        };
+        let small = measure(11.0);
+        let large = measure(20.0);
+        assert!(small.0 > 0.0, "没量到正文");
+        assert!(
+            large.0 > small.0 * 1.4,
+            "字号调大后正文没有变宽：{} → {}",
+            small.0,
+            large.0
+        );
+        assert!(
+            large.1 > small.1 * 1.4,
+            "字号调大后正文没有变高：{} → {}",
+            small.1,
+            large.1
+        );
+    }
+
+    /// 行距设置要真的改变行高（宽度不该跟着变）。
+    #[test]
+    fn line_spacing_changes_height_only() {
+        let text = "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}";
+        let measure = |scale: f32| {
+            let theme = crate::theme::Theme::dark();
+            let ctx = egui::Context::default();
+            theme.apply(&ctx);
+            let mut buf = text.to_owned();
+            let mut wh = (0.0f32, 0.0f32);
+            for i in 0..2 {
+                let out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+                        time: Some(i as f64 * 0.05),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        code_editor(
+                            ui,
+                            &theme,
+                            "lspace",
+                            &mut buf,
+                            300.0,
+                            false,
+                            FontCfg {
+                                line_scale: scale,
+                                ..Default::default()
+                            },
+                        );
+                    },
+                );
+                if i == 1 {
+                    for cs in &out.shapes {
+                        if let Shape::Text(t) = &cs.shape {
+                            if t.galley.text().contains("\"a\"") {
+                                wh = (t.galley.size().x, t.galley.size().y);
+                            }
+                        }
+                    }
+                }
+            }
+            wh
+        };
+        let tight = measure(1.15);
+        let loose = measure(1.6);
+        assert!(tight.1 > 0.0, "没量到正文");
+        assert!(
+            loose.1 > tight.1 * 1.2,
+            "行距调宽后没有变高：{} → {}",
+            tight.1,
+            loose.1
+        );
+        assert!(
+            (loose.0 - tight.0).abs() < 1.0,
+            "行距不该影响宽度：{} → {}",
+            tight.0,
+            loose.0
+        );
+    }
+
+    /// 脏草稿里的字号不能直接拿去排版（用户可写的 ron，可能是 0 / NaN / 巨大值）。
+    #[test]
+    fn font_cfg_clamps_bad_values() {
+        let bad = FontCfg {
+            size: 999.0,
+            medium: false,
+            line_scale: -3.0,
+        }
+        .clamped();
+        assert_eq!(bad.size, FontCfg::MAX_SIZE);
+        assert!(bad.line_scale >= 1.0);
+
+        let nan = FontCfg {
+            size: f32::NAN,
+            medium: true,
+            line_scale: f32::INFINITY,
+        }
+        .clamped();
+        assert!(nan.size.is_finite() && nan.line_scale.is_finite());
+        assert!(nan.row_height() > 0.0);
+    }
+
     /// 编辑器改的样式（滚动条形态、滑块配色）**不能外溢**给调用方。
     ///
     /// `Ui::visuals_mut` 改的是调用方那个 Ui 的样式，不隔离的话会污染后面画的东西 ——
@@ -2083,7 +2375,15 @@ mod tests {
                     ui.spacing().scroll.floating,
                     ui.visuals().widgets.inactive.bg_fill,
                 ));
-                code_editor(ui, &theme, "leak", &mut buf, 200.0, false);
+                code_editor(
+                    ui,
+                    &theme,
+                    "leak",
+                    &mut buf,
+                    200.0,
+                    false,
+                    FontCfg::default(),
+                );
                 after = Some((
                     ui.spacing().scroll.floating,
                     ui.visuals().widgets.inactive.bg_fill,
@@ -2115,7 +2415,15 @@ mod tests {
                         ..Default::default()
                     },
                     |ui| {
-                        code_editor(ui, &theme, "hbar", &mut buf, 300.0, wrap);
+                        code_editor(
+                            ui,
+                            &theme,
+                            "hbar",
+                            &mut buf,
+                            300.0,
+                            wrap,
+                            FontCfg::default(),
+                        );
                     },
                 );
                 if i == 2 {
@@ -2149,7 +2457,15 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                code_editor(ui, &theme, "hbar2", &mut buf, 300.0, false);
+                code_editor(
+                    ui,
+                    &theme,
+                    "hbar2",
+                    &mut buf,
+                    300.0,
+                    false,
+                    FontCfg::default(),
+                );
                 // 进到编辑器内部看它实际用的样式
                 ui.scope(|ui| {
                     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
@@ -2194,7 +2510,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    code_editor(ui, &theme, "gutter-pin", &mut buf, 300.0, false);
+                    code_editor(
+                        ui,
+                        &theme,
+                        "gutter-pin",
+                        &mut buf,
+                        300.0,
+                        false,
+                        FontCfg::default(),
+                    );
                 },
             );
             let (mut num_x, mut body_x) = (f32::INFINITY, f32::INFINITY);

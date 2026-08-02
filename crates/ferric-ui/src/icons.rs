@@ -59,6 +59,14 @@ pub const INDENT_INCREASE: char = '\u{e108}';
 pub const WRAP_TEXT: char = '\u{e248}';
 /// Lucide `fold-vertical` —— 把多行压缩成一行。
 pub const FOLD_VERTICAL: char = '\u{e43c}';
+/// Lucide `type` —— 字重 / 字体。
+pub const TYPE_ICON: char = '\u{e198}';
+/// Lucide `a-large-small` —— 字号 / 排版设置。
+pub const FONT_SIZE: char = '\u{e587}';
+/// Lucide `align-vertical-space-around` —— 行距。
+pub const LINE_HEIGHT: char = '\u{e27a}';
+/// Lucide `rotate-ccw` —— 恢复默认。
+pub const ROTATE_CCW: char = '\u{e148}';
 pub const FOLDER_OPEN: char = '\u{e247}';
 pub const PLUS: char = '\u{e13d}';
 pub const ARROW_UP_A_Z: char = '\u{e41a}';

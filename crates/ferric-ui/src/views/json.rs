@@ -1,8 +1,9 @@
 //! JSON 工具视图：单栏就地编辑 + 图标工具条 + 树视图。
 
 use crate::tool::{Shared, Tool, ToolMeta};
+use crate::widgets::code_editor::FontCfg;
 use crate::{icons, widgets};
-use egui::{Frame, Margin, RichText, Stroke, Ui};
+use egui::{Frame, Margin, RichText, Sense, Stroke, Ui};
 use ferric_core::json::{self, Indent};
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +100,136 @@ impl JsonTool {
             self.undo.push(std::mem::replace(&mut self.input, next));
             self.status = "已重做".to_owned();
         }
+    }
+
+    /// 字体设置：一个图标按钮 + 一张贴着它展开的小卡片。
+    ///
+    /// 不做成设置页里的一节，是因为调字号这件事要**边看边调** —— 卡片浮在编辑区上方，
+    /// 每次点击立刻重排，眼睛不用离开正文。工具条本来就密，所以只出一个图标，
+    /// 面板本身尽量收窄（三行：字号 / 字重 / 行距）。
+    fn font_menu(ui: &mut Ui, theme: &crate::theme::Theme, shared: &mut Shared) {
+        let btn = widgets::tb_icon_btn(
+            ui,
+            theme,
+            icons::FONT_SIZE,
+            false,
+            false,
+            &format!(
+                "字体：{}px · {} · {}",
+                shared.code_font.size as i32,
+                if shared.code_font.medium {
+                    "中黑"
+                } else {
+                    "常规"
+                },
+                FontCfg::LINE_SCALES
+                    .iter()
+                    .find(|(v, _)| (*v - shared.code_font.line_scale).abs() < 0.01)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("自定义")
+            ),
+        );
+        // 用 egui 的 Popup：它自带「点外面收起 / Esc 收起 / 贴着按钮定位 / 画在最上层」，
+        // 这些自己写一遍既啰嗦又容易漏掉边角情况。
+        let mut font = shared.code_font;
+        let popup = egui::Popup::menu(&btn).gap(6.0).width(196.0).frame(
+            Frame::NONE
+                .fill(theme.bg)
+                .stroke(Stroke::new(1.0_f32, theme.border_2))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(Margin::symmetric(12, 10))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 6],
+                    blur: 18,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(if theme.dark { 90 } else { 28 }),
+                }),
+        );
+        popup.show(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
+
+            // —— 字号：减 / 当前值 / 加
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::FONT_SIZE, 13.0, theme.muted));
+                ui.add_space(2.0);
+                if widgets::tb_text_btn(ui, theme, "−", false, "调小").clicked() {
+                    font.size -= 1.0;
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(44.0, 24.0),
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("{} px", font.size as i32))
+                                .family(egui::FontFamily::Monospace)
+                                .size(12.0)
+                                .color(theme.fg),
+                        );
+                    },
+                );
+                if widgets::tb_text_btn(ui, theme, "+", false, "调大").clicked() {
+                    font.size += 1.0;
+                }
+            });
+
+            // —— 字重
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::TYPE_ICON, 13.0, theme.muted));
+                ui.add_space(2.0);
+                for (medium, name) in [(false, "常规"), (true, "中黑")] {
+                    if widgets::tb_text_btn(ui, theme, name, font.medium == medium, "字重")
+                        .clicked()
+                    {
+                        font.medium = medium;
+                    }
+                }
+            });
+
+            // —— 行距
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::LINE_HEIGHT, 13.0, theme.muted));
+                ui.add_space(2.0);
+                for (scale, name) in FontCfg::LINE_SCALES {
+                    let on = (font.line_scale - scale).abs() < 0.01;
+                    if widgets::tb_text_btn(ui, theme, name, on, "行距").clicked() {
+                        font.line_scale = scale;
+                    }
+                }
+            });
+
+            // —— 预览：直接用当前设置画一小段 JSON，所见即所得
+            ui.add_space(2.0);
+            let sample = egui::RichText::new("{ \"id\": 1024 }")
+                .font(font.clamped().font_id())
+                .color(theme.fg_soft);
+            Frame::NONE
+                .fill(theme.code_bg)
+                .corner_radius(egui::CornerRadius::same(6))
+                .inner_margin(Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(sample);
+                });
+
+            // 图标与文字必须分开写：Lucide 图标族里没有中文字形，
+            // 整串套上去的话「恢复默认」四个字会直接不显示。
+            let reset = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(icons::text(icons::ROTATE_CCW, 11.0, theme.faint));
+                    ui.label(RichText::new("恢复默认").size(11.0).color(theme.faint))
+                })
+                .inner
+                .interact(Sense::click());
+            if reset
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                font = FontCfg::default();
+            }
+        });
+
+        shared.code_font = font.clamped();
     }
 
     fn toolbar_row(&mut self, ui: &mut Ui, theme: &crate::theme::Theme, shared: &mut Shared) {
@@ -200,6 +331,7 @@ impl JsonTool {
                     "已关闭自动换行（长行改用横向滚动查看）"
                 });
             }
+            Self::font_menu(ui, theme, shared);
             widgets::tb_sep(ui, theme);
             if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
                 let out = self.input.clone();
@@ -318,6 +450,7 @@ impl Tool for JsonTool {
                     &mut self.input,
                     editor_h,
                     self.wrap,
+                    shared.code_font,
                 );
             });
     }
@@ -621,5 +754,31 @@ mod tests {
             longest > 200,
             "格式化不会拆开长字符串，最长行应仍然很长：{longest}"
         );
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    /// 字体设置存在**应用级**、不在工具草稿里：设置面板与 JSON 工具条上的字体菜单
+    /// 改的必须是同一份，否则从哪边改都只对一半界面生效。
+    #[test]
+    fn code_font_is_not_part_of_tool_draft() {
+        let t = JsonTool::default();
+        let s = t.save_draft().expect("save");
+        assert!(
+            !s.contains("font"),
+            "字体不该写进工具草稿（它是应用级配置）：{s}"
+        );
+    }
+
+    /// 老草稿（没有 wrap / font 字段）仍要能载入，内容不能丢。
+    #[test]
+    fn legacy_draft_still_loads() {
+        let mut t = JsonTool::default();
+        t.load_draft(r#"{"input":"{\"k\":1}","indent":"Two","sort":false}"#);
+        assert_eq!(t.input, "{\"k\":1}");
+        assert!(t.wrap, "缺省仍按开启处理");
     }
 }

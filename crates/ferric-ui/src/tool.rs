@@ -65,6 +65,11 @@ pub struct Shared {
     /// 当前生效的更新/插件服务器（地址 + 固定公钥）。None = 本构建未配置。
     /// 由外壳每帧写入，供插件市场视图使用。
     pub server: Option<crate::net::ServerProfile>,
+    /// 代码编辑区的排版（字号 / 字重 / 行距）。
+    ///
+    /// 放在 Shared 而不是各工具自己存：设置面板与 JSON 工具条上的字体菜单改的是
+    /// **同一份**配置 —— 两个入口各存一份的话，用户从哪边改都只对一半界面生效。
+    pub code_font: crate::widgets::code_editor::FontCfg,
 }
 
 impl Shared {
@@ -75,6 +80,7 @@ impl Shared {
             content_height: 0.0,
             lang: Lang::default(),
             server: None,
+            code_font: Default::default(),
         }
     }
 

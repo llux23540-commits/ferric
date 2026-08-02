@@ -11,7 +11,14 @@ pub mod code_editor;
 
 /// JSON 语法高亮：把文本按 token 着色生成 `LayoutJob`（供 TextEdit 的 layouter 使用，
 /// 边编辑边高亮）。键=主色、字符串=绿、数字=琥珀、true/false=红、null/标点=弱色。
-pub(crate) fn json_highlight(text: &str, font_id: &FontId, theme: &Theme) -> egui::text::LayoutJob {
+///
+/// `line_height` 为 `Some` 时按给定行高排版（编辑区的行距设置）；`None` 用字体自带行高。
+pub(crate) fn json_highlight(
+    text: &str,
+    font_id: &FontId,
+    theme: &Theme,
+    line_height: Option<f32>,
+) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let num_col = if theme.dark {
         Color32::from_rgb(0xe0, 0xb0, 0x62)
@@ -22,6 +29,7 @@ pub(crate) fn json_highlight(text: &str, font_id: &FontId, theme: &Theme) -> egu
     let mk = |c: Color32| TextFormat {
         font_id: font_id.clone(),
         color: c,
+        line_height,
         ..Default::default()
     };
     let b = text.as_bytes();
