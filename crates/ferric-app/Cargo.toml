@@ -18,6 +18,10 @@ egui = { workspace = true }
 # 否则在无 Vulkan 驱动 / GL 仅 1.1 的环境（如 QEMU 虚拟机的 WARP 软件渲染）下找不到适配器。
 wgpu = { version = "29", default-features = false, features = ["dx12"] }
 
+[build-dependencies]
+# 把 icon.ico 嵌进 Windows exe 的 PE 资源（见 build.rs）。
+winresource = "0.1"
+
 # 打包配置（cargo-packager）。安装：cargo install cargo-packager
 # 构建产物：cargo packager --release
 [package.metadata.packager]
@@ -26,3 +30,13 @@ identifier = "dev.ferric.app"
 description = "跨平台原生 Rust 开发者工具箱"
 authors = ["Ferric"]
 formats = ["dmg", "nsis", "deb", "appimage"]
+# 各平台按扩展名自取：ico → Windows(NSIS)，icns → macOS(dmg)，png → Linux(deb/appimage)。
+# 图标源文件与再生成方式见 icons/generate.py。
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.png",
+    "icons/icon.ico",
+    "icons/icon.icns",
+]
