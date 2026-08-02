@@ -137,3 +137,13 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          # 下载指引置顶（自动生成的变更记录会接在后面）。
+          # aarch64 曾被误认为「缺 ARM Mac 版」——对普通用户要写「Apple 芯片」。
+          body: |
+            ## 下载指引
+            | 你的机器 | 下载哪个 |
+            |---|---|
+            | Windows 10/11（x64） | `*-windows-x86_64-setup.exe`（安装版）· `*-portable.exe`（免安装） |
+            | **Mac · Apple 芯片（M1–M4）** | `*-macos-aarch64.dmg` |
+            | Mac · Intel | `*-macos-x86_64.dmg` |
+            | Linux（x64） | `*.deb`（Debian/Ubuntu）· `*.AppImage`（任意发行版） |

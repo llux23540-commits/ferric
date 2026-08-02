@@ -4,7 +4,18 @@
 
 ![Ferric 截图](docs/screenshot.png)
 
-## 已实现（v0.5.0 · 10 工具）
+## 下载
+
+安装包见 [Releases](https://github.com/llux23540-commits/ferric/releases/latest)，按平台选：
+
+| 你的机器 | 下载哪个 |
+|---|---|
+| Windows 10/11（x64） | `…windows-x86_64-setup.exe`（安装版）或 `…-portable.exe`（免安装单文件） |
+| **Mac · Apple 芯片（M1–M4）** | `…macos-aarch64.dmg`（aarch64 = ARM64 = Apple Silicon） |
+| Mac · Intel | `…macos-x86_64.dmg` |
+| Linux（x64） | `…linux-x86_64.deb`（Debian/Ubuntu）或 `.AppImage`（任意发行版） |
+
+## 已实现（10 工具）
 
 外壳：自绘无边框窗口（拖拽 / 最小化 / 最大化 / 关闭）、亮/暗主题、可拖拽调宽侧边栏、`Ctrl+K` 命令面板、工具收藏、全工具草稿持久化、CJK 字体自动加载。
 
