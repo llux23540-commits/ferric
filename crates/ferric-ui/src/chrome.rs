@@ -97,10 +97,16 @@ pub fn title_bar_content(ui: &mut Ui, theme: &Theme) {
 
     // 背景拖拽区（先注册，按钮后画覆盖在其上）
     let drag = ui.interact(rect, Id::new("titlebar-drag"), Sense::click_and_drag());
-    if drag.drag_started_by(PointerButton::Primary) {
+    // 指针底下压着浮层（设置窗、菜单等）时不接管拖拽：设置窗可以被拖到标题栏上方，
+    // 在它上面按下应当是拖那个对话框，而不是把整个应用窗口拽着走。
+    let over_overlay = ctx
+        .pointer_interact_pos()
+        .and_then(|p| ctx.layer_id_at(p))
+        .is_some_and(|l| l.order != egui::Order::Background);
+    if drag.drag_started_by(PointerButton::Primary) && !over_overlay {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
-    if drag.double_clicked() {
+    if drag.double_clicked() && !over_overlay {
         toggle_maximize(&ctx);
     }
 
