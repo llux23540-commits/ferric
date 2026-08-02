@@ -1,7 +1,12 @@
 //! 构建号 = git 提交数（`git rev-list --count HEAD`），以 FERRIC_BUILD_NUMBER
-//! 环境变量注入编译期（UI 版本文案拼接用）。随每次 commit 自增、所有机器/clone
-//! 一致、git pull 不产生冲突——无需本地计数文件。
-//! 非 git 环境（如发行版源码包）取不到时回退为 0。
+//! 环境变量注入编译期。随每次 commit 自增、所有机器/clone 一致、git pull 不产生
+//! 冲突——无需本地计数文件。非 git 环境（如发行版源码包）取不到时回退为 0。
+//!
+//! 版本号 FERRIC_VERSION 由构建号推导：`主版本.构建号/1000.构建号%1000`——
+//! 末位每次 build +1，满 1000 进位到第二位。主版本是唯一手写的部分（workspace
+//! Cargo.toml 的 version 首段）；后两位 Cargo.toml 里只是占位，发版 CI 在打包前
+//! 用同一公式覆写（见 .github/workflows/release.yml「推导版本号」步），保证安装包
+//! 元数据与 UI 显示一致。覆写只动后两位、主版本不变，所以这里的推导是幂等的。
 
 use std::process::Command;
 
@@ -16,6 +21,18 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "0".to_owned());
     println!("cargo:rustc-env=FERRIC_BUILD_NUMBER={n}");
+
+    // 版本号推导（公式与 release.yml 的「推导版本号」步保持一致）
+    let major = std::env::var("CARGO_PKG_VERSION")
+        .ok()
+        .and_then(|v| v.split('.').next().map(str::to_owned))
+        .unwrap_or_else(|| "0".to_owned());
+    let n_num: u64 = n.parse().unwrap_or(0);
+    println!(
+        "cargo:rustc-env=FERRIC_VERSION={major}.{}.{}",
+        n_num / 1000,
+        n_num % 1000
+    );
 
     // HEAD 移动（提交 / 切换分支）时重跑本脚本刷新构建号。
     // logs/HEAD 每次 commit/checkout/reset 都会追加，是可靠的触发点；

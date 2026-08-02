@@ -23,9 +23,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-/// 本客户端的版本标识。build 是 git 提交数，单调递增，比版本字符串可靠。
+/// 本客户端的版本标识。版本字符串由构建号推导（见 ferric-ui/build.rs），
+/// 但比较新旧一律用 build —— git 提交数单调递增，不受版本格式变化影响。
 pub fn my_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("FERRIC_VERSION")
 }
 pub fn my_build() -> i64 {
     env!("FERRIC_BUILD_NUMBER").parse().unwrap_or(0)
@@ -561,6 +562,27 @@ mod tests {
     fn my_build_is_parsable() {
         assert!(my_build() >= 0, "构建号解析不出来时必须回落到 0 而非 panic");
         assert!(!my_version().is_empty());
+    }
+
+    /// 版本规则的合同：末位 = 构建号 % 1000，第二位 = 构建号 / 1000（满千进位），
+    /// 首段与 Cargo.toml 主版本一致。锁死 FERRIC_VERSION 与 FERRIC_BUILD_NUMBER
+    /// 的关系 —— build.rs 或 release.yml 里任何一边改了公式，这里立刻红。
+    #[test]
+    fn version_is_derived_from_build_number() {
+        let build = my_build() as u64;
+        let v = my_version();
+        let mut parts = v.split('.');
+        let major = parts.next().expect("有主版本段");
+        let minor: u64 = parts
+            .next()
+            .expect("有第二段")
+            .parse()
+            .expect("第二段是数字");
+        let patch: u64 = parts.next().expect("有末段").parse().expect("末段是数字");
+        assert!(parts.next().is_none(), "版本应恰好三段：{v}");
+        assert_eq!(major, env!("CARGO_PKG_VERSION").split('.').next().unwrap());
+        assert_eq!(minor, build / 1000, "第二位应为 构建号/1000");
+        assert_eq!(patch, build % 1000, "末位应为 构建号%1000");
     }
 }
 

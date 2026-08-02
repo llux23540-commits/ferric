@@ -434,7 +434,7 @@ impl FerricApp {
                     if widgets::icon_btn(ui, &theme, icons::INFO, 18.0).clicked() {
                         self.shared.toast(concat!(
                             "Ferric v",
-                            env!("CARGO_PKG_VERSION"),
+                            env!("FERRIC_VERSION"),
                             " (build ",
                             env!("FERRIC_BUILD_NUMBER"),
                             ") · 本地开发者工具箱"
@@ -537,16 +537,10 @@ impl FerricApp {
                     .color(theme.fg),
             );
             ui.label(
-                RichText::new(concat!(
-                    "v",
-                    env!("CARGO_PKG_VERSION"),
-                    ".",
-                    env!("FERRIC_BUILD_NUMBER"),
-                    " · rust"
-                ))
-                .family(FontFamily::Monospace)
-                .size(10.0)
-                .color(theme.faint),
+                RichText::new(concat!("v", env!("FERRIC_VERSION"), " · rust"))
+                    .family(FontFamily::Monospace)
+                    .size(10.0)
+                    .color(theme.faint),
             );
         });
     }
@@ -907,9 +901,7 @@ impl FerricApp {
                 ui.label(
                     RichText::new(concat!(
                         "Ferric v",
-                        env!("CARGO_PKG_VERSION"),
-                        ".",
-                        env!("FERRIC_BUILD_NUMBER"),
+                        env!("FERRIC_VERSION"),
                         // 接入自动更新后，「不上传」不再成立：检查更新会把本机版本号
                         // 发给更新服务器。文案要如实，不能留一句已经不真的宣称。
                         " · 工具数据仅存于本机；仅检查更新时联网"

@@ -1,7 +1,7 @@
 name: Release
 
-# 推送 v* 标签触发发版：
-#   git tag v0.5.0 && git push origin v0.5.0
+# 推送 v* 标签触发发版。版本号由构建号推导（主版本.构建号/1000.构建号%1000），
+# 标签应取推导版本：n=$(git rev-list --count HEAD); echo "v0.$((n/1000)).$((n%1000))"
 on:
   push:
     tags: ["v*"]
@@ -34,6 +34,20 @@ jobs:
         with:
           # 构建号 = git 提交数（ferric-ui/build.rs），浅克隆会算错
           fetch-depth: 0
+      - name: 推导版本号（公式与 crates/ferric-ui/build.rs 保持一致）
+        shell: bash
+        run: |
+          n=$(git rev-list --count HEAD)
+          major=$(sed -n 's/^version = "\([0-9]*\)\..*/\1/p' Cargo.toml | head -n1)
+          v="${major:-0}.$((n / 1000)).$((n % 1000))"
+          # 覆写 workspace 版本供打包用。$done ||= s///：只替换第一处 ^version
+          #（即 [workspace.package] 那行）；守卫必须在替换**成功**后才置位。
+          perl -pi -e '$done ||= s/^version = "[^"]+"/version = "'"$v"'"/' Cargo.toml
+          grep -q "^version = \"$v\"" Cargo.toml || { echo "::error::版本覆写失败"; exit 1; }
+          echo "::notice::推导版本 v$v（构建号 $n，标签 $GITHUB_REF_NAME）"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::warning::标签 $GITHUB_REF_NAME ≠ 推导版本 v$v —— 产物文件名用标签，安装包内部版本用推导值"
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux GUI deps
         if: runner.os == 'Linux'
