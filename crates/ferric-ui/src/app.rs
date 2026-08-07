@@ -204,6 +204,12 @@ pub struct FerricApp {
     last_moved_at: Option<std::time::Instant>,
     /// 当前表面是否处于「拖动期免等垂直同步」模式（避免每帧重复重配表面）。
     fast_present: bool,
+    /// 本次运行实际拿到的图形适配器描述（「后端 · 显卡名」），设置页展示。
+    /// None = 非 wgpu 渲染路径（理论上不会发生，防御性处理）。
+    gpu_desc: Option<String>,
+    /// 实际适配器是 CPU 软件光栅化（WARP / llvmpipe）—— 虚拟机与无驱动环境。
+    /// 设置页据此提示「画面糊 / 卡的根源在这，换后端或开 3D 加速」。
+    gpu_software: bool,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -310,6 +316,36 @@ impl FerricApp {
         let theme = Theme::from_dark(dark);
         theme.apply(&cc.egui_ctx);
 
+        // 记下真实拿到的适配器：设置页「渲染后端」区块要展示「现在实际用的是什么」。
+        // 用户切后端做 A/B 对比时，没有这行就无从确认切换是否真的生效。
+        let (gpu_desc, gpu_software) = match cc.wgpu_render_state.as_ref() {
+            Some(rs) => {
+                let info = rs.adapter.get_info();
+                let backend = match info.backend {
+                    eframe::wgpu::Backend::Dx12 => "DX12",
+                    eframe::wgpu::Backend::Vulkan => "Vulkan",
+                    eframe::wgpu::Backend::Gl => "OpenGL",
+                    eframe::wgpu::Backend::Metal => "Metal",
+                    _ => "其他",
+                };
+                let sw = info.device_type == eframe::wgpu::DeviceType::Cpu;
+                (Some(format!("{backend} · {}", info.name)), sw)
+            }
+            None => (None, false),
+        };
+        // 同一行写进 startup.log：排「画面糊 / 卡」这类问题时，
+        // 「实际用了哪块适配器」是第一个要回答的问题。
+        if let Some(d) = &gpu_desc {
+            crate::launch::log(&format!(
+                "适配器：{d}{}",
+                if gpu_software {
+                    "（软件渲染）"
+                } else {
+                    ""
+                }
+            ));
+        }
+
         // 清掉上次遗留的更新暂存目录 —— 留在盘上的旧安装包本身就是个可被替换的靶子
         crate::updater::cleanup_stale();
 
@@ -380,6 +416,8 @@ impl FerricApp {
             last_outer_pos: None,
             last_moved_at: None,
             fast_present: false,
+            gpu_desc,
+            gpu_software,
         }
     }
 
@@ -1232,6 +1270,42 @@ impl FerricApp {
                 .size(11.0)
                 .color(theme.faint),
         );
+        // 当前**实际**在用的适配器：切后端做 A/B 对比时，这行是「切换真的生效了」
+        // 的唯一证据 —— 锁定 Vulkan 但机器上没有，兜底照样会落回别的后端。
+        if let Some(desc) = &self.gpu_desc {
+            ui.label(
+                RichText::new(format!("当前实际使用：{desc}"))
+                    .family(FontFamily::Monospace)
+                    .size(10.5)
+                    .color(theme.fg_soft),
+            );
+            if self.gpu_software {
+                ui.label(
+                    RichText::new(
+                        "正在软件渲染（无 GPU 加速）—— 画面发糊、拖动卡顿多半源于此：\
+                         虚拟机请开启 3D 加速，物理机请安装显卡驱动；也可切换后端对比",
+                    )
+                    .size(10.5)
+                    .color(theme.danger),
+                );
+            }
+        }
+        // Alt+Tab 卡顿缓解（仅 Windows/DX12 有意义）：把此前只能用 PowerShell 环境
+        // 变量做的 A/B（WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT=none）收进设置，
+        // 两次点击 + 重启即可对比。
+        if cfg!(target_os = "windows") {
+            ui.add_space(4.0);
+            let on = self.launch_cfg.dx12_no_latency_wait;
+            if widgets::pill_toggle(ui, &theme, on, "Alt+Tab 卡顿缓解（DX12，重启后生效）")
+            {
+                self.launch_cfg = crate::launch::set_dx12_no_latency_wait(!on);
+                self.shared.toast(if !on {
+                    "已开启：重启 Ferric 后生效；若无改善可再关掉对比"
+                } else {
+                    "已关闭：重启 Ferric 后恢复默认呈现节奏"
+                });
+            }
+        }
         if let Some(b) = self.launch_cfg.last_good {
             ui.label(
                 RichText::new(format!("上次成功启动使用：{}", b.label()))

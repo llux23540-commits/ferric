@@ -191,14 +191,18 @@ stderr 没有去处，日志文件是唯一线索）。
 失焦期间保持低频重绘并在拿回焦点的瞬间立即出新帧，切回时看到的旧帧
 与当前状态一致，就不显闪。
 
-若 Alt+Tab 切回仍有可感知的卡顿，可用环境变量做一次 A/B 验证（怀疑对象是
-wgpu DX12 的 frame-latency waitable object 在失焦期间长时间不被唤醒）：
+若 Alt+Tab 切回仍有可感知的卡顿：**设置 → 渲染后端 → 「Alt+Tab 卡顿缓解（DX12）」**
+开关开/关各试一次（重启后生效），两次点击即完成 A/B 对比 —— 怀疑对象是
+wgpu DX12 的 frame-latency waitable object 在失焦期间长时间不被唤醒。
+不想动设置也可以用环境变量临时试：
 
 ```powershell
 $env:WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT="none"; ferric
 ```
 
-卡顿消失请提 issue 告诉我们，好把它固化成默认值；没消失则按上一节换渲染后端试试。
+开了有效请提 issue 告诉我们，好把它固化成默认值；没效则换渲染后端试试。
+设置页会显示**当前实际使用的适配器**（后端 · 显卡名，软件渲染会红字标出），
+切完对比一眼就能确认生效；同一行也写进 `startup.log`。
 
 ### CPU 占用偏高
 

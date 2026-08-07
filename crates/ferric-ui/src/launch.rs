@@ -90,6 +90,12 @@ pub struct LaunchCfg {
     /// 上一次启动失败的原因（设置页展示，便于用户看见到底缺什么）。
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Windows/DX12：关闭 wgpu 的 frame-latency waitable object（等价于
+    /// `WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT=none`）。
+    /// 失焦期间该等待对象长时间不被 DWM 唤醒，是 Alt+Tab 切回瞬间卡一下的
+    /// 主要嫌疑；设置里给开关是为了让用户两键完成 A/B 对比，不用敲 PowerShell。
+    #[serde(default)]
+    pub dx12_no_latency_wait: bool,
 }
 
 fn dir() -> Option<PathBuf> {
@@ -230,6 +236,14 @@ pub fn begin(cfg: &mut LaunchCfg) -> Backend {
     }
     let backend = plan(cfg).first().copied().unwrap_or_default();
     apply(backend);
+    // DX12 帧等待对象开关。用户在外部显式设了环境变量就尊重外部值 ——
+    // 环境变量是更明确的意图表达，配置只补缺省。
+    if cfg.dx12_no_latency_wait
+        && std::env::var_os("WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT").is_none()
+    {
+        std::env::set_var("WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT", "none");
+        log("DX12 frame-latency waitable object 已按设置关闭（Alt+Tab 卡顿缓解）");
+    }
     cfg.pending = Some(backend);
     save(cfg);
     backend
@@ -263,6 +277,23 @@ pub fn set_backend(backend: Backend) -> LaunchCfg {
         Some(p) => set_backend_at(&p, backend),
         None => LaunchCfg {
             backend,
+            ..Default::default()
+        },
+    }
+}
+
+/// 改「Alt+Tab 卡顿缓解（DX12）」这一项，返回落盘后的完整配置。
+/// 与 [`set_backend`] 同样必须先重读磁盘再改，理由见彼处。
+pub fn set_dx12_no_latency_wait(on: bool) -> LaunchCfg {
+    match path() {
+        Some(p) => {
+            let mut cfg = load_from(&p);
+            cfg.dx12_no_latency_wait = on;
+            save_to(&p, &cfg);
+            cfg
+        }
+        None => LaunchCfg {
+            dx12_no_latency_wait: on,
             ..Default::default()
         },
     }
@@ -329,6 +360,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(plan(&cfg).first(), Some(&Backend::Gl));
+    }
+
+    /// Alt+Tab 卡顿缓解开关要能落盘并读回；老 launch.json 没有该字段时按关处理。
+    #[test]
+    fn dx12_wait_flag_round_trips_and_defaults_off() {
+        let dir = std::env::temp_dir().join(format!("ferric-launch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("launch.json");
+
+        // 老配置（无该字段）→ 默认关
+        std::fs::write(&p, r#"{"backend":"Gl"}"#).unwrap();
+        let cfg = load_from(&p);
+        assert!(
+            !cfg.dx12_no_latency_wait,
+            "缺省必须是关，别替用户改呈现行为"
+        );
+        assert_eq!(cfg.backend, Backend::Gl, "旧字段不能因新字段而丢");
+
+        // 开 → 存 → 读回，且不动其它字段
+        let mut cfg = cfg;
+        cfg.dx12_no_latency_wait = true;
+        save_to(&p, &cfg);
+        let back = load_from(&p);
+        assert!(back.dx12_no_latency_wait);
+        assert_eq!(back.backend, Backend::Gl);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 但锁定不等于「只用它」：它要是起不来，后面仍得有兜底，
@@ -427,6 +485,7 @@ mod tests {
                 pending: None,
                 failed: vec![Backend::Vulkan],
                 last_error: None,
+                dx12_no_latency_wait: false,
             },
         );
 
