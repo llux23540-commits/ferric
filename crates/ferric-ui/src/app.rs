@@ -2545,6 +2545,52 @@ mod dialog_tests {
         assert!(t.until > std::time::Instant::now());
     }
 
+    /// 重启**必须先存盘再拉起新进程**，顺序反了就丢本次会话的草稿。
+    ///
+    /// 新进程一起来就去读 eframe 的状态文件，而本次改过的草稿要等关窗走
+    /// `App::save` 才写下去 —— 先 spawn 后存盘 = 两个进程抢同一份文件，
+    /// 新实例读到旧草稿，用户看到「点了重启，刚编辑的内容没了」。
+    #[test]
+    fn restarting_saves_before_spawning() {
+        let src = include_str!("app.rs");
+        let body = src
+            .split("fn do_restart(")
+            .nth(1)
+            .expect("do_restart 不见了");
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        let save_at = body.find("App::save").expect("重启前没有存盘");
+        let spawn_at = body.find("relaunch").expect("没有拉起新进程");
+        assert!(
+            save_at < spawn_at,
+            "先拉起新进程再存盘 —— 新实例会读到旧草稿"
+        );
+        assert!(
+            body.contains("flush"),
+            "存了但没 flush，落不落盘要看实现心情"
+        );
+        let close_at = body.find("ViewportCommand::Close").expect("没有关掉自己");
+        assert!(spawn_at < close_at, "先关窗就没机会拉起新进程了");
+    }
+
+    /// 存盘与关窗都不能在绘制中途做 —— 按钮只置位，由外壳在帧末执行。
+    #[test]
+    fn the_restart_button_only_sets_a_flag() {
+        let src = include_str!("app.rs");
+        let body = src
+            .split("fn restart_now(")
+            .nth(1)
+            .expect("restart_now 不见了");
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        assert!(
+            body.contains("want_restart = true"),
+            "restart_now 应当只置位"
+        );
+        assert!(
+            !body.contains("relaunch") && !body.contains("ViewportCommand::Close"),
+            "在绘制中途关窗/换进程 = 在半张画面上拔插头"
+        );
+    }
+
     /// 软件渲染环境必须关掉动画。
     ///
     /// egui 的动画（悬停渐变、浮层淡入）在播放期间每帧都请求重绘整窗，而 egui
