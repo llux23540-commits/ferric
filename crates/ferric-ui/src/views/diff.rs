@@ -30,9 +30,15 @@ enum Side {
 struct ScrollSync {
     /// 上一帧两侧 ScrollArea 的 y 偏移（[左, 右]）。
     prev: [f32; 2],
-    /// 本帧要强加给两侧的偏移：程序性设置，判定用户滚动时要排除，
-    /// 否则镜像回来的偏移会被当成新滚动，左右互相追着抖。
-    force: [Option<f32>; 2],
+    /// 本帧要给某侧加的**增量**（镜像用户在对侧的滚动量）。
+    ///
+    /// 必须是增量而不是绝对偏移：两侧内容长度往往不同，短的一侧早早滚到底被
+    /// 夹住，若把它的绝对位置镜像回长的一侧，长侧会被**瞬移**回短侧的上限 ——
+    /// 实测表现就是「左边滚了等于白滚 / 位置随机跳」。增量镜像下，被夹住的一侧
+    /// 只是原地饱和，谁也不会拽着谁跳。
+    nudge: [Option<f32>; 2],
+    /// 本帧要**跳转**到的绝对偏移（仅搜索定位用：两侧同一目标行，允许绝对值）。
+    jump: [Option<f32>; 2],
 }
 
 pub struct DiffTool {
@@ -145,6 +151,27 @@ fn pick_file() -> Result<Option<(String, String)>, String> {
     Ok(Some((name, text)))
 }
 
+/// 同步滚动的镜像决策（纯函数）：哪侧被用户滚动了，就把**增量**镜像给对侧。
+///
+/// - `forced[i]` = i 侧本帧的偏移是程序强加的（镜像/搜索跳转），其变化不算用户滚动，
+///   否则镜像回来的偏移会被当成新滚动，左右互相追着抖；
+/// - 两侧同帧都动时以变化量大的一侧为准；
+/// - 返回增量而非绝对偏移：短的一侧滚到底被夹住后，绝对镜像会把长的一侧
+///   **瞬移**回短侧上限（实测就是「左边滚了等于白滚 / 位置随机跳」的根源），
+///   增量镜像下被夹侧只是原地饱和，谁也不拽着谁跳。
+fn mirror_scroll(prev: [f32; 2], now: [f32; 2], forced: [bool; 2]) -> [Option<f32>; 2] {
+    let dl = if forced[0] { 0.0 } else { now[0] - prev[0] };
+    let dr = if forced[1] { 0.0 } else { now[1] - prev[1] };
+    let mut out = [None, None];
+    if dl.abs() >= dr.abs() {
+        if dl.abs() > 0.5 {
+            out[1] = Some(dl);
+        }
+    } else if dr.abs() > 0.5 {
+        out[0] = Some(dr);
+    }
+    out
+}
 /// 大小写不敏感搜索：逐 char 滑窗比较，不对全文做 to_lowercase——
 /// 个别字符小写后 byte 长度会变（如 'İ'），整体转换会让区间映射回原文时错位。
 /// 返回各匹配在原文中的 byte 区间，升序且互不重叠。
@@ -420,8 +447,11 @@ impl Tool for DiffTool {
                 // —— 同步滚动：读上一帧状态，取出本帧要强加的偏移。——
                 let sync_id = ui.id().with("diff-scroll-sync");
                 let mut sync: ScrollSync = ui.data_mut(|d| d.get_temp(sync_id)).unwrap_or_default();
-                let force = sync.force;
-                sync.force = [None, None];
+                let nudge = sync.nudge;
+                let jump = sync.jump;
+                let prev = sync.prev;
+                sync.nudge = [None, None];
+                sync.jump = [None, None];
 
                 // 两个面板的输出（编辑框响应 + 匹配 y + 实际滚动偏移），出闭包后统一处理。
                 let mut l_view: Option<(widgets::DiffAreaOutput, f32)> = None;
@@ -468,9 +498,11 @@ impl Tool for DiffTool {
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
                                     .auto_shrink([false, false]);
-                                // 上一帧判定对侧被用户滚动（或搜索跳转）：强加偏移过来。
-                                if let Some(y) = force[0] {
+                                // 上一帧对侧被用户滚动 → 镜像同样的增量；搜索跳转 → 绝对定位。
+                                if let Some(y) = jump[0] {
                                     sa = sa.vertical_scroll_offset(y);
+                                } else if let Some(d) = nudge[0] {
+                                    sa = sa.vertical_scroll_offset((prev[0] + d).max(0.0));
                                 }
                                 let out = sa.show(ui, |ui| {
                                     widgets::code_area_diff(
@@ -529,8 +561,10 @@ impl Tool for DiffTool {
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
                                     .auto_shrink([false, false]);
-                                if let Some(y) = force[1] {
+                                if let Some(y) = jump[1] {
                                     sa = sa.vertical_scroll_offset(y);
+                                } else if let Some(d) = nudge[1] {
+                                    sa = sa.vertical_scroll_offset((prev[1] + d).max(0.0));
                                 }
                                 let out = sa.show(ui, |ui| {
                                     widgets::code_area_diff(
@@ -568,27 +602,12 @@ impl Tool for DiffTool {
                     self.focus_side = None;
                 }
 
-                // —— 同步滚动判定：被程序强加的一侧不算用户滚动；
-                // 两侧同时变化时以变化量大的一侧为准，把绝对偏移镜像给对侧（下一帧生效）。——
-                let dl = if force[0].is_some() {
-                    0.0
-                } else {
-                    l_scroll - sync.prev[0]
-                };
-                let dr = if force[1].is_some() {
-                    0.0
-                } else {
-                    r_scroll - sync.prev[1]
-                };
-                if dl.abs() > 0.5 || dr.abs() > 0.5 {
-                    if dl.abs() >= dr.abs() {
-                        if (r_scroll - l_scroll).abs() > 0.5 {
-                            sync.force[1] = Some(l_scroll);
-                        }
-                    } else if (l_scroll - r_scroll).abs() > 0.5 {
-                        sync.force[0] = Some(r_scroll);
-                    }
-                }
+                // —— 同步滚动判定：镜像决策抽成纯函数（见 mirror_scroll），此处只接线。
+                let forced = [
+                    nudge[0].is_some() || jump[0].is_some(),
+                    nudge[1].is_some() || jump[1].is_some(),
+                ];
+                sync.nudge = mirror_scroll(prev, [l_scroll, r_scroll], forced);
                 sync.prev = [l_scroll, r_scroll];
 
                 // —— 搜索跳转：导航帧从面板拿到当前匹配 y，下一帧把两侧一起滚到
@@ -601,12 +620,17 @@ impl Tool for DiffTool {
                     };
                     if let Some(y) = y {
                         let off = (y - pin_h / 3.0).max(0.0);
-                        sync.force = [Some(off), Some(off)];
+                        sync.jump = [Some(off), Some(off)];
                     }
                     self.search_nav = false;
                 }
                 // 有待强加的偏移就再画一帧，让它立即生效。
-                if sync.force.iter().any(Option::is_some) {
+                if sync
+                    .nudge
+                    .iter()
+                    .chain(sync.jump.iter())
+                    .any(Option::is_some)
+                {
                     ui.ctx().request_repaint();
                 }
                 ui.data_mut(|d| d.insert_temp(sync_id, sync));
@@ -684,5 +708,42 @@ mod tests {
     #[test]
     fn search_matches_empty_query_is_empty() {
         assert!(search_matches("anything", "").is_empty());
+    }
+
+    /// 镜像的是**增量**：右侧被夹在 145 时用户把左侧从 2000 滚到 2100，
+    /// 给右侧的必须是 +100（它自己去饱和），而不是绝对位置。
+    #[test]
+    fn mirror_passes_deltas_not_absolute_offsets() {
+        let out = mirror_scroll([2000.0, 145.0], [2100.0, 145.0], [false, false]);
+        assert_eq!(out, [None, Some(100.0)]);
+    }
+
+    /// 回归锁定：右侧在夹点附近小幅回滚 −10，左侧（在 2000）收到的必须是 −10 ——
+    /// 老实现镜像绝对偏移，会把左侧从 2000 **瞬移**到 135，用户看到的就是
+    /// 「左边滚过的位置全丢了 / 滚动没有效果」。
+    #[test]
+    fn short_side_scroll_never_teleports_the_long_side() {
+        let out = mirror_scroll([2000.0, 145.0], [2000.0, 135.0], [false, false]);
+        assert_eq!(out, [Some(-10.0), None]);
+        if let [Some(d), _] = out {
+            assert!(
+                d.abs() < 50.0,
+                "给长侧的量级应是用户手滚的增量，出现大跳变（{d}）说明退回了绝对镜像"
+            );
+        }
+    }
+
+    /// 被程序强加（镜像/跳转）的一侧，其偏移变化不算用户滚动 —— 否则镜像回来的
+    /// 偏移被当成新滚动，左右互相追着抖、每帧强制重绘（软渲染机器直接卡死）。
+    #[test]
+    fn forced_side_changes_do_not_echo_back() {
+        // 右侧本帧是被镜像推过去的（forced），它的变化不得再镜像回左侧
+        let out = mirror_scroll([100.0, 0.0], [100.0, 100.0], [false, true]);
+        assert_eq!(out, [None, None], "回声没有被切断，会形成互相追赶的抖动环");
+        // 静止帧什么都不产生
+        assert_eq!(
+            mirror_scroll([50.0, 50.0], [50.0, 50.0], [false, false]),
+            [None, None]
+        );
     }
 }

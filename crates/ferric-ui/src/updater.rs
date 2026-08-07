@@ -224,7 +224,10 @@ impl Updater {
             let tx2 = tx.clone();
             let r = download_blocking(&source, &info, &mut |done, total| {
                 let _ = tx2.send(Msg::Progress { done, total });
-                ctx2.request_repaint();
+                // 节流：每块数据到达都立即 request_repaint 会把界面拖进 30+fps 的
+                // 重绘风暴（软件渲染机器整机变卡，实测归因至此行）。进度条 10fps
+                // 足够顺滑 —— repaint_after 会合并多次请求，只约一个 100ms 后的醒点。
+                ctx2.request_repaint_after(std::time::Duration::from_millis(100));
             });
             match r {
                 Ok(path) => {

@@ -707,8 +707,12 @@ pub fn code_area_diff(
             (edit.response.response, current_match_y)
         });
     let (response, current_match_y) = out.inner;
-    // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
-    if response.gained_focus() {
+    // 键盘（Tab）聚焦时不要全选默认文本：把光标折叠到文本末尾。
+    //
+    // ⚠️ 只对**非点击**的聚焦做：点击聚焦时 TextEdit 已把光标放在点击处，
+    // 再折到文末会触发「滚动到光标」——视图瞬移到文本末尾，左右同步又把另一栏
+    // 也带走，用户看到的就是「一点击位置就飞了，选择根本没法用」。
+    if response.gained_focus() && !response.is_pointer_button_down_on() {
         if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), response.id) {
             let end = egui::text::CCursor::new(text.chars().count());
             state
@@ -883,4 +887,78 @@ pub fn status_line(ui: &mut Ui, theme: &Theme, ok: bool, text: &str) {
         ui.label(icons::text(glyph, 13.0, color));
         ui.label(RichText::new(text).size(11.5).color(color));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 点击对比面板聚焦时，光标必须落在**点击处附近**，绝不能被折到文末 ——
+    /// 折到文末会触发「滚动到光标」，视图瞬移到底部，左右同步再把另一栏也带走，
+    /// 用户看到的就是「一点击位置就飞了 / 选择没法用」（Windows 实测回归）。
+    /// 折叠到文末只允许发生在键盘（Tab）聚焦，用于避开首次全选。
+    #[test]
+    fn clicking_diff_pane_keeps_cursor_at_click_not_end() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::light().apply(&ctx);
+        let mut text: String = (0..200).map(|i| format!("line {i} content\n")).collect();
+        let total = text.chars().count();
+        let styles: Vec<DiffLineStyle> = Vec::new();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        let at = egui::pos2(120.0, 40.0); // 面板顶部第二三行附近
+        let mut edit_id = None;
+
+        let frames: Vec<Vec<egui::Event>> = vec![
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+        ];
+        for events in frames {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let out = code_area_diff(
+                        ui,
+                        &crate::theme::Theme::light(),
+                        "click-probe",
+                        &mut text,
+                        20,
+                        &styles,
+                        380.0,
+                        None,
+                    );
+                    edit_id = Some(out.response.id);
+                },
+            );
+        }
+        let state = egui::text_edit::TextEditState::load(&ctx, edit_id.unwrap())
+            .expect("点击后应有编辑状态");
+        let cur = state
+            .cursor
+            .char_range()
+            .expect("点击后应有光标")
+            .primary
+            .index;
+        assert!(
+            cur.0 < total / 2,
+            "点击面板顶部后光标跑到了后半段（{cur:?} / 共 {total}）—— \
+             多半又被折叠到文末，视图会瞬移"
+        );
+    }
 }
