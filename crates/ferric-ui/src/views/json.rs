@@ -138,12 +138,7 @@ impl JsonTool {
                 .stroke(Stroke::new(1.0_f32, theme.border_2))
                 .corner_radius(egui::CornerRadius::same(10))
                 .inner_margin(Margin::symmetric(12, 10))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 6],
-                    blur: 18,
-                    spread: 0,
-                    color: egui::Color32::from_black_alpha(if theme.dark { 90 } else { 28 }),
-                }),
+                .shadow(ui.visuals().popup_shadow),
         );
         popup.show(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);

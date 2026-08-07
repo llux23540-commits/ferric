@@ -75,6 +75,9 @@ pub struct Shared {
     /// 放在 Shared 而不是各工具自己存：设置面板与 JSON 工具条上的字体菜单改的是
     /// **同一份**配置 —— 两个入口各存一份的话，用户从哪边改都只对一半界面生效。
     pub code_font: crate::widgets::code_editor::FontCfg,
+    /// 当前跑在软件光栅化（WARP / llvmpipe）上 —— 虚拟机与无驱动环境。
+    /// 外壳启动时探测一次；视图可据此收敛大范围渐变这类软渲染下会糊的效果。
+    pub gpu_software: bool,
 }
 
 impl Shared {
@@ -87,6 +90,7 @@ impl Shared {
             source: None,
             reload_plugins: false,
             code_font: Default::default(),
+            gpu_software: false,
         }
     }
 

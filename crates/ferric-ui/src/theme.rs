@@ -158,11 +158,20 @@ impl Theme {
         v.window_corner_radius = CornerRadius::same(12);
         v.window_stroke = Stroke::new(1.0_f32, self.border_2);
         v.window_fill = self.bg;
+        // 阴影只在这里定义一份：卡片用 window_shadow、弹层用 popup_shadow。
+        // 各处不要再手写 Shadow —— 软件光栅化环境要把它们统一清零（见
+        // FerricApp::apply_soft_render_compat），散落的硬编码会漏网。
+        v.window_shadow = egui::epaint::Shadow {
+            offset: [0, 3],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark { 55 } else { 16 }),
+        };
         v.popup_shadow = egui::epaint::Shadow {
             offset: [0, 6],
             blur: 18,
             spread: 0,
-            color: Color32::from_black_alpha(40),
+            color: Color32::from_black_alpha(if self.dark { 90 } else { 40 }),
         };
         ctx.set_visuals(v);
 

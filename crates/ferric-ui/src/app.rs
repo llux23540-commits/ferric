@@ -375,6 +375,11 @@ impl FerricApp {
         let mut shared = Shared::new(theme);
         shared.lang = persist.lang;
         shared.code_font = persist.code_font.clamped();
+        shared.gpu_software = gpu_software;
+        // 软渲染环境的清晰度自适应要在首帧前生效，否则第一屏就带着灰雾阴影。
+        if gpu_software {
+            Self::strip_soft_render_haze(&cc.egui_ctx);
+        }
         for w in plugin_warns {
             shared.toast(format!("插件加载失败 · {w}"));
         }
@@ -508,10 +513,27 @@ impl FerricApp {
             self.dark = want;
             self.shared.theme = Theme::from_dark(want);
             self.shared.theme.apply(ctx);
+            // 主题重铺会把阴影写回来 —— 软渲染环境要立刻再剥掉。
+            if self.gpu_software {
+                Self::strip_soft_render_haze(ctx);
+            }
             // 换主题会重铺样式，字号缩放要跟着重新落一次
             self.applied_ui_scale = None;
         }
         self.sync_ui_scale(ctx);
+    }
+
+    /// 软件光栅化（WARP / llvmpipe）下的清晰度自适应。
+    ///
+    /// 阴影是大范围半透明渐变：硬件渲染下是「柔和」，软渲染 + 低分屏下叠在内容
+    /// 边上就是一圈灰雾 —— 用户的原话是「一片糊」。这类环境里全部清零，
+    /// 界面靠 1px 边框与底色分层；直角、文本的像素对齐 egui 默认已开。
+    /// 硬件渲染路径完全不受影响。
+    fn strip_soft_render_haze(ctx: &egui::Context) {
+        ctx.all_styles_mut(|s| {
+            s.visuals.window_shadow = egui::epaint::Shadow::NONE;
+            s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
+        });
     }
 
     /// 全局界面缩放。
@@ -1952,6 +1974,27 @@ impl eframe::App for FerricApp {
 #[cfg(test)]
 mod dialog_tests {
     use super::{Color32, SettingsRaise, Theme, RAISE_WAIT_FRAMES};
+
+    /// 软渲染清晰度自适应的契约：剥掉**两个样式槽**（深/浅）里的全部阴影。
+    /// 阴影是软件光栅化下「一片糊」的主要来源；只剥当前槽的话，
+    /// 用户切一次深浅色就会把灰雾切回来。
+    #[test]
+    fn soft_render_strips_shadows_in_both_theme_slots() {
+        let ctx = egui::Context::default();
+        Theme::light().apply(&ctx);
+        // 前提：硬件路径下主题确实带阴影（卡片/弹层的柔和感来自这里）
+        assert_ne!(
+            ctx.style_of(egui::Theme::Light).visuals.popup_shadow,
+            egui::epaint::Shadow::NONE,
+            "主题不再定义弹层阴影，本测试的前提失效"
+        );
+        super::FerricApp::strip_soft_render_haze(&ctx);
+        for slot in [egui::Theme::Light, egui::Theme::Dark] {
+            let v = &ctx.style_of(slot).visuals;
+            assert_eq!(v.popup_shadow, egui::epaint::Shadow::NONE, "{slot:?} 弹层");
+            assert_eq!(v.window_shadow, egui::epaint::Shadow::NONE, "{slot:?} 卡片");
+        }
+    }
 
     /// 跑 `n` 帧状态机（按「本平台需要重建兜底」跑，即 Wayland 那条路径），
     /// 返回其中要求「跳过渲染」（= 销毁窗口重建）的帧数。

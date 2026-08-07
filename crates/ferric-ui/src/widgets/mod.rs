@@ -774,12 +774,9 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
 
 /// 圆角卡片：柔和阴影 + 最浅发丝线（不再是明显方框）。
 pub fn card<R>(ui: &mut Ui, theme: &Theme, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let shadow = egui::epaint::Shadow {
-        offset: [0, 3],
-        blur: 16,
-        spread: 0,
-        color: Color32::from_black_alpha(if theme.dark { 55 } else { 16 }),
-    };
+    // 阴影取全局 Visuals（theme.apply 统一定义）：软件光栅化环境会把它清零，
+    // 硬编码在这里的话就成了漏网的「灰雾」。
+    let shadow = ui.visuals().window_shadow;
     Frame::NONE
         .fill(theme.bg)
         .stroke(Stroke::new(1.0_f32, theme.border))
