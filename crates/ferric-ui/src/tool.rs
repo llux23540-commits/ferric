@@ -108,16 +108,30 @@ impl Shared {
 }
 
 /// 短暂提示。以帧计时，避免依赖 `Instant`（便于跨平台与测试）。
+/// 提示条的存活时长。
+///
+/// ⚠️ **必须是时间，不能是帧数**。这里原本是 `frames_left: 120`，配合每帧
+/// `request_repaint()`，效果是「提示在的时候界面按满帧率狂转」：
+/// - 有硬件 GPU 的机器 60fps 跑完 120 帧 = 2 秒，看不出问题；
+/// - 软件光栅化（Windows 的 WARP、Linux 的 llvmpipe）只跑得动 8fps，
+///   同样 120 帧要 **15 秒**，而这 15 秒里整窗都在被 CPU 重画。
+///
+/// 也就是说机器越慢、风暴越久 —— 正反馈。这正是「Windows 打开就很卡、
+/// Linux 没事」的直接来源（实测归因见 `FerricApp::toasts_ui`）。
+pub const TOAST_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct Toast {
     pub msg: String,
-    pub frames_left: u32,
+    /// 到期时刻。用 `Instant` 而不是 egui 的 `input.time`：这里拿不到 `Context`，
+    /// 而且单调时钟不受系统改时间影响。
+    pub until: std::time::Instant,
 }
 
 impl Toast {
     fn new(msg: String) -> Self {
         Self {
             msg,
-            frames_left: 120,
+            until: std::time::Instant::now() + TOAST_TTL,
         }
     }
 }

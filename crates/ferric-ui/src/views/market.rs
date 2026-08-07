@@ -19,6 +19,7 @@
 use crate::market::{self, MarketItem};
 use crate::source::Source;
 use crate::tool::{Shared, Tool, ToolMeta};
+use crate::updater::{IDLE_BEAT, PROGRESS_BEAT};
 use crate::{icons, widgets};
 use egui::{RichText, Ui};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -100,7 +101,10 @@ impl MarketTool {
             let ctx2 = ctx.clone();
             let r = market::install(&source, &item, &mut |done, total| {
                 let _ = tx2.send(Msg::Progress(done, total));
-                ctx2.request_repaint();
+                // 与 updater 同款节流：每收到一块数据就 request_repaint() 会把
+                // 整窗拖进 30+fps 的重绘风暴（egui 没有局部重绘，为一个进度条
+                // 重画整窗）。软件渲染的机器上装个插件就能让整机卡住。
+                ctx2.request_repaint_after(PROGRESS_BEAT);
             });
             let _ = tx.send(Msg::Installed(slug, r));
             ctx.request_repaint();
@@ -148,8 +152,7 @@ impl MarketTool {
             }
             Ok(Msg::Progress(done, total)) => {
                 self.progress = (done, total.max(1));
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(80));
+                ui.ctx().request_repaint_after(PROGRESS_BEAT);
             }
             Ok(Msg::Installed(slug, r)) => {
                 match r {
@@ -182,8 +185,9 @@ impl MarketTool {
                 self.start_next_in_queue(ui, source);
             }
             Err(TryRecvError::Empty) => {
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(120));
+                // 还没有新消息。发消息的地方都紧跟着一次 request_repaint*，
+                // 这里只是兜底，不必频繁（此前 120ms = 拉列表全程 8fps 重绘）。
+                ui.ctx().request_repaint_after(IDLE_BEAT);
             }
             Err(TryRecvError::Disconnected) => {
                 self.status = "后台任务意外中断".to_owned();

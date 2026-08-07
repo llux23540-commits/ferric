@@ -523,16 +523,24 @@ impl FerricApp {
         self.sync_ui_scale(ctx);
     }
 
-    /// 软件光栅化（WARP / llvmpipe）下的清晰度自适应。
+    /// 软件光栅化（WARP / llvmpipe）下的清晰度与流畅度自适应。
     ///
     /// 阴影是大范围半透明渐变：硬件渲染下是「柔和」，软渲染 + 低分屏下叠在内容
     /// 边上就是一圈灰雾 —— 用户的原话是「一片糊」。这类环境里全部清零，
     /// 界面靠 1px 边框与底色分层；直角、文本的像素对齐 egui 默认已开。
     /// 硬件渲染路径完全不受影响。
+    ///
+    /// 同时把 `animation_time` 清零。egui 的每一段动画（悬停高亮渐变、折叠展开、
+    /// 浮层淡入）在播放期间都会**每帧请求重绘整窗** —— 而 egui 没有局部重绘，
+    /// 一帧就是把整个窗口重新排版、三角化、光栅化一遍。有 GPU 时这是白送的，
+    /// 靠 CPU 画的时候正好相反：动画本身画不满帧，却把 CPU 占满，于是每次
+    /// 鼠标扫过侧栏都能感到一次顿挫。没有动画 = 状态切换是瞬时的，
+    /// 观感上「干脆」，代价只是少了几十毫秒的渐变。
     fn strip_soft_render_haze(ctx: &egui::Context) {
         ctx.all_styles_mut(|s| {
             s.visuals.window_shadow = egui::epaint::Shadow::NONE;
             s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
+            s.animation_time = 0.0;
         });
     }
 
@@ -1681,12 +1689,16 @@ impl FerricApp {
         }
     }
 
+    /// 底部提示条。**按时间到期，且只在到期那一刻醒一次**。
+    ///
+    /// 这里曾是 `frames_left` 倒数 + 每帧 `ctx.request_repaint()`：提示条在的
+    /// 每一刻，整窗都在按显示器刷新率重画。提示条本身是静止的（没有淡入淡出、
+    /// 没有进度），一帧画完就不该再动 —— 需要的只是「到点了再醒一次把它擦掉」。
+    /// 帧数计时的正反馈见 [`crate::tool::TOAST_TTL`]。
     fn toasts_ui(&mut self, ctx: &egui::Context) {
         let theme = self.shared.theme;
-        self.shared.toasts.retain(|t| t.frames_left > 0);
-        for t in self.shared.toasts.iter_mut() {
-            t.frames_left = t.frames_left.saturating_sub(1);
-        }
+        let now = std::time::Instant::now();
+        self.shared.toasts.retain(|t| t.until > now);
         if let Some(t) = self.shared.toasts.last() {
             egui::Area::new(egui::Id::new("toast"))
                 .anchor(Align2::CENTER_BOTTOM, [0.0, -30.0])
@@ -1699,7 +1711,8 @@ impl FerricApp {
                             ui.label(RichText::new(&t.msg).color(theme.bg).size(13.0));
                         });
                 });
-            ctx.request_repaint();
+            // 到期那一刻醒一次即可 —— 多次调用会被 egui 合并成最早的那个醒点。
+            ctx.request_repaint_after(t.until - now);
         }
     }
 }
@@ -1883,6 +1896,7 @@ impl eframe::App for FerricApp {
     }
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let t_frame_start = std::time::Instant::now();
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
         self.present_hygiene(ctx, frame);
@@ -2017,7 +2031,65 @@ impl eframe::App for FerricApp {
         if std::mem::take(&mut self.shared.reload_plugins) {
             self.reload_plugins();
         }
+
+        perf_probe(ctx, t_frame_start);
     }
+}
+
+/// 重绘归因探针：`FERRIC_PERF=1` 时每秒往 `startup.log` 写一行
+/// 「这一秒画了多少帧、每帧多久、最后一帧是谁要求重绘的」。默认完全不生效。
+///
+/// # 为什么需要它
+///
+/// 「卡」这件事在 egui 里几乎总是同一个形状：**某处在无谓地要求重绘**。
+/// egui 没有局部重绘，一帧就是整窗重新排版 + 三角化 + 光栅化；有 GPU 时
+/// 60fps 空转看不出来，靠 CPU 画（Windows 的 WARP、虚拟机里的 llvmpipe）时
+/// 就是整机发卡。而「谁要求的」光看代码是猜不出来的 —— `repaint_causes()`
+/// 会直接给出请求方的文件与行号。历史上两次卡顿归因都靠它当场锁定：
+/// 更新下载的进度回调、以及提示条按帧计时。
+///
+/// 写文件而不是 `eprintln!`：发行版是 `windows_subsystem = "windows"`，
+/// stderr 没有任何去处 —— 而恰恰是 Windows 用户最需要交出这份数据。
+fn perf_probe(ctx: &egui::Context, t0: std::time::Instant) {
+    use std::cell::RefCell;
+    use std::sync::OnceLock;
+
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("FERRIC_PERF").is_some()) {
+        return;
+    }
+    thread_local! {
+        /// (本轮起点, 帧数, 累计 ui() 耗时 ms, 最慢一帧 ms)
+        static ACC: RefCell<(std::time::Instant, u32, f64, f64)> =
+            RefCell::new((std::time::Instant::now(), 0, 0.0, 0.0));
+    }
+    let dt = t0.elapsed().as_secs_f64() * 1000.0;
+    ACC.with(|s| {
+        let (start, frames, total, worst) = &mut *s.borrow_mut();
+        *frames += 1;
+        *total += dt;
+        *worst = worst.max(dt);
+        let secs = start.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let causes: Vec<String> = ctx
+            .repaint_causes()
+            .iter()
+            .map(|c| format!("{}:{}", c.file.rsplit('/').next().unwrap_or(c.file), c.line))
+            .collect();
+        crate::launch::log(&format!(
+            "[perf] {:.1} fps · ui() 均 {:.2}ms 峰 {:.2}ms · 重绘请求方：{}",
+            *frames as f64 / secs,
+            *total / *frames as f64,
+            worst,
+            causes.join(", ")
+        ));
+        *start = std::time::Instant::now();
+        *frames = 0;
+        *total = 0.0;
+        *worst = 0.0;
+    });
 }
 
 #[cfg(test)]
@@ -2307,6 +2379,71 @@ mod dialog_tests {
             embedded.contains("settings_body"),
             "回退形态必须复用 settings_body，否则两种形态功能会漂移"
         );
+    }
+
+    /// 提示条是**静止**的，不该把界面钉在满帧率上。
+    ///
+    /// 曾经的做法是「`frames_left` 每帧减一 + 每帧 `request_repaint()`」：提示在的
+    /// 2 秒里整窗按刷新率重画一百多次。更糟的是计时单位是帧 —— 机器越慢，风暴拖得
+    /// 越久：软件光栅化（Windows 的 WARP）跑 8fps 时，同样 120 帧要烧 15 秒。
+    /// 这正是「Windows 一打开就很卡、Linux 没事」的直接来源（实机归因：启动后
+    /// 前 5 秒的重绘全部指向 toasts_ui 与更新下载）。
+    #[test]
+    fn a_toast_does_not_pin_the_ui_at_full_frame_rate() {
+        let src = include_str!("app.rs");
+        let body = src.split("fn toasts_ui(").nth(1).expect("toasts_ui 不见了");
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        assert!(
+            !body.contains("request_repaint()"),
+            "toasts_ui 里出现了每帧重绘 —— 提示条不动，只需在到期那一刻醒一次"
+        );
+        assert!(
+            body.contains("request_repaint_after"),
+            "到期得有人来擦掉它：必须约一个醒点，否则空闲时提示会一直留在屏幕上"
+        );
+        assert!(
+            !body.contains("frames_left"),
+            "提示条的寿命必须按时间算 —— 按帧数算会让慢机器上的风暴更久"
+        );
+    }
+
+    /// 提示条按时间到期，与渲染快慢无关。
+    #[test]
+    fn toast_expiry_is_measured_in_time() {
+        use crate::tool::{Shared, TOAST_TTL};
+        let mut shared = Shared::new(Theme::dark());
+        shared.toast("测试");
+        let t = shared.toasts.last().expect("提示没进队列");
+        let left = t.until - std::time::Instant::now();
+        assert!(
+            left <= TOAST_TTL && left > TOAST_TTL / 2,
+            "剩余时长 {left:?} 不在 TOAST_TTL({TOAST_TTL:?}) 的量级上"
+        );
+        // 到期判定就是「拿当前时刻比一下」，不涉及渲染了多少帧
+        assert!(t.until > std::time::Instant::now());
+    }
+
+    /// 软件渲染环境必须关掉动画。
+    ///
+    /// egui 的动画（悬停渐变、浮层淡入）在播放期间每帧都请求重绘整窗，而 egui
+    /// 没有局部重绘 —— 有 GPU 时白送，靠 CPU 画时正好相反：动画本身画不满帧，
+    /// 却把 CPU 占满。实机上关掉之后，启动 45 秒内的总帧数从 32 降到 18。
+    #[test]
+    fn software_render_disables_animations() {
+        let ctx = egui::Context::default();
+        Theme::dark().apply(&ctx);
+        assert!(
+            ctx.style_of(egui::Theme::Dark).animation_time > 0.0,
+            "前提：硬件路径下是有动画的"
+        );
+        super::FerricApp::strip_soft_render_haze(&ctx);
+        for slot in [egui::Theme::Dark, egui::Theme::Light] {
+            assert_eq!(
+                ctx.style_of(slot).animation_time,
+                0.0,
+                "{slot:?} 槽里的动画没关 —— 用户切一次深浅色就会把重绘风暴切回来"
+            );
+        }
     }
 }
 

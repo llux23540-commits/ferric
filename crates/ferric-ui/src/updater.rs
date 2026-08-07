@@ -93,8 +93,30 @@ enum Msg {
     Failed(String),
 }
 
-/// 启动后多久做第一次自动检查（秒）。先让首屏画完、字体装完，别和启动抢资源。
-const FIRST_CHECK_DELAY_SECS: f64 = 4.0;
+/// 启动后多久做第一次自动检查（秒）。
+///
+/// 从 4 秒推到 25 秒：4 秒正好落在「用户刚打开、开始点第一下」的窗口里，
+/// 而检查之后紧接着的是后台下载 —— 下载全程界面都在被反复重画（见
+/// [`PROGRESS_BEAT`]）。软件渲染的机器上，这就是「一打开就很卡」的时间线。
+/// 更新是完全不着急的事，让开这段最需要响应的时间。
+const FIRST_CHECK_DELAY_SECS: f64 = 25.0;
+
+/// 后台下载期间「因为进度变了」而重绘的最小间隔。
+///
+/// 下载期间界面上唯一会变的东西是顶栏一行「更新下载中 NN%」。egui 没有局部重绘：
+/// 每请求一次重绘 = 整窗重新排版、重新三角化、重新光栅化。为了一个百分比数字
+/// 把整窗按 10fps 重画，在软件光栅化（WARP / llvmpipe）的机器上足以让整机发卡。
+///
+/// 500ms（2fps）对一个百分比数字完全够看。此前是 100ms，再之前是「每收到一块
+/// 数据就重绘」（≈33fps）—— 一路都是同一个错误的不同剂量。
+pub(crate) const PROGRESS_BEAT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 后台任务在跑时的兜底轮询间隔。
+///
+/// 正常路径**不靠它**：每个发消息的地方都紧跟着一次 `request_repaint*`，
+/// 结果一到就会被唤醒。它只是防「某次唤醒丢了就再也醒不过来」的保险，
+/// 因此可以很慢 —— 1 秒醒一次不会让任何人看出延迟。
+pub(crate) const IDLE_BEAT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 两次自动检查之间的最小间隔。检查更新会把本机版本号发给服务器，
 /// 没必要频繁 —— 一天四次足够，用户随时可以手动点。
@@ -225,9 +247,9 @@ impl Updater {
             let r = download_blocking(&source, &info, &mut |done, total| {
                 let _ = tx2.send(Msg::Progress { done, total });
                 // 节流：每块数据到达都立即 request_repaint 会把界面拖进 30+fps 的
-                // 重绘风暴（软件渲染机器整机变卡，实测归因至此行）。进度条 10fps
-                // 足够顺滑 —— repaint_after 会合并多次请求，只约一个 100ms 后的醒点。
-                ctx2.request_repaint_after(std::time::Duration::from_millis(100));
+                // 重绘风暴（软件渲染机器整机变卡，实测归因至此行）。
+                // repaint_after 会把多次请求合并成一个醒点，间隔见 PROGRESS_BEAT。
+                ctx2.request_repaint_after(PROGRESS_BEAT);
             });
             match r {
                 Ok(path) => {
@@ -279,7 +301,15 @@ impl Updater {
                     return;
                 }
                 Err(TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(120));
+                    // 只是「还没有新消息」。按阶段决定下一次醒点：
+                    // - 下载中：界面上有个百分比在变，按 PROGRESS_BEAT 醒；
+                    // - 检查中：界面上**什么都没变**（纯网络往返），不该重绘，
+                    //   走 IDLE_BEAT 兜底即可 —— 结果到达时线程会主动叫醒我们。
+                    // 此前一律 120ms，等于整个检查+下载期间界面都被钉在 8fps。
+                    ctx.request_repaint_after(match self.phase {
+                        Phase::Downloading { .. } => PROGRESS_BEAT,
+                        _ => IDLE_BEAT,
+                    });
                     return;
                 }
                 Err(TryRecvError::Disconnected) => {
