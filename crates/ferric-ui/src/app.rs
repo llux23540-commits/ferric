@@ -1032,6 +1032,15 @@ impl FerricApp {
             self.raise = SettingsRaise::default();
             return;
         }
+        // ARM 虚拟机 / WARP / llvmpipe 这类软件渲染环境下，多视口（第二个系统
+        // 窗口）意味着第二条 wgpu surface —— 软件适配器经常建第二条就失败或渲染
+        // 空白，表现就是「设置窗打不开 / 一片空白」。这类环境回退为应用内浮层：
+        // 同一份 settings_body，功能不缺项，只是拖不出主窗。
+        // FERRIC_EMBEDDED_SETTINGS=1 可在任何环境强制走回退（排障用）。
+        if self.gpu_software || std::env::var_os("FERRIC_EMBEDDED_SETTINGS").is_some() {
+            self.settings_embedded_ui(ctx);
+            return;
+        }
         let theme = self.shared.theme;
         let mut open = true;
         let mut focused = false;
@@ -1159,6 +1168,46 @@ impl FerricApp {
                     .color(theme.faint),
                 );
             }
+        }
+    }
+
+    /// 设置窗的**应用内回退形态**：软件渲染环境专用（见 [`Self::settings_ui`]）。
+    ///
+    /// 用 `egui::Window` 而不是第二个系统视口：不新建 wgpu surface，主窗能画
+    /// 出来它就一定能画出来 —— 这条路径的存在意义就是「无论环境多受限都打得开」。
+    fn settings_embedded_ui(&mut self, ctx: &egui::Context) {
+        // 独立窗口那套置顶状态机在浮层形态下没有意义，请求直接吞掉。
+        let _ = std::mem::take(&mut self.settings_raise);
+        self.raise = SettingsRaise::default();
+
+        let theme = self.shared.theme;
+        let mut keep_open = true;
+        egui::Window::new(
+            RichText::new("设置")
+                .size(14.0)
+                .color(theme.fg_soft)
+                .family(FontFamily::Name(crate::fonts::UI_SEMIBOLD.into())),
+        )
+        .id(egui::Id::new("ferric-settings-embedded"))
+        .open(&mut keep_open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([432.0, 560.0])
+        .default_pos(ctx.content_rect().center() - egui::vec2(216.0, 280.0))
+        .frame(
+            Frame::window(&ctx.global_style())
+                .fill(theme.bg)
+                .inner_margin(Margin::same(18)),
+        )
+        .show(ctx, |ui| {
+            // 高度封顶到主窗内，内容超出走滚动，不让浮层顶出屏幕。
+            let max_h = (ctx.content_rect().height() - 140.0).max(240.0);
+            ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                self.settings_body(ui);
+            });
+        });
+        if !keep_open {
+            self.settings_open = false;
         }
     }
 
@@ -2198,11 +2247,12 @@ mod dialog_tests {
         );
     }
 
-    /// 设置窗是**独立的系统窗口**，不是应用内浮层。
+    /// 设置窗在硬件渲染下是**独立的系统窗口**，不是应用内浮层。
     ///
     /// 拖动由窗口管理器负责（自绘标题栏发 `ViewportCommand::StartDrag`），
     /// 所以它能拖到屏幕任何位置 —— 这部分没法在无窗口环境里断言，只能实机验证。
-    /// 这里守住的是不会退回到「应用内 Window」的老做法。
+    /// 这里守住的是硬件路径不会退回到「应用内 Window」的老做法。
+    ///（软件渲染环境有专门的浮层回退，见下一条测试 —— 那是刻意的，不算退步。）
     #[test]
     fn settings_uses_a_real_os_viewport() {
         let src = include_str!("app.rs");
@@ -2217,11 +2267,45 @@ mod dialog_tests {
         );
         assert!(
             !body.contains("egui::Window::new"),
-            "设置窗不该退回成应用内浮层 —— 那样只能在主窗范围里挪，拖不出去"
+            "硬件路径的设置窗不该退回成应用内浮层 —— 那样只能在主窗范围里挪，拖不出去"
         );
         assert!(
             body.contains("StartDrag") || src.contains("fn settings_window_chrome"),
             "无边框窗口需要自绘标题栏并发 StartDrag，否则拖不动"
+        );
+    }
+
+    /// 软件渲染（WARP / llvmpipe，即 ARM 虚拟机与无驱动环境）必须有**浮层回退**：
+    /// 第二个系统视口意味着第二条 wgpu surface，软件适配器经常建第二条就失败或
+    /// 渲染空白 —— 用户看到的就是「设置打不开 / 空白窗」。回退用 egui::Window，
+    /// 不新建 surface，主窗能画出来它就一定能画出来。
+    #[test]
+    fn software_render_falls_back_to_embedded_settings() {
+        let src = include_str!("app.rs");
+        // 入口必须按 gpu_software 分流
+        let gate = src
+            .split("fn settings_ui(")
+            .nth(1)
+            .expect("settings_ui 不见了");
+        let gate = &gate[..gate.find("fn settings_body(").unwrap_or(gate.len())];
+        assert!(
+            gate.contains("gpu_software") && gate.contains("settings_embedded_ui"),
+            "settings_ui 没有按软件渲染分流到浮层回退"
+        );
+        // 回退形态必须真的存在，且用应用内 Window（不开新 surface）、
+        // 复用同一份 settings_body（功能不缺项）
+        let embedded = src
+            .split("fn settings_embedded_ui(")
+            .nth(1)
+            .expect("settings_embedded_ui 不见了");
+        let embedded = &embedded[..embedded.find("\n    fn ").unwrap_or(embedded.len())];
+        assert!(
+            embedded.contains("egui::Window::new"),
+            "回退形态应当是应用内 egui::Window"
+        );
+        assert!(
+            embedded.contains("settings_body"),
+            "回退形态必须复用 settings_body，否则两种形态功能会漂移"
         );
     }
 }
