@@ -26,19 +26,33 @@ enum Side {
 }
 
 /// 左右滚动同步状态（存 egui 临时数据，一帧一读写）。
-#[derive(Clone, Copy, Default)]
+///
+/// 设计是**一根虚拟滚动条**：`shared` 是唯一事实，每帧把它（按各自上限夹过）
+/// 同时强加给两侧 —— 两栏在**同一帧**一起动，不存在「一侧领跑、另一侧下一帧
+/// 追赶」的跟随抖动（此前的增量镜像正是这样：平滑滚动的衰减尾巴让右栏被
+/// 一小步一小步推着走，看起来就是「左边滚动、右边一直在刷新」）。
+///
+/// 滚轮在进面板**之前**就被本模块消费并直接作用于 `shared`；滚动条拖动这类
+/// 面板内交互产生的偏差，帧末以**增量**折回 `shared`（增量而非绝对：内容短的
+/// 一侧滚到底饱和即可，绝不把长侧瞬移回去）。
+#[derive(Clone, Copy)]
 struct ScrollSync {
-    /// 上一帧两侧 ScrollArea 的 y 偏移（[左, 右]）。
-    prev: [f32; 2],
-    /// 本帧要给某侧加的**增量**（镜像用户在对侧的滚动量）。
-    ///
-    /// 必须是增量而不是绝对偏移：两侧内容长度往往不同，短的一侧早早滚到底被
-    /// 夹住，若把它的绝对位置镜像回长的一侧，长侧会被**瞬移**回短侧的上限 ——
-    /// 实测表现就是「左边滚了等于白滚 / 位置随机跳」。增量镜像下，被夹住的一侧
-    /// 只是原地饱和，谁也不会拽着谁跳。
-    nudge: [Option<f32>; 2],
-    /// 本帧要**跳转**到的绝对偏移（仅搜索定位用：两侧同一目标行，允许绝对值）。
-    jump: [Option<f32>; 2],
+    /// 虚拟滚动条位置（共享偏移，夹在 [0, 两侧最大偏移的较大者]）。
+    shared: f32,
+    /// 上一帧两个面板视口的并集（判断滚轮是否悬停在对比区上）。
+    view: egui::Rect,
+    /// 上一帧两侧各自的最大偏移（content − viewport）。
+    max: [f32; 2],
+}
+
+impl Default for ScrollSync {
+    fn default() -> Self {
+        Self {
+            shared: 0.0,
+            view: egui::Rect::NOTHING,
+            max: [0.0, 0.0],
+        }
+    }
 }
 
 pub struct DiffTool {
@@ -60,6 +74,9 @@ pub struct DiffTool {
     search_focus_req: bool,
     /// 最近一次获得焦点的面板：决定搜索范围（None = 两侧）。
     focus_side: Option<Side>,
+    /// 测试探针：最近一帧两侧的实际滚动偏移（[左, 右]），供联动断言读取。
+    #[cfg(test)]
+    probe_offsets: [f32; 2],
 }
 
 impl Default for DiffTool {
@@ -76,6 +93,8 @@ impl Default for DiffTool {
             search_nav: false,
             search_focus_req: false,
             focus_side: None,
+            #[cfg(test)]
+            probe_offsets: [0.0, 0.0],
         }
     }
 }
@@ -151,26 +170,23 @@ fn pick_file() -> Result<Option<(String, String)>, String> {
     Ok(Some((name, text)))
 }
 
-/// 同步滚动的镜像决策（纯函数）：哪侧被用户滚动了，就把**增量**镜像给对侧。
+/// 帧末结算（纯函数）：把面板内交互（拖滚动条、点击导致的局部滚动）产生的偏差
+/// 按**增量**折回共享偏移。
 ///
-/// - `forced[i]` = i 侧本帧的偏移是程序强加的（镜像/搜索跳转），其变化不算用户滚动，
-///   否则镜像回来的偏移会被当成新滚动，左右互相追着抖；
-/// - 两侧同帧都动时以变化量大的一侧为准；
-/// - 返回增量而非绝对偏移：短的一侧滚到底被夹住后，绝对镜像会把长的一侧
-///   **瞬移**回短侧上限（实测就是「左边滚了等于白滚 / 位置随机跳」的根源），
-///   增量镜像下被夹侧只是原地饱和，谁也不拽着谁跳。
-fn mirror_scroll(prev: [f32; 2], now: [f32; 2], forced: [bool; 2]) -> [Option<f32>; 2] {
-    let dl = if forced[0] { 0.0 } else { now[0] - prev[0] };
-    let dr = if forced[1] { 0.0 } else { now[1] - prev[1] };
-    let mut out = [None, None];
-    if dl.abs() >= dr.abs() {
-        if dl.abs() > 0.5 {
-            out[1] = Some(dl);
+/// - `applied[i]` = 本帧渲染前强加给 i 侧的偏移（共享偏移夹到该侧上限）；
+/// - `actual[i]` = 渲染后 i 侧的实际偏移，差值即该侧本帧的**本地**滚动量；
+/// - 折增量而非取绝对值：内容短的一侧滚到底饱和后，其绝对位置绝不能把长侧
+///   拽回去（老的绝对镜像正是「左边滚了等于白滚 / 位置随机跳」的根源）；
+/// - 结果夹在 [0, 两侧最大偏移的较大者]。
+fn fold_pane_deltas(shared: f32, applied: [f32; 2], actual: [f32; 2], max_both: f32) -> f32 {
+    let mut s = shared;
+    for i in 0..2 {
+        let d = actual[i] - applied[i];
+        if d.abs() > 0.5 {
+            s += d;
         }
-    } else if dr.abs() > 0.5 {
-        out[0] = Some(dr);
     }
-    out
+    s.clamp(0.0, max_both.max(0.0))
 }
 /// 大小写不敏感搜索：逐 char 滑窗比较，不对全文做 to_lowercase——
 /// 个别字符小写后 byte 长度会变（如 'İ'），整体转换会让区间映射回原文时错位。
@@ -444,18 +460,36 @@ impl Tool for DiffTool {
                     current: cur_right,
                 });
 
-                // —— 同步滚动：读上一帧状态，取出本帧要强加的偏移。——
+                // —— 同步滚动：一根虚拟滚动条。滚轮在进面板之前消费，
+                // 本帧就作用于共享偏移，两栏同帧一起动。——
                 let sync_id = ui.id().with("diff-scroll-sync");
                 let mut sync: ScrollSync = ui.data_mut(|d| d.get_temp(sync_id)).unwrap_or_default();
-                let nudge = sync.nudge;
-                let jump = sync.jump;
-                let prev = sync.prev;
-                sync.nudge = [None, None];
-                sync.jump = [None, None];
+                let hovering = ui
+                    .ctx()
+                    .pointer_hover_pos()
+                    .is_some_and(|p| sync.view.contains(p));
+                if hovering {
+                    // 消费方式与 ScrollArea 自己的完全一致：读平滑增量、清零防止
+                    // 面板内的 ScrollArea 再吃一遍。
+                    let dy = ui.input_mut(|i| {
+                        let d = i.smooth_scroll_delta().y;
+                        i.smooth_scroll_delta.y = 0.0;
+                        d
+                    });
+                    // 与 ScrollArea 同号约定：offset -= delta。
+                    sync.shared -= dy;
+                }
+                let max_both = sync.max[0].max(sync.max[1]).max(0.0);
+                sync.shared = sync.shared.clamp(0.0, max_both);
+                // 本帧强加给两侧的偏移（各自夹到自己的上限）。
+                let applied = [
+                    sync.shared.min(sync.max[0]).max(0.0),
+                    sync.shared.min(sync.max[1]).max(0.0),
+                ];
 
                 // 两个面板的输出（编辑框响应 + 匹配 y + 实际滚动偏移），出闭包后统一处理。
-                let mut l_view: Option<(widgets::DiffAreaOutput, f32)> = None;
-                let mut r_view: Option<(widgets::DiffAreaOutput, f32)> = None;
+                let mut l_view: Option<(widgets::DiffAreaOutput, f32, egui::Rect, f32)> = None;
+                let mut r_view: Option<(widgets::DiffAreaOutput, f32, egui::Rect, f32)> = None;
 
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -493,30 +527,26 @@ impl Tool for DiffTool {
                                 );
                             },
                             |ui| {
-                                let mut sa = egui::ScrollArea::vertical()
+                                let out = egui::ScrollArea::vertical()
                                     .id_salt("diff-l-sc")
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
-                                    .auto_shrink([false, false]);
-                                // 上一帧对侧被用户滚动 → 镜像同样的增量；搜索跳转 → 绝对定位。
-                                if let Some(y) = jump[0] {
-                                    sa = sa.vertical_scroll_offset(y);
-                                } else if let Some(d) = nudge[0] {
-                                    sa = sa.vertical_scroll_offset((prev[0] + d).max(0.0));
-                                }
-                                let out = sa.show(ui, |ui| {
-                                    widgets::code_area_diff(
-                                        ui,
-                                        &theme,
-                                        "diff-l",
-                                        &mut self.left,
-                                        rows,
-                                        &left_styles,
-                                        min_inner_h,
-                                        l_paint.as_ref(),
-                                    )
-                                });
-                                l_view = Some((out.inner, out.state.offset.y));
+                                    .auto_shrink([false, false])
+                                    .vertical_scroll_offset(applied[0])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-l",
+                                            &mut self.left,
+                                            rows,
+                                            &left_styles,
+                                            min_inner_h,
+                                            l_paint.as_ref(),
+                                        )
+                                    });
+                                let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                                l_view = Some((out.inner, out.state.offset.y, out.inner_rect, max));
                             },
                         );
                     });
@@ -556,37 +586,34 @@ impl Tool for DiffTool {
                                 );
                             },
                             |ui| {
-                                let mut sa = egui::ScrollArea::vertical()
+                                let out = egui::ScrollArea::vertical()
                                     .id_salt("diff-r-sc")
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
-                                    .auto_shrink([false, false]);
-                                if let Some(y) = jump[1] {
-                                    sa = sa.vertical_scroll_offset(y);
-                                } else if let Some(d) = nudge[1] {
-                                    sa = sa.vertical_scroll_offset((prev[1] + d).max(0.0));
-                                }
-                                let out = sa.show(ui, |ui| {
-                                    widgets::code_area_diff(
-                                        ui,
-                                        &theme,
-                                        "diff-r",
-                                        &mut self.right,
-                                        rows,
-                                        &right_styles,
-                                        min_inner_h,
-                                        r_paint.as_ref(),
-                                    )
-                                });
-                                r_view = Some((out.inner, out.state.offset.y));
+                                    .auto_shrink([false, false])
+                                    .vertical_scroll_offset(applied[1])
+                                    .show(ui, |ui| {
+                                        widgets::code_area_diff(
+                                            ui,
+                                            &theme,
+                                            "diff-r",
+                                            &mut self.right,
+                                            rows,
+                                            &right_styles,
+                                            min_inner_h,
+                                            r_paint.as_ref(),
+                                        )
+                                    });
+                                let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+                                r_view = Some((out.inner, out.state.offset.y, out.inner_rect, max));
                             },
                         );
                     });
                 });
 
                 // panel 的 body 闭包一定会执行，这里必然有值。
-                let (l_area, l_scroll) = l_view.expect("左面板已渲染");
-                let (r_area, r_scroll) = r_view.expect("右面板已渲染");
+                let (l_area, l_scroll, l_rect, l_max) = l_view.expect("左面板已渲染");
+                let (r_area, r_scroll, r_rect, r_max) = r_view.expect("右面板已渲染");
 
                 // —— 焦点范围跟踪：记住最近获得焦点的面板；点击空白让焦点彻底落空时
                 // 回到「两侧」。点搜索框 / 按钮时焦点仍有归属，不会误改范围。——
@@ -602,16 +629,24 @@ impl Tool for DiffTool {
                     self.focus_side = None;
                 }
 
-                // —— 同步滚动判定：镜像决策抽成纯函数（见 mirror_scroll），此处只接线。
-                let forced = [
-                    nudge[0].is_some() || jump[0].is_some(),
-                    nudge[1].is_some() || jump[1].is_some(),
-                ];
-                sync.nudge = mirror_scroll(prev, [l_scroll, r_scroll], forced);
-                sync.prev = [l_scroll, r_scroll];
+                // —— 帧末结算：滚动条拖动等面板内交互产生的偏差，按**增量**折回
+                // 共享偏移（纯函数 fold_pane_deltas，契约见其单测）。——
+                let folded =
+                    fold_pane_deltas(sync.shared, applied, [l_scroll, r_scroll], l_max.max(r_max));
+                // 有本地交互（拖滚动条）→ 下一帧把另一侧带过去，需要再画一帧。
+                if (folded - sync.shared).abs() > 0.5 {
+                    ui.ctx().request_repaint();
+                }
+                sync.shared = folded;
+                sync.max = [l_max, r_max];
+                sync.view = l_rect.union(r_rect);
+                #[cfg(test)]
+                {
+                    self.probe_offsets = [l_scroll, r_scroll];
+                }
 
-                // —— 搜索跳转：导航帧从面板拿到当前匹配 y，下一帧把两侧一起滚到
-                // 视口约 1/3 处（偏移镜像，天然带动另一侧）。——
+                // —— 搜索跳转：导航帧从面板拿到当前匹配 y，直接落到共享偏移，
+                // 下一帧两栏一起滚到视口约 1/3 处。——
                 if self.search_nav {
                     let y = if cur_left.is_some() {
                         l_area.current_match_y
@@ -619,19 +654,10 @@ impl Tool for DiffTool {
                         r_area.current_match_y
                     };
                     if let Some(y) = y {
-                        let off = (y - pin_h / 3.0).max(0.0);
-                        sync.jump = [Some(off), Some(off)];
+                        sync.shared = (y - pin_h / 3.0).max(0.0);
+                        ui.ctx().request_repaint();
                     }
                     self.search_nav = false;
-                }
-                // 有待强加的偏移就再画一帧，让它立即生效。
-                if sync
-                    .nudge
-                    .iter()
-                    .chain(sync.jump.iter())
-                    .any(Option::is_some)
-                {
-                    ui.ctx().request_repaint();
                 }
                 ui.data_mut(|d| d.insert_temp(sync_id, sync));
 
@@ -710,40 +736,125 @@ mod tests {
         assert!(search_matches("anything", "").is_empty());
     }
 
-    /// 镜像的是**增量**：右侧被夹在 145 时用户把左侧从 2000 滚到 2100，
-    /// 给右侧的必须是 +100（它自己去饱和），而不是绝对位置。
+    /// 静止帧：两侧实际偏移与强加值一致 → 共享偏移原地不动，
+    /// 不产生任何「追赶」——这是「右边一直在刷新」不再复发的前提。
     #[test]
-    fn mirror_passes_deltas_not_absolute_offsets() {
-        let out = mirror_scroll([2000.0, 145.0], [2100.0, 145.0], [false, false]);
-        assert_eq!(out, [None, Some(100.0)]);
-    }
-
-    /// 回归锁定：右侧在夹点附近小幅回滚 −10，左侧（在 2000）收到的必须是 −10 ——
-    /// 老实现镜像绝对偏移，会把左侧从 2000 **瞬移**到 135，用户看到的就是
-    /// 「左边滚过的位置全丢了 / 滚动没有效果」。
-    #[test]
-    fn short_side_scroll_never_teleports_the_long_side() {
-        let out = mirror_scroll([2000.0, 145.0], [2000.0, 135.0], [false, false]);
-        assert_eq!(out, [Some(-10.0), None]);
-        if let [Some(d), _] = out {
-            assert!(
-                d.abs() < 50.0,
-                "给长侧的量级应是用户手滚的增量，出现大跳变（{d}）说明退回了绝对镜像"
-            );
-        }
-    }
-
-    /// 被程序强加（镜像/跳转）的一侧，其偏移变化不算用户滚动 —— 否则镜像回来的
-    /// 偏移被当成新滚动，左右互相追着抖、每帧强制重绘（软渲染机器直接卡死）。
-    #[test]
-    fn forced_side_changes_do_not_echo_back() {
-        // 右侧本帧是被镜像推过去的（forced），它的变化不得再镜像回左侧
-        let out = mirror_scroll([100.0, 0.0], [100.0, 100.0], [false, true]);
-        assert_eq!(out, [None, None], "回声没有被切断，会形成互相追赶的抖动环");
-        // 静止帧什么都不产生
+    fn idle_frames_leave_shared_untouched() {
         assert_eq!(
-            mirror_scroll([50.0, 50.0], [50.0, 50.0], [false, false]),
-            [None, None]
+            fold_pane_deltas(2000.0, [2000.0, 145.0], [2000.0, 145.0], 4000.0),
+            2000.0
         );
+    }
+
+    /// 短侧饱和不回拽：共享偏移 2000、右侧被夹到上限 145 渲染 —— 右侧实际
+    /// 停在 145 与强加值相同，**不算**本地滚动，长侧位置分毫不动。
+    /// 老的绝对镜像在这里会把左侧瞬移回 145（「左边滚了等于白滚」）。
+    #[test]
+    fn saturated_short_side_never_drags_shared_back() {
+        assert_eq!(
+            fold_pane_deltas(2000.0, [2000.0, 145.0], [2000.0, 145.0], 2800.0),
+            2000.0
+        );
+    }
+
+    /// 拖动右侧滚动条回滚 10px：折回共享偏移的是**增量** −10，
+    /// 而不是右侧的绝对位置 —— 左侧只回退 10px，不发生大跳变。
+    #[test]
+    fn scrollbar_drag_folds_as_delta() {
+        let s = fold_pane_deltas(2000.0, [2000.0, 145.0], [2000.0, 135.0], 2800.0);
+        assert_eq!(s, 1990.0);
+        assert!(
+            (s - 2000.0).abs() < 50.0,
+            "共享偏移出现大跳变（{s}），说明退回了绝对镜像"
+        );
+    }
+
+    /// 共享偏移始终夹在 [0, 两侧上限的较大者]：越界拖动不会把状态拖飞。
+    #[test]
+    fn shared_offset_is_clamped_to_the_longer_side() {
+        assert_eq!(
+            fold_pane_deltas(100.0, [100.0, 100.0], [5000.0, 100.0], 2800.0),
+            2800.0
+        );
+        assert_eq!(fold_pane_deltas(5.0, [5.0, 5.0], [0.0, 5.0], 2800.0), 0.0);
+        assert_eq!(fold_pane_deltas(-3.0, [0.0, 0.0], [0.0, 0.0], 2800.0), 0.0);
+    }
+
+    /// 端到端（真实输入管线）：滚轮悬停在左栏上滚动，两栏必须**同一帧**一起动；
+    /// 停手并等平滑滚动衰减结束后，偏移完全静止 —— 「左边滚动、右边一直在
+    /// 刷新」的跟随式抖动不允许复发。
+    #[test]
+    fn wheel_scrolls_both_panes_in_lockstep_and_settles() {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::light();
+        theme.apply(&ctx);
+        crate::fonts::install_fonts(&ctx); // 图标字体（Lucide）在裸 Context 里不存在
+        let mut shared = crate::tool::Shared::new(theme);
+        let mut tool = DiffTool {
+            left: (0..300).map(|i| format!("line {i} left\n")).collect(),
+            right: (0..60).map(|i| format!("line {i} right\n")).collect(),
+            ..Default::default()
+        };
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let at = egui::pos2(350.0, 400.0); // 左栏内部
+        let mut t = 0.0_f64;
+        let mut frame =
+            |tool: &mut DiffTool, shared: &mut crate::tool::Shared, events: Vec<egui::Event>| {
+                t += 0.05;
+                let out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        time: Some(t),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| tool.ui(ui, shared),
+                );
+                let _ = out;
+                tool.probe_offsets
+            };
+
+        // 预热两帧：注册面板视口（悬停判定用上一帧的并集）。
+        frame(&mut tool, &mut shared, vec![]);
+        frame(&mut tool, &mut shared, vec![egui::Event::PointerMoved(at)]);
+
+        // 连续滚轮：每一帧里两栏都必须一起动（右栏饱和前）。
+        let mut prev = tool.probe_offsets;
+        let mut lockstep_checked = 0;
+        for _ in 0..8 {
+            let now = frame(
+                &mut tool,
+                &mut shared,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, -3.0),
+                    modifiers: Default::default(),
+                    phase: egui::TouchPhase::Move,
+                }],
+            );
+            let (dl, dr) = (now[0] - prev[0], now[1] - prev[1]);
+            // 右栏尚未到底时：左动右必动，且发生在同一帧。
+            if dl > 0.5 && dr > 0.5 {
+                lockstep_checked += 1;
+            }
+            prev = now;
+        }
+        assert!(
+            prev[0] > 10.0,
+            "滚轮没有滚动左栏（{prev:?}）—— 悬停消费路径断了"
+        );
+        assert!(
+            lockstep_checked >= 2,
+            "没有观察到任何一帧两栏同帧联动（右栏饱和前应当步调一致）"
+        );
+
+        // 停手：跑够衰减期后，偏移必须完全静止（无跟随式追赶）。
+        for _ in 0..80 {
+            frame(&mut tool, &mut shared, vec![]);
+        }
+        let a = frame(&mut tool, &mut shared, vec![]);
+        let b = frame(&mut tool, &mut shared, vec![]);
+        assert_eq!(a, b, "静置后偏移仍在变化 —— 「右边一直在刷新」复发");
     }
 }
