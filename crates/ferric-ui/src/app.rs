@@ -215,6 +215,8 @@ pub struct FerricApp {
     slow_render_retry: Option<crate::launch::Backend>,
     /// 用户在设置里改了渲染后端、尚未重启生效 —— 设置页据此给出「立即重启」。
     pending_restart: Option<crate::launch::Backend>,
+    /// 用户点了「立即重启」，等本帧画完由外壳执行（见 `do_restart`）。
+    want_restart: bool,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -430,6 +432,7 @@ impl FerricApp {
             gpu_software,
             slow_render_retry: None,
             pending_restart: None,
+            want_restart: false,
         }
     }
 
@@ -876,21 +879,35 @@ impl FerricApp {
                         }
                         ui.add_space(6.0);
                         if widgets::primary_button(ui, &theme, "立即重启").clicked() {
-                            self.restart_now(ui.ctx());
+                            self.restart_now();
                         }
                     });
                 });
             });
     }
 
-    /// 拉起一份新的自己并关掉当前窗口。失败就说清楚，绝不静默 ——
-    /// 「点了没反应」比没有这个按钮更糟。
-    fn restart_now(&mut self, ctx: &egui::Context) {
+    /// 请求重启。**只置位**，真正的动作在 [`FerricApp::do_restart`] ——
+    /// 那里才拿得到 `eframe::Frame`，而重启前必须先把草稿落盘（理由见彼处）。
+    /// 与插件热加载同一套「置位、由外壳在帧末统一处理」的写法。
+    fn restart_now(&mut self) {
+        self.want_restart = true;
+    }
+
+    /// 真正执行重启：先存盘，再拉起新进程，最后关掉自己。
+    ///
+    /// **顺序很要紧**。新进程一起来就会去读 eframe 的状态文件；而本次会话改过的
+    /// 草稿（JSON 正文、各工具的输入）要等关窗走 `App::save` 才写下去 ——
+    /// 先 spawn 后关窗的话，两个进程会赛跑，新实例大概率读到上一次的旧草稿，
+    /// 表现就是「点了重启，我刚才编辑的内容没了」。所以这里显式先存一次并 flush。
+    ///
+    /// 失败就说清楚，绝不静默 —— 「点了没反应」比没有这个按钮更糟。
+    fn do_restart(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(storage) = frame.storage_mut() {
+            eframe::App::save(self, storage);
+            storage.flush();
+        }
         match crate::launch::relaunch() {
-            Ok(()) => {
-                // 关窗会走 `App::save`，草稿与设置照常落盘。
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => {
                 self.slow_render_retry = None;
                 self.shared
@@ -1424,7 +1441,7 @@ impl FerricApp {
                         .color(theme.fg_soft),
                 );
                 if widgets::primary_button(ui, &theme, "立即重启").clicked() {
-                    self.restart_now(ui.ctx());
+                    self.restart_now();
                 }
             });
         }
@@ -2129,6 +2146,12 @@ impl eframe::App for FerricApp {
         // 在它的 ui() 里改这个向量是不可能的（元素正被借着）。
         if std::mem::take(&mut self.shared.reload_plugins) {
             self.reload_plugins();
+        }
+
+        // 重启同理，必须等本帧画完：`do_restart` 会存盘并关窗，
+        // 在绘制中途做这些事等于在半张画面上拔插头。
+        if std::mem::take(&mut self.want_restart) {
+            self.do_restart(ctx, frame);
         }
 
         perf_probe(ctx, t_frame_start);
