@@ -210,6 +210,11 @@ pub struct FerricApp {
     /// 实际适配器是 CPU 软件光栅化（WARP / llvmpipe）—— 虚拟机与无驱动环境。
     /// 设置页据此提示「画面糊 / 卡的根源在这，换后端或开 3D 加速」。
     gpu_software: bool,
+    /// 本次只拿到软件渲染，自愈已为下次启动排好这个后端 —— 顶栏据此显示
+    /// 一条「立即重启试试」的横幅。`None` = 没这回事（绝大多数机器）。
+    slow_render_retry: Option<crate::launch::Backend>,
+    /// 用户在设置里改了渲染后端、尚未重启生效 —— 设置页据此给出「立即重启」。
+    pending_restart: Option<crate::launch::Backend>,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -423,6 +428,8 @@ impl FerricApp {
             fast_present: false,
             gpu_desc,
             gpu_software,
+            slow_render_retry: None,
+            pending_restart: None,
         }
     }
 
@@ -826,6 +833,71 @@ impl FerricApp {
     }
 
     // ---------- 内容区 ----------
+
+    /// 「当前只有软件渲染，已为下次启动排好别的后端」横幅。
+    ///
+    /// 为什么是常驻横幅而不是 toast：这条消息**要求用户做一件事**（重启），
+    /// 而 toast 三秒就没了 —— 卡的时候用户正忙着跟界面较劲，很可能压根没看见。
+    /// 也不放进设置窗：能想到去翻设置的人本来就不需要提示。
+    ///
+    /// 只在「还有没试过的后端」时出现。全都试过仍是软件渲染的机器上不显示 ——
+    /// 那种情况重启多少次都一样，横幅就成了赶不走的噪音（原因写在设置页里）。
+    fn slow_render_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(next) = self.slow_render_retry else {
+            return;
+        };
+        let theme = self.shared.theme;
+        Panel::top("slow-render-banner")
+            .exact_size(38.0)
+            // 纯色底 + 无阴影：这条横幅恰恰只在软件渲染时出现，
+            // 而半透明/阴影正是那种环境下「一片糊」的来源。
+            .frame(
+                Frame::NONE
+                    .fill(theme.code_bg)
+                    .inner_margin(Margin::symmetric(16, 0)),
+            )
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(icons::text(icons::INFO, 13.0, theme.danger));
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "当前没有 GPU 加速（{}），界面会明显发卡 · 已为下次启动排好「{}」",
+                            self.gpu_desc.as_deref().unwrap_or("软件渲染"),
+                            next.label()
+                        ))
+                        .size(12.0)
+                        .color(theme.danger),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::subtle_button(ui, &theme, None, "以后再说").clicked() {
+                            self.slow_render_retry = None;
+                        }
+                        ui.add_space(6.0);
+                        if widgets::primary_button(ui, &theme, "立即重启").clicked() {
+                            self.restart_now(ui.ctx());
+                        }
+                    });
+                });
+            });
+    }
+
+    /// 拉起一份新的自己并关掉当前窗口。失败就说清楚，绝不静默 ——
+    /// 「点了没反应」比没有这个按钮更糟。
+    fn restart_now(&mut self, ctx: &egui::Context) {
+        match crate::launch::relaunch() {
+            Ok(()) => {
+                // 关窗会走 `App::save`，草稿与设置照常落盘。
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                self.slow_render_retry = None;
+                self.shared
+                    .toast(format!("自动重启失败，请手动重开 Ferric · {e}"));
+            }
+        }
+    }
 
     fn topbar_ui(&mut self, ui: &mut egui::Ui) {
         let theme = self.shared.theme;
@@ -1327,19 +1399,35 @@ impl FerricApp {
                         // 经 set_backend 走一遍磁盘：内存里这份是启动时读的，
                         // 之后 mark_running 改过盘上的内容，直接存回去会把它抹掉。
                         self.launch_cfg = crate::launch::set_backend(want);
-                        self.shared.toast(format!(
-                            "渲染后端已设为 {}，重启 Ferric 后生效",
-                            want.label()
-                        ));
+                        self.pending_restart = Some(want);
                     }
                 }
             });
         });
         ui.label(
-            RichText::new("画面闪烁 / 撕裂 / 打不开时换一个试试；「自动」由系统挑。重启后生效")
+            RichText::new("画面闪烁 / 撕裂 / 卡顿 / 打不开时换一个试试；「自动」由系统挑")
                 .size(11.0)
                 .color(theme.faint),
         );
+        // 「重启后生效」必须配一个能当场重启的按钮。
+        //
+        // 后端只能在建窗**之前**决定（WGPU_BACKEND 是构造 NativeOptions 时读的），
+        // 换后端天然要重启 —— 但只丢一句「重启后生效」等于把活儿推回给用户：
+        // 他得自己关掉窗口再去开始菜单点开。而换后端本来就是个**试**的动作，
+        // 试一次要手动重启一次，几乎没人会真的试完四个。
+        if let Some(want) = self.pending_restart {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("已设为「{}」，重启后生效", want.label()))
+                        .size(11.0)
+                        .color(theme.fg_soft),
+                );
+                if widgets::primary_button(ui, &theme, "立即重启").clicked() {
+                    self.restart_now(ui.ctx());
+                }
+            });
+        }
         // 当前**实际**在用的适配器：切后端做 A/B 对比时，这行是「切换真的生效了」
         // 的唯一证据 —— 锁定 Vulkan 但机器上没有，兜底照样会落回别的后端。
         if let Some(desc) = &self.gpu_desc {
@@ -1905,14 +1993,23 @@ impl eframe::App for FerricApp {
         if self.frames < STABLE_FRAMES {
             self.frames += 1;
             if self.frames == STABLE_FRAMES {
+                let out = crate::launch::mark_running(self.gpu_software);
+                if out != crate::launch::Outcome::default() {
+                    self.launch_cfg = crate::launch::load();
+                }
                 // 锁定的后端被证明不可用时会被改回「自动」—— 必须让用户知道，
                 // 否则设置里显示的选项和实际行为对不上。
-                if let Some(b) = crate::launch::mark_running() {
-                    self.launch_cfg = crate::launch::load();
+                if let Some(b) = out.lock_dropped {
                     self.shared.toast(format!(
                         "渲染后端 {} 在本机不可用，已改回「自动」",
                         b.label()
                     ));
+                }
+                // 只拿到软件渲染、且还有没试过的后端 —— 自愈已经排好了下一个，
+                // 但它要等重启才生效。用户现在正卡着，得给他一个当场能点的去处，
+                // 而不是让他自己琢磨「要不要重启一下试试」。
+                if let Some(next) = out.will_retry_with {
+                    self.slow_render_retry = Some(next);
                 }
             }
         }
@@ -1979,6 +2076,8 @@ impl eframe::App for FerricApp {
                 .show(ui, |ui| {
                     chrome::title_bar_content(ui, &theme);
                 });
+
+            self.slow_render_banner(ui);
 
             let rail_resp = Panel::left("rail")
                 .resizable(true)

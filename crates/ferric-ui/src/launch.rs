@@ -4,16 +4,23 @@
 //! （那份要等 eframe 起来才读得到）。单独一个 `launch.json`，位置就在 eframe
 //! 自己的状态文件旁边。
 //!
-//! 解决两个具体问题：
+//! 解决三个具体问题：
 //!
 //! 1. **渲染后端选不对就打不开 / 花屏**。无 GPU 驱动的环境（虚拟机、精简版
 //!    Windows、远程桌面）下 DX12 会退化成 WARP 软件光栅化，Vulkan / OpenGL 干脆
 //!    没有适配器 —— 具体哪个能用只有到了那台机器上才知道。所以：按顺序试，
-//!    **谁先跑起来就记住谁**，下次直接用；用户也可以在设置里手动锁定一个。
+//!    下次直接用上次的结果；用户也可以在设置里手动锁定一个。
 //! 2. **上一次启动没能跑起来**。写下「正在尝试 X」，跑起来之后才清掉。下次启动
 //!    如果发现这个标记还在，说明 X 那次是崩在启动路上了 —— 自动把 X 降到最后再试
 //!    别的。这样即使某个后端会让进程直接死掉，用户再点一次也能进得去，
 //!    而不是永远卡在同一个坑里。
+//! 3. **跑起来了，但挑中的是软件光栅化**。这一条最容易被漏掉：
+//!    「能出帧」曾经就是全部判据，于是 `Auto` 挑中一个退化成 WARP 的适配器之后
+//!    照样被记成 `last_good`，从此**每次启动都用它** —— 用户的原话是
+//!    「默认的渲染引擎反而最卡，手动换一个倒好了」。而同一台机器上换个后端
+//!    往往就有真实硬件适配器。所以软件渲染单独归一类（`slow`），不算「好」，
+//!    下次启动自动换下一个；全试过仍是软件渲染才认命定下来，绝不无限轮换。
+//!    见 [`resolve_after_success`]。
 //!
 //! 任何一步失败（目录建不了、文件读不出、JSON 坏了）都**只当作没有配置**继续走 ——
 //! 这个模块的存在是为了让应用更容易打开，它自己绝不能成为打不开的理由。
@@ -87,6 +94,19 @@ pub struct LaunchCfg {
     /// 驱动装上了、虚拟机开了 3D 加速，环境是会变好的，不该永久拉黑。
     #[serde(default)]
     pub failed: Vec<Backend>,
+    /// 试过、能跑起来，但**只拿到软件光栅化适配器**的后端。
+    ///
+    /// 为什么必须单独记一类：从前的自愈只有「能不能启动」一个判据，于是
+    /// `Auto` 挑中一个退化成 WARP 的适配器之后，照样被记成 `last_good` ——
+    /// 从此**每次启动都用它**，用户看到的就是「默认的渲染引擎反而最卡，
+    /// 手动换一个倒好了」。可同一台机器上换个后端往往就有真实硬件适配器
+    /// （DX12 没驱动会退化成 WARP，而 Vulkan / GL 未必）。
+    ///
+    /// 所以：软件渲染算「跑起来了，但不该就这么定下来」—— 排在没试过的之后、
+    /// 起不来的之前，下次启动自动换下一个再看看。全都试过仍是软件渲染，
+    /// 就认命定下来（见 [`resolve_after_success`]），绝不无限轮换。
+    #[serde(default)]
+    pub slow: Vec<Backend>,
     /// 上一次启动失败的原因（设置页展示，便于用户看见到底缺什么）。
     #[serde(default)]
     pub last_error: Option<String>,
@@ -195,11 +215,21 @@ fn set_backend_at(p: &std::path::Path, backend: Backend) -> LaunchCfg {
 /// 2. 否则上次成功的那个排第一（行为稳定，也省掉一次全量枚举）；
 /// 3. 然后是默认顺序：先 `Auto`（wgpu 自己挑，绝大多数机器到这就结束了），
 ///    再逐个点名；
-/// 4. 试过没跑起来的（`failed`）一律降到最后。
+/// 4. 只拿到软件光栅化的（`slow`）降到没试过的之后 —— 能用，但还有更好的可找；
+/// 5. 试过没跑起来的（`failed`）一律降到最后。
 pub fn plan(cfg: &LaunchCfg) -> Vec<Backend> {
     fn push(order: &mut Vec<Backend>, b: Backend) {
         if !order.contains(&b) {
             order.push(b);
+        }
+    }
+    /// 把 `demote` 里的项按原有先后挪到队尾。
+    fn demote(order: &mut Vec<Backend>, demote: &[Backend]) {
+        for b in demote.iter().copied() {
+            if order.contains(&b) {
+                order.retain(|x| *x != b);
+                order.push(b);
+            }
         }
     }
     let mut order: Vec<Backend> = Vec::with_capacity(Backend::ALL.len());
@@ -212,13 +242,27 @@ pub fn plan(cfg: &LaunchCfg) -> Vec<Backend> {
     for b in Backend::ALL {
         push(&mut order, b);
     }
-    // 崩在启动路上的那些，挪到最后再说（保持它们之间的先后）
-    for bad in cfg.failed.iter().copied() {
-        if order.contains(&bad) {
-            order.retain(|b| *b != bad);
-            order.push(bad);
-        }
-    }
+    // 先降「只有软件渲染」的，再降「起不来」的 —— 两步的顺序决定了最终的相对位置：
+    // 起不来的必须在最后，软件渲染的排它前面（软件渲染再慢也比打不开强）。
+    //
+    // 用户**锁定**的那个不参与降级：他可能就是要它（某些驱动下软件渲染反而画得对），
+    // 「我选了 X 却被自动换成 Y」比慢更让人火大。起不来是另一回事 —— 那不是慢，
+    // 是根本进不去，只能降。
+    //
+    // ⚠️ 判「有没有锁」必须先看 `cfg.backend != Auto`，不能直接拿 `b != cfg.backend`
+    // 过滤：没锁时 `cfg.backend` 就是 `Auto`，那样写会把 slow 里的 `Auto` 一并放过 ——
+    // 而 `Auto` 恰恰是最常进 slow 的那个（默认就先试它）。结果是它永不降级、
+    // 每次启动照旧第一个用它，轮换根本开始不了（实测：连开五次全是 Auto，
+    // slow 停在 ["Auto"] 不动，而横幅还在说「下次改用 DX12」）。
+    let locked = (cfg.backend != Backend::Auto).then_some(cfg.backend);
+    let slow: Vec<Backend> = cfg
+        .slow
+        .iter()
+        .copied()
+        .filter(|b| Some(*b) != locked)
+        .collect();
+    demote(&mut order, &slow);
+    demote(&mut order, &cfg.failed);
     order
 }
 
@@ -257,10 +301,20 @@ pub fn begin(cfg: &mut LaunchCfg) -> Backend {
 ///
 /// 必须在构造 `NativeOptions` **之前**调用 —— 那个默认值就是在构造时读的环境变量。
 pub fn apply(backend: Backend) {
-    match backend.env_value() {
-        Some(v) => std::env::set_var("WGPU_BACKEND", v),
-        // 自动模式要把可能残留的值清掉（同一进程里我们会连试几个）
-        None => std::env::remove_var("WGPU_BACKEND"),
+    // 外部显式设了就一切照旧 —— 环境变量是比配置更明确的意图表达，
+    // 而且它是**排障时唯一不用改配置就能做 A/B 的手段**。
+    //
+    // 这里原本在 `Auto` 分支无条件 `remove_var`，理由写的是「同一进程里我们会连试
+    // 几个」—— 可 `main` 里写得很清楚：winit 全进程只允许一次事件循环，自愈是
+    // **跨启动**的，同一进程根本不会试第二个。于是那行清除只剩副作用：
+    // 把用户从命令行设的 WGPU_BACKEND 抹掉，`WGPU_BACKEND=gl ferric` 完全不起作用
+    // （本次排障就栽在这儿：三种设法跑出来是同一个适配器）。
+    if std::env::var_os("WGPU_BACKEND").is_some_and(|v| !v.is_empty()) {
+        log("WGPU_BACKEND 已由外部指定，本次忽略配置里的后端选择");
+        return;
+    }
+    if let Some(v) = backend.env_value() {
+        std::env::set_var("WGPU_BACKEND", v);
     }
 }
 
@@ -302,21 +356,36 @@ pub fn set_dx12_no_latency_wait(on: bool) -> LaunchCfg {
 /// 进程内标记：UI 是否已经真的画出来过。
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// 应用已经稳定出帧了 —— 把本次用的后端记成 `last_good`，清掉 `pending` 与
-/// 黑名单（环境是会变好的：装了驱动、开了 3D 加速，不该永久拉黑一个后端）。
+/// 一次成功启动之后要让调用方知道的事。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    /// 用户锁定的后端被证明不可用，已改回「自动」（调用方应当提示）。
+    pub lock_dropped: Option<Backend>,
+    /// 本次只拿到软件光栅化，且**还有没试过的后端**，下次启动会自动改用它。
+    /// 调用方应当把这件事告诉用户，并给一个「立即重启」的去处 ——
+    /// 否则这个自愈要等到用户自己想起来重启才生效，而他正卡着。
+    pub will_retry_with: Option<Backend>,
+}
+
+/// 应用已经稳定出帧了。把本次的结果落盘，并告诉调用方接下来该提示什么。
 ///
-/// 返回值：若用户**锁定**的后端本次没能启动、是靠兜底后端跑起来的，锁会被改回
-/// 「自动」，并返回被放弃的那个锁（调用方应当提示用户）。
+/// `software`：本次真正拿到的适配器是不是 CPU 软件光栅化（WARP / llvmpipe）。
 ///
-/// 为什么必须改回自动：黑名单会在成功启动后清空（上一段的理由），但锁定项
-/// 不动的话，下次启动第一个又是它 —— 于是「锁了台机器上没有的后端」会变成
-/// **隔次启动必失败**的死循环：失败 → 兜底成功清黑名单 → 又试锁 → 又失败……
-/// （实测 startup.log 正是这个形状。）锁不可满足时，唯一稳定的出路就是放弃锁。
+/// # 「跑起来了」不等于「就用它了」
+///
+/// 从前这里只有一个判据 —— 能出帧就记成 `last_good`。于是 `Auto` 挑中一个
+/// 退化成 WARP 的适配器之后就被永久定下来，用户的体验是「默认的渲染引擎最卡，
+/// 手动换一个反而好」。而同一台机器上换个后端常常就有真实硬件适配器
+/// （DX12 缺驱动会退化成 WARP，Vulkan / GL 未必）。
+///
+/// 所以软件渲染单独归一类（`slow`），不进 `last_good`，下次启动自动换下一个。
+/// 全部后端都试过仍是软件渲染 → 这台机器就是没有硬件加速，认下最后这个，
+/// 停止轮换（不然每次启动都在换后端，那是另一种毛病）。
 ///
 /// 由 `FerricApp` 在头几帧之后调用一次（只有第一次生效）。
-pub fn mark_running() -> Option<Backend> {
+pub fn mark_running(software: bool) -> Outcome {
     if RUNNING.swap(true, Ordering::Relaxed) {
-        return None;
+        return Outcome::default();
     }
     let mut cfg = load();
     let used = cfg.pending.unwrap_or_else(|| {
@@ -324,37 +393,107 @@ pub fn mark_running() -> Option<Backend> {
             .ok()
             .map_or(Backend::Auto, |v| Backend::from_env_value(&v))
     });
-    let dropped = resolve_lock_after_success(&mut cfg, used);
-    cfg.last_good = Some(used);
+    let out = resolve_after_success(&mut cfg, used, software);
     cfg.pending = None;
-    cfg.failed.clear();
-    if dropped.is_none() {
-        cfg.last_error = None;
-    }
     save(&cfg);
-    dropped
+    out
 }
 
-/// [`mark_running`] 的纯逻辑部分：本次成功用的是 `used`，检查用户锁是否已被
-/// 证明不可用（进了黑名单、且本次不是靠它跑起来的）。是则回退到自动，
-/// 把原因写进 `last_error`（设置页红字可见），返回被放弃的锁。
-fn resolve_lock_after_success(cfg: &mut LaunchCfg, used: Backend) -> Option<Backend> {
+/// [`mark_running`] 的纯逻辑部分（可测：不碰磁盘、不碰环境变量）。
+///
+/// 两件事：① 用户锁是否已被证明不可用 → 放弃锁回到自动；
+/// ② 本次是不是只拿到软件渲染 → 决定记 `last_good` 还是记 `slow`。
+fn resolve_after_success(cfg: &mut LaunchCfg, used: Backend, software: bool) -> Outcome {
+    let mut out = Outcome::default();
+
+    // ① 锁不可满足就得放弃 —— 否则「锁了台机器上没有的后端」会变成隔次启动必失败的
+    //    死循环：失败 → 兜底成功清黑名单 → 又试锁 → 又失败……（实测 startup.log 如此）。
     if cfg.backend != Backend::Auto && cfg.backend != used && cfg.failed.contains(&cfg.backend) {
-        let dropped = cfg.backend;
-        cfg.backend = Backend::Auto;
+        out.lock_dropped = Some(cfg.backend);
         cfg.last_error = Some(format!(
             "锁定的 {} 在本机不可用，已改回「自动」",
-            dropped.label()
+            cfg.backend.label()
         ));
-        Some(dropped)
-    } else {
-        None
+        cfg.backend = Backend::Auto;
     }
+
+    if !software {
+        // 拿到硬件加速 —— 这才叫「好」。两个黑名单一并清掉：能拿到硬件加速说明
+        // 环境确实变好了（装了驱动 / 开了 3D 加速），之前被判过「起不来」或
+        // 「只有软件渲染」的后端都值得重新给机会。
+        cfg.last_good = Some(used);
+        cfg.slow.clear();
+        cfg.failed.clear();
+        if out.lock_dropped.is_none() {
+            cfg.last_error = None;
+        }
+        return out;
+    }
+
+    // —— 软件渲染。记一笔，看还有没有没试过的。
+    //
+    // ⚠️ 这条路径上**绝不能**清 `failed`。清了的话，轮换会一头撞回那些在本机
+    // 根本起不来的后端上 —— 实测（Linux 上没有 DX12）：轮换刚做出来时是
+    //   自动 → DX12(打不开) → Vulkan → DX12(打不开) → OpenGL → DX12(打不开)
+    // 也就是**隔一次启动应用就打不开**，比原来的卡顿糟得多。
+    // 「环境会变好」的重试机会留给拿到硬件加速的那条分支就够了。
+    if !cfg.slow.contains(&used) {
+        cfg.slow.push(used);
+    }
+    // 用户**锁定**了这个后端就不再替他轮换：他的选择优先于我们的判断。
+    let locked = cfg.backend != Backend::Auto;
+    let untried: Option<Backend> = if locked {
+        None
+    } else {
+        // 起不来的（failed）同样要跳过 —— 它们不是「没试过」，是试过进不去。
+        plan(cfg)
+            .into_iter()
+            .find(|b| !cfg.slow.contains(b) && !cfg.failed.contains(b))
+    };
+    match untried {
+        Some(next) => {
+            // 先别定下 last_good —— 定了下次启动第一个又是它，轮换就永远开始不了。
+            out.will_retry_with = Some(next);
+            cfg.last_error = Some(format!(
+                "{} 只拿到软件渲染（无 GPU 加速），下次启动将改用 {}",
+                used.label(),
+                next.label()
+            ));
+        }
+        None => {
+            // 全试过了（或用户锁死了），这台机器就是没有硬件加速。认下它，停止轮换。
+            cfg.last_good = Some(used);
+            cfg.last_error = Some(
+                "所有渲染后端在本机都只有软件渲染（无 GPU 加速）—— \
+                 虚拟机请开启 3D 加速，物理机请安装显卡驱动"
+                    .to_owned(),
+            );
+        }
+    }
+    out
 }
 
 /// 本次启动是否已经成功出帧。
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Relaxed)
+}
+
+/// 重启本应用：拉起一份新的自己，然后请调用方关掉当前窗口。
+///
+/// 渲染后端只能在建窗**之前**决定（`WGPU_BACKEND` 是构造 `NativeOptions` 时读的），
+/// 所以换后端必然要重启。没有这个按钮的话，「重启后生效」就是把活儿丢回给用户：
+/// 他得自己找到窗口关掉、再去开始菜单点开 —— 而他正卡着，最需要的恰恰是马上看到效果。
+///
+/// 失败就把原因交出去，由调用方提示「请手动重启」——
+/// 悄悄失败会变成「点了没反应」，那比没有这个按钮更糟。
+pub fn relaunch() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("找不到程序自身路径：{e}"))?;
+    // 不继承命令行参数：本应用没有会影响启动的参数，而原样传递反而可能
+    // 把上一次的一次性调试开关（如 FERRIC_SCREENSHOT 配套的用法）带进新进程。
+    std::process::Command::new(&exe)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("拉起新进程失败：{e}"))
 }
 
 /// 启动彻底失败时弹一个系统对话框。
@@ -427,8 +566,8 @@ mod tests {
             failed: vec![Backend::Gl],
             ..Default::default()
         };
-        let dropped = resolve_lock_after_success(&mut cfg, Backend::Auto);
-        assert_eq!(dropped, Some(Backend::Gl));
+        let out = resolve_after_success(&mut cfg, Backend::Auto, false);
+        assert_eq!(out.lock_dropped, Some(Backend::Gl));
         assert_eq!(cfg.backend, Backend::Auto, "锁没被放弃，死循环还在");
         let msg = cfg.last_error.as_deref().unwrap_or("");
         assert!(msg.contains("OpenGL"), "原因没写给用户看：{msg:?}");
@@ -442,7 +581,10 @@ mod tests {
             failed: vec![Backend::Gl], // 上上次失败过，这次成功
             ..Default::default()
         };
-        assert_eq!(resolve_lock_after_success(&mut cfg, Backend::Gl), None);
+        assert_eq!(
+            resolve_after_success(&mut cfg, Backend::Gl, false).lock_dropped,
+            None
+        );
         assert_eq!(cfg.backend, Backend::Gl, "自己跑起来的锁不该被动");
     }
 
@@ -450,7 +592,10 @@ mod tests {
     #[test]
     fn auto_mode_and_healthy_locks_are_untouched() {
         let mut auto = LaunchCfg::default();
-        assert_eq!(resolve_lock_after_success(&mut auto, Backend::Dx12), None);
+        assert_eq!(
+            resolve_after_success(&mut auto, Backend::Dx12, false).lock_dropped,
+            None
+        );
 
         let mut healthy = LaunchCfg {
             backend: Backend::Vulkan,
@@ -458,7 +603,7 @@ mod tests {
         };
         // 本次因为别的原因用了 Auto（比如首次 pending 逻辑），但 Vulkan 没失败记录
         assert_eq!(
-            resolve_lock_after_success(&mut healthy, Backend::Auto),
+            resolve_after_success(&mut healthy, Backend::Auto, false).lock_dropped,
             None
         );
         assert_eq!(healthy.backend, Backend::Vulkan);
@@ -559,6 +704,7 @@ mod tests {
                 last_good: Some(Backend::Dx12),
                 pending: None,
                 failed: vec![Backend::Vulkan],
+                slow: Vec::new(),
                 last_error: None,
                 dx12_no_latency_wait: false,
             },
@@ -588,6 +734,223 @@ mod tests {
         assert_eq!(cfg.backend, Backend::Auto);
         assert!(cfg.failed.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==== 「能跑起来」≠「就用它了」：软件渲染的自愈 ====
+
+    /// 拿到软件渲染时**不能**记成 last_good —— 记了下次启动第一个又是它，
+    /// 轮换永远开始不了，用户就永远卡着。这正是「默认的渲染引擎最卡」的成因。
+    #[test]
+    fn a_software_only_backend_is_not_accepted_as_good() {
+        let mut cfg = LaunchCfg::default();
+        let out = resolve_after_success(&mut cfg, Backend::Auto, true);
+        assert_eq!(cfg.last_good, None, "软件渲染被当成好结果记下来了");
+        assert!(cfg.slow.contains(&Backend::Auto), "没记进 slow");
+        assert!(out.will_retry_with.is_some(), "没给出下次要试的后端");
+        assert_ne!(
+            out.will_retry_with,
+            Some(Backend::Auto),
+            "下次还试同一个 = 原地打转"
+        );
+    }
+
+    /// 拿到硬件加速才算数：记 last_good，并把 slow 清空 ——
+    /// 装了驱动 / 虚拟机开了 3D 加速，之前判过慢的后端值得重新给机会。
+    #[test]
+    fn hardware_acceleration_is_what_gets_remembered() {
+        let mut cfg = LaunchCfg {
+            slow: vec![Backend::Dx12, Backend::Auto],
+            failed: vec![Backend::Gl],
+            ..Default::default()
+        };
+        let out = resolve_after_success(&mut cfg, Backend::Vulkan, false);
+        assert_eq!(cfg.last_good, Some(Backend::Vulkan));
+        assert!(cfg.slow.is_empty(), "环境变好了，slow 该清空");
+        assert!(cfg.failed.is_empty(), "成功启动后黑名单该清空");
+        assert_eq!(out.will_retry_with, None, "已经good了还提示重启就是骚扰");
+        assert_eq!(cfg.last_error, None);
+    }
+
+    /// **绝不无限轮换**：每个后端都试过、全是软件渲染 → 认下最后那个，
+    /// 不再要求重启。否则这台机器每次启动都在换后端，那是另一种毛病。
+    #[test]
+    fn a_machine_with_no_gpu_at_all_settles_instead_of_rotating_forever() {
+        let mut cfg = LaunchCfg::default();
+        let mut used = Backend::Auto;
+        // 模拟连续启动：每次都只拿到软件渲染
+        for i in 0..Backend::ALL.len() {
+            let out = resolve_after_success(&mut cfg, used, true);
+            match out.will_retry_with {
+                Some(next) => {
+                    assert!(i < Backend::ALL.len() - 1, "第 {i} 轮还在要求换，该收敛了");
+                    used = next;
+                }
+                None => {
+                    assert_eq!(i, Backend::ALL.len() - 1, "过早停止轮换：第 {i} 轮");
+                    break;
+                }
+            }
+        }
+        assert_eq!(cfg.slow.len(), Backend::ALL.len(), "没把每个后端都试到");
+        assert_eq!(cfg.last_good, Some(used), "认命之后要记下来，别再换");
+        // 再来一次也不该继续要求重启
+        assert_eq!(
+            resolve_after_success(&mut cfg, used, true).will_retry_with,
+            None,
+            "已经认命了还在要求重启"
+        );
+        let msg = cfg.last_error.as_deref().unwrap_or("");
+        assert!(
+            msg.contains("3D 加速") || msg.contains("驱动"),
+            "没告诉用户真正该做什么：{msg:?}"
+        );
+    }
+
+    /// 轮换**绝不能撞回那些在本机根本起不来的后端**。
+    ///
+    /// 这是加轮换时实测抓到的回归：软件渲染那条路径上原本也跟着清了 `failed`，
+    /// 于是在没有 DX12 的机器上跑出了
+    ///   自动 → DX12(打不开) → Vulkan → DX12(打不开) → OpenGL → DX12(打不开)
+    /// —— **隔一次启动应用就打不开**，比原来的卡顿糟得多。
+    #[test]
+    fn rotation_never_walks_back_into_a_backend_that_cannot_start() {
+        let mut cfg = LaunchCfg {
+            failed: vec![Backend::Dx12], // 上次试 DX12 没能出帧
+            slow: vec![Backend::Auto],
+            ..Default::default()
+        };
+        let out = resolve_after_success(&mut cfg, Backend::Vulkan, true);
+        assert_ne!(
+            out.will_retry_with,
+            Some(Backend::Dx12),
+            "又把起不来的后端排成了下一个"
+        );
+        assert!(
+            cfg.failed.contains(&Backend::Dx12),
+            "软件渲染路径上把 failed 清了 —— 下次启动就会再撞一次墙"
+        );
+    }
+
+    /// 但拿到硬件加速时 `failed` 该清空：那才是「环境真的变好了」的信号
+    /// （装了驱动 / 虚拟机开了 3D 加速），值得让之前起不来的后端重新有机会。
+    #[test]
+    fn hardware_success_reopens_the_blacklist() {
+        let mut cfg = LaunchCfg {
+            failed: vec![Backend::Dx12],
+            slow: vec![Backend::Auto],
+            ..Default::default()
+        };
+        resolve_after_success(&mut cfg, Backend::Vulkan, false);
+        assert!(
+            cfg.failed.is_empty(),
+            "拿到硬件加速后没给起不来的后端翻身机会"
+        );
+        assert!(cfg.slow.is_empty());
+    }
+
+    /// 用户**锁定**了某个后端，就算它只有软件渲染也不替他换 ——
+    /// 「我选了 X 却被自动换成 Y」比慢更让人火大。
+    #[test]
+    fn a_users_explicit_lock_is_never_auto_rotated() {
+        let mut cfg = LaunchCfg {
+            backend: Backend::Gl,
+            ..Default::default()
+        };
+        let out = resolve_after_success(&mut cfg, Backend::Gl, true);
+        assert_eq!(out.will_retry_with, None, "锁定的后端被自动换掉了");
+        assert_eq!(cfg.backend, Backend::Gl, "锁不该被动");
+        assert_eq!(cfg.last_good, Some(Backend::Gl), "尊重锁定就要认下它");
+        // 排序里也不能把锁定项降下去
+        assert_eq!(
+            plan(&cfg).first(),
+            Some(&Backend::Gl),
+            "锁定项被 slow 降级了"
+        );
+    }
+
+    /// 没锁定时（`backend == Auto`），slow 里的 `Auto` 也必须照降。
+    ///
+    /// 这条是实测抓出来的回归：原先的过滤写成 `b != cfg.backend`，而没锁时
+    /// `cfg.backend` 正是 `Auto`，于是最常进 slow 的那个永远不降级 ——
+    /// 连开五次全在用 Auto、slow 停在 ["Auto"] 不动，轮换等于没做。
+    #[test]
+    fn auto_gets_demoted_too_when_nothing_is_locked() {
+        let cfg = LaunchCfg {
+            slow: vec![Backend::Auto],
+            ..Default::default()
+        };
+        let p = plan(&cfg);
+        assert_ne!(
+            p.first(),
+            Some(&Backend::Auto),
+            "已知只有软件渲染的 Auto 还排第一 —— 轮换开始不了：{p:?}"
+        );
+        assert_eq!(p.last(), Some(&Backend::Auto), "Auto 该被排到最后：{p:?}");
+    }
+
+    /// 走一遍**真实**的跨启动循环（begin 落 pending → 成功后 resolve），
+    /// 确认每次启动真的换了一个后端，而不是嘴上说换、实际原地打转。
+    #[test]
+    fn rotation_actually_advances_across_restarts() {
+        let mut cfg = LaunchCfg::default();
+        let mut used_each_time = Vec::new();
+        for _ in 0..Backend::ALL.len() {
+            // begin() 的纯逻辑部分：挑计划首项
+            let b = plan(&cfg).first().copied().unwrap();
+            used_each_time.push(b);
+            // 这次也只拿到软件渲染
+            resolve_after_success(&mut cfg, b, true);
+        }
+        let uniq: std::collections::HashSet<_> = used_each_time.iter().collect();
+        assert_eq!(
+            uniq.len(),
+            Backend::ALL.len(),
+            "跨启动没有真的逐个换过去：{used_each_time:?}"
+        );
+    }
+
+    /// slow 的降级只是「往后排」，不是拉黑：起不来的必须排在它后面 ——
+    /// 软件渲染再慢也比打不开强。
+    #[test]
+    fn slow_is_demoted_but_still_ranks_above_broken() {
+        let cfg = LaunchCfg {
+            slow: vec![Backend::Dx12],
+            failed: vec![Backend::Vulkan],
+            ..Default::default()
+        };
+        let p = plan(&cfg);
+        let slow_at = p.iter().position(|b| *b == Backend::Dx12).unwrap();
+        let bad_at = p.iter().position(|b| *b == Backend::Vulkan).unwrap();
+        assert!(slow_at < bad_at, "「慢」被排到了「打不开」后面：{p:?}");
+        assert!(
+            p.contains(&Backend::Dx12),
+            "slow 不是拉黑，不能从计划里消失"
+        );
+        // 没试过的要排在慢的前面
+        let fresh_at = p.iter().position(|b| *b == Backend::Gl).unwrap();
+        assert!(fresh_at < slow_at, "没试过的该优先于已知慢的：{p:?}");
+    }
+
+    /// 外部显式设的 WGPU_BACKEND 必须被尊重 —— 那是排障时唯一不改配置就能做
+    /// A/B 的手段。此前 `Auto` 分支无条件 remove_var，把它抹掉了。
+    #[test]
+    fn an_externally_set_backend_env_var_wins() {
+        // 这个测试要改进程环境变量，与其它用到 WGPU_BACKEND 的测试互斥；
+        // 本文件里只有它碰这个变量。
+        std::env::set_var("WGPU_BACKEND", "gl");
+        apply(Backend::Dx12);
+        assert_eq!(
+            std::env::var("WGPU_BACKEND").ok().as_deref(),
+            Some("gl"),
+            "外部指定的后端被配置覆盖了"
+        );
+        apply(Backend::Auto);
+        assert_eq!(
+            std::env::var("WGPU_BACKEND").ok().as_deref(),
+            Some("gl"),
+            "「自动」把外部指定的后端清掉了 —— WGPU_BACKEND=gl ferric 会完全失效"
+        );
+        std::env::remove_var("WGPU_BACKEND");
     }
 
     /// 后端名必须是 wgpu 认得的那几个：写错了 wgpu 会解析成空集合，
