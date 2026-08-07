@@ -69,6 +69,8 @@ struct SearchState {
     focus: bool,
     /// 打开时把编辑器当前选区带进查询框（选区文本只有渲染帧里拿得到）。
     prefill: bool,
+    /// 下一次渲染把查询框内容全选（打开 / 预填之后），直接输入即替换。
+    select_all: bool,
 }
 
 impl SearchState {
@@ -84,6 +86,9 @@ impl SearchState {
         self.goto = true;
     }
 }
+
+/// 搜索条（停靠行）占用的高度：32px 内容 + 分隔线与间距。
+const SEARCH_BAR_H: f32 = 38.0;
 
 /// 调试开关：在编辑器右上角画出焦点/事件，用于诊断输入法问题（默认关闭）。
 const DEBUG_HUD: bool = false;
@@ -227,7 +232,6 @@ fn code_editor_inner(
     let num_color = ui.visuals().weak_text_color();
     let arrow_color = theme.muted;
     let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, '0'));
-    let inner_h = height.max(60.0);
 
     // 滚动条改成**常驻实心**，不用 egui 默认的浮动样式。
     //
@@ -280,8 +284,136 @@ fn code_editor_inner(
             state.want_focus = true; // 关掉搜索条后焦点还给编辑器
         }
     }
-    // 搜索条锚在编辑区视口右上角；进 ScrollArea 之前量，进去之后坐标系就变了。
-    let search_anchor = ui.available_rect_before_wrap();
+
+    // ---- 搜索条：停靠在编辑区顶部的平铺一行（txt / 记事本式）----
+    //
+    // 不用浮层：浮层要么压住正文首行，要么带阴影 —— 软件光栅化（虚拟机）下
+    // 半透明阴影会糊成一团灰，非整数像素的浮块还会让文字发虚。停靠条是
+    // 不透明、整行铺满、按行对齐的，正文整体下移让位，谁也不挡谁。
+    let inner_h = if search.open {
+        (height - SEARCH_BAR_H).max(60.0)
+    } else {
+        height.max(60.0)
+    };
+    if search.open {
+        let bar = ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 32.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(2.0);
+                ui.label(crate::icons::text(crate::icons::SEARCH, 13.0, theme.muted));
+
+                // 右侧固定占位：计数（约 72px）+ 三个 32px 按钮 + 间距；
+                // 剩余宽度全部给输入框 —— 长查询要能看全，这是「简单明了」的核心。
+                let controls_w = 72.0 + 32.0 * 3.0 + 6.0 * 5.0;
+                let input_w = (ui.available_width() - controls_w).max(120.0);
+                let te = egui::TextEdit::singleline(&mut search.query)
+                    .id(id.with("__searchbox"))
+                    .desired_width(input_w)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("查找…（Enter 下一个 · Shift+Enter 上一个 · Esc 关闭）")
+                    .show(ui);
+                if search.focus {
+                    search.focus = false;
+                    te.response.request_focus();
+                    search.select_all = true;
+                }
+                // 全选查询串：刚打开或预填之后，直接敲字即替换（记事本同款）。
+                if search.select_all && te.response.has_focus() {
+                    if let Some(mut st) =
+                        egui::text_edit::TextEditState::load(ui.ctx(), te.response.id)
+                    {
+                        let end = search.query.chars().count();
+                        st.cursor.set_char_range(Some(CCursorRange::two(
+                            CCursor::new(0),
+                            CCursor::new(end),
+                        )));
+                        st.store(ui.ctx(), te.response.id);
+                        search.select_all = false;
+                    }
+                }
+                if te.response.changed() {
+                    search.cur = 0;
+                    search.goto = true;
+                    ui.ctx().request_repaint();
+                }
+                // Enter = 下一个，Shift+Enter = 上一个；回车会让 TextEdit 交出
+                // 焦点，导航完抢回来，连续回车才能连续跳。
+                if te.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    search.step(!ui.input(|i| i.modifiers.shift));
+                    te.response.request_focus();
+                    ui.ctx().request_repaint();
+                }
+
+                // 计数固定宽度，数字变化时布局不跳。
+                let (count, color) = if search.query.is_empty() {
+                    (String::new(), theme.muted)
+                } else if search.total == 0 {
+                    ("无匹配".to_owned(), theme.danger)
+                } else {
+                    (format!("{}/{}", search.cur + 1, search.total), theme.muted)
+                };
+                ui.allocate_ui_with_layout(
+                    vec2(72.0, 24.0),
+                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(count)
+                                .size(11.5)
+                                .family(egui::FontFamily::Monospace)
+                                .color(color),
+                        );
+                    },
+                );
+
+                // 按钮点完把焦点还给输入框：否则回车导航就失灵了 ——
+                // 这正是此前「交互很怪」的来源之一。
+                if crate::widgets::tb_text_btn(
+                    ui,
+                    theme,
+                    "↑",
+                    false,
+                    "上一个（Shift+Enter / Shift+F3）",
+                )
+                .clicked()
+                {
+                    search.step(false);
+                    te.response.request_focus();
+                    ui.ctx().request_repaint();
+                }
+                if crate::widgets::tb_text_btn(ui, theme, "↓", false, "下一个（Enter / F3）")
+                    .clicked()
+                {
+                    search.step(true);
+                    te.response.request_focus();
+                    ui.ctx().request_repaint();
+                }
+                if crate::widgets::tb_icon_btn(
+                    ui,
+                    theme,
+                    crate::icons::X,
+                    false,
+                    false,
+                    "关闭（Esc）",
+                )
+                .clicked()
+                {
+                    search.open = false;
+                    state.want_focus = true;
+                    ui.ctx().request_repaint();
+                }
+            },
+        );
+        // 底边一条 1px 分隔线：把搜索行和正文分开，不靠阴影。
+        let r = bar.response.rect;
+        ui.painter().hline(
+            egui::Rangef::new(r.left(), r.right()),
+            r.bottom() + 2.0,
+            egui::Stroke::new(1.0_f32, theme.border),
+        );
+        ui.add_space(SEARCH_BAR_H - 32.0);
+    }
 
     let out = egui::ScrollArea::new([!wrap, true])
         .id_salt((id, "sc"))
@@ -644,6 +776,8 @@ fn code_editor_inner(
                                 if !s.is_empty() && !s.contains('\n') && s.chars().count() <= 128 {
                                     search.query = s;
                                     search.cur = 0;
+                                    // 预填的文字下一帧全选：直接敲字即替换。
+                                    search.select_all = true;
                                 }
                             }
                         }
@@ -680,11 +814,13 @@ fn code_editor_inner(
             }
             let painter = ui.painter().clone();
 
-            // 搜索命中底色：画在正文 galley 之下、选区之上不强求（选区自带半透明）。
+            // 搜索命中底色：画在正文 galley 之下。颜色在 CPU 上预混成**不透明**色 ——
+            // 软件光栅化（虚拟机）下半透明矩形叠半透明选区，边缘就是一片糊；
+            // 不透明色块 + 1px 内描边在任何渲染路径下都是锐利的。
             if !match_list.is_empty() {
                 let clip = ui.clip_rect();
-                let normal_bg = theme.accent_soft;
-                let cur_bg = theme.accent.gamma_multiply(0.35);
+                let normal_bg = blend(theme.bg, theme.accent, 0.18);
+                let cur_bg = blend(theme.bg, theme.accent, 0.42);
                 for (mi, &s) in match_list.iter().enumerate() {
                     let is_cur = mi == search.cur;
                     // 离屏快速跳过：先看命中首字符所在行的 y，整段在视口外就不必
@@ -705,11 +841,11 @@ fn code_editor_inner(
                         }
                         if is_cur {
                             painter.rect(
-                                rr.expand(1.0),
+                                rr,
                                 2.0,
                                 cur_bg,
                                 egui::Stroke::new(1.0, theme.accent),
-                                egui::StrokeKind::Outside,
+                                egui::StrokeKind::Inside,
                             );
                         } else {
                             painter.rect_filled(rr, 2.0, normal_bg);
@@ -822,113 +958,6 @@ fn code_editor_inner(
 
             resp
         });
-
-    // ---- 搜索条（浮在编辑区右上角）----
-    //
-    // 用 Foreground 层的 Area 而不是在编辑器上方挤一行：编辑区高度是外面给死的，
-    // 挤一行会让打开搜索的瞬间整个正文跳 40px；浮层则完全不动排版。
-    if search.open {
-        let bar_w = 296.0;
-        let pos = pos2(
-            (search_anchor.right() - bar_w - 18.0).max(search_anchor.left() + 4.0),
-            search_anchor.top() + 6.0,
-        );
-        egui::Area::new(id.with("__searchbar"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::NONE
-                    .fill(theme.bg)
-                    .stroke(egui::Stroke::new(1.0_f32, theme.border_2))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(8, 5))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 4],
-                        blur: 12,
-                        spread: 0,
-                        color: Color32::from_black_alpha(if theme.dark { 100 } else { 30 }),
-                    })
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(crate::icons::text(crate::icons::SEARCH, 12.0, theme.muted));
-                            let te = egui::TextEdit::singleline(&mut search.query)
-                                .id(id.with("__searchbox"))
-                                .desired_width(120.0)
-                                .font(egui::TextStyle::Monospace)
-                                .hint_text("查找")
-                                .show(ui);
-                            if search.focus {
-                                search.focus = false;
-                                te.response.request_focus();
-                            }
-                            if te.response.changed() {
-                                search.cur = 0;
-                                search.goto = true;
-                                ui.ctx().request_repaint();
-                            }
-                            // Enter = 下一个，Shift+Enter = 上一个。回车会让 TextEdit
-                            // 交出焦点，导航完再抢回来，连续回车才能连续跳。
-                            if te.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                                search.step(!ui.input(|i| i.modifiers.shift));
-                                te.response.request_focus();
-                                ui.ctx().request_repaint();
-                            }
-                            let count = if search.query.is_empty() {
-                                String::new()
-                            } else if search.total == 0 {
-                                "0/0".to_owned()
-                            } else {
-                                format!("{}/{}", search.cur + 1, search.total)
-                            };
-                            ui.label(
-                                egui::RichText::new(count)
-                                    .size(11.0)
-                                    .family(egui::FontFamily::Monospace)
-                                    .color(theme.muted),
-                            );
-                            if crate::widgets::tb_text_btn(
-                                ui,
-                                theme,
-                                "↑",
-                                false,
-                                "上一个（Shift+Enter / Shift+F3）",
-                            )
-                            .clicked()
-                            {
-                                search.step(false);
-                                ui.ctx().request_repaint();
-                            }
-                            if crate::widgets::tb_text_btn(
-                                ui,
-                                theme,
-                                "↓",
-                                false,
-                                "下一个（Enter / F3）",
-                            )
-                            .clicked()
-                            {
-                                search.step(true);
-                                ui.ctx().request_repaint();
-                            }
-                            if crate::widgets::tb_icon_btn(
-                                ui,
-                                theme,
-                                crate::icons::X,
-                                false,
-                                false,
-                                "关闭（Esc）",
-                            )
-                            .clicked()
-                            {
-                                search.open = false;
-                                state.want_focus = true;
-                                ui.ctx().request_repaint();
-                            }
-                        });
-                    });
-            });
-    }
 
     ui.data_mut(|d| d.insert_temp(id, state));
     ui.data_mut(|d| d.insert_temp(sid, search));
@@ -1379,6 +1408,15 @@ fn selection_src(text: &str, segs: &[Seg], n: usize, vrange: &CCursorRange) -> O
 }
 
 // ============================ 搜索 / 快速选值 ============================
+
+/// 线性混色出**不透明**颜色（t=0 全是 bg，t=1 全是 fg）。
+/// 搜索高亮不用半透明直接叠加：软件光栅化下多层 alpha 混合边缘发糊，
+/// 在 CPU 上把最终色算好再画，任何渲染后端出来都一样干净。
+fn blend(bg: Color32, fg: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgb(ch(bg.r(), fg.r()), ch(bg.g(), fg.g()), ch(bg.b(), fg.b()))
+}
 
 /// 大小写不敏感的字符比较。逐字符做 Unicode lowercase 对比 —— 1:1 映射，
 /// 不会像整串 `to_lowercase()` 那样因个别字符变长（ß→ss）导致下标错位。
