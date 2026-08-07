@@ -955,49 +955,40 @@ impl FerricApp {
             });
     }
 
-    // ---------- 窗口发光边框 ----------
+    // ---------- 窗口边框 ----------
 
-    fn window_glow_ui(&self, ctx: &egui::Context) {
-        draw_window_glow(ctx, self.shared.theme.dark, "window-glow");
+    fn window_border_ui(&self, ctx: &egui::Context) {
+        draw_window_border(ctx, self.shared.theme.dark, "window-border");
     }
 }
 
-/// 沿窗口边缘画一圈深灰半透明发散边框（内发光）。
+/// 沿窗口边缘画**一条 1px 实线边框**。
 ///
 /// 无边框方角窗口下与轮廓完全贴合，用来和桌面上别的窗口区分开。主窗与设置窗
 /// **共用这一份**：设置窗底色与主界面一样，没有这圈边框两者叠在一起就分不出边界。
 /// `id` 要各用各的 —— 同一个图层 id 会让两个视口互相覆盖。
-fn draw_window_glow(ctx: &egui::Context, dark: bool, id: &str) {
-    {
-        let rect = ctx.content_rect();
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new(id),
-        ));
-        // 亮色主题用深灰，暗色主题提亮一档保证可见。
-        let c = if dark {
-            Color32::from_rgb(150, 150, 155)
-        } else {
-            Color32::from_rgb(60, 60, 66)
-        };
-        let fade = |a: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
-        // 内发光：由外向内逐圈变透明（刻意收着，避免喧宾夺主）
-        for (inset, alpha) in [(2.0_f32, 30_u8), (4.0, 16), (6.0, 7)] {
-            painter.rect_stroke(
-                rect.shrink(inset),
-                CornerRadius::ZERO,
-                Stroke::new(3.0_f32, fade(alpha)),
-                egui::StrokeKind::Inside,
-            );
-        }
-        // 边缘细线（半透明，不抢内容）
-        painter.rect_stroke(
-            rect.shrink(0.5),
-            CornerRadius::ZERO,
-            Stroke::new(1.5_f32, fade(150)),
-            egui::StrokeKind::Inside,
-        );
-    }
+///
+/// 此前是三圈半透明「内发光」渐变 —— 硬件渲染下尚且低调，软件光栅化（虚拟机）
+/// 里多层 alpha 合成直接糊成一圈脏边。现在只画一条不透明细线：
+/// shrink(0.5) 让 1px 描边落在半像素网格上，任何渲染路径出来都是锐利的一条。
+fn draw_window_border(ctx: &egui::Context, dark: bool, id: &str) {
+    let rect = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new(id),
+    ));
+    // 亮色主题用深灰，暗色主题提亮一档保证可见。不透明 —— 反差不靠猜。
+    let c = if dark {
+        Color32::from_rgb(150, 150, 155)
+    } else {
+        Color32::from_rgb(60, 60, 66)
+    };
+    painter.rect_stroke(
+        rect.shrink(0.5),
+        CornerRadius::ZERO,
+        Stroke::new(1.0_f32, c),
+        egui::StrokeKind::Middle,
+    );
 }
 
 impl FerricApp {
@@ -1057,8 +1048,8 @@ impl FerricApp {
                 }
                 focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
                 settings_window_chrome(ui, &theme, &mut open);
-                // 与主界面同款的发散边框：两窗底色一致，没有它就看不出边界在哪
-                draw_window_glow(&ctx, theme.dark, "settings-glow");
+                // 与主界面同款的 1px 边框：两窗底色一致，没有它就看不出边界在哪
+                draw_window_border(&ctx, theme.dark, "settings-border");
                 CentralPanel::default()
                     .frame(Frame::NONE.fill(theme.bg).inner_margin(Margin::same(18)))
                     .show(ui, |ui| {
@@ -1829,7 +1820,15 @@ impl eframe::App for FerricApp {
         if self.frames < STABLE_FRAMES {
             self.frames += 1;
             if self.frames == STABLE_FRAMES {
-                crate::launch::mark_running();
+                // 锁定的后端被证明不可用时会被改回「自动」—— 必须让用户知道，
+                // 否则设置里显示的选项和实际行为对不上。
+                if let Some(b) = crate::launch::mark_running() {
+                    self.launch_cfg = crate::launch::load();
+                    self.shared.toast(format!(
+                        "渲染后端 {} 在本机不可用，已改回「自动」",
+                        b.label()
+                    ));
+                }
             }
         }
         self.debug_screenshot(ctx);
@@ -1936,8 +1935,8 @@ impl eframe::App for FerricApp {
                 });
         });
 
-        // 全局窗口发散边框
-        self.window_glow_ui(ctx);
+        // 全局窗口 1px 边框
+        self.window_border_ui(ctx);
 
         self.settings_ui(ctx);
         self.toasts_ui(ctx);
@@ -2067,16 +2066,17 @@ mod dialog_tests {
         );
     }
 
-    /// 发散边框必须**真的画出来**，而且要贴着窗口自己的轮廓。
+    /// 边框必须**真的画出来**，而且要贴着窗口自己的轮廓。
     ///
-    /// 设置窗与主界面底色相同，这圈边框是两者叠在一起时唯一的边界线索；
+    /// 设置窗与主界面底色相同，这条边框是两者叠在一起时唯一的边界线索；
     /// 而它取的是 `ctx.content_rect()` —— 画到别的矩形上（比如错用了父窗尺寸）
-    /// 就等于没有边框。这里连「有没有」和「在不在正确位置」一起断言。
+    /// 就等于没有边框。这里连「有没有」「是不是一条」「在不在正确位置」一起断言：
+    /// 单条不透明 1px 是刻意的产品决定 —— 多圈半透明渐变在软件光栅化下糊成脏边。
     #[test]
-    fn window_glow_hugs_the_window_rect() {
+    fn window_border_hugs_the_window_rect() {
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(428.0, 620.0));
-        let mut rects = Vec::new();
+        let mut strokes = Vec::new();
         for _ in 0..2 {
             let out = ctx.run_ui(
                 egui::RawInput {
@@ -2084,75 +2084,65 @@ mod dialog_tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::draw_window_glow(ui.ctx(), false, "test-glow");
+                    super::draw_window_border(ui.ctx(), false, "test-border");
                 },
             );
-            rects = out
+            strokes = out
                 .shapes
                 .iter()
                 .filter_map(|cs| match &cs.shape {
-                    egui::Shape::Rect(r) if r.stroke.width > 0.0 => Some(r.rect),
+                    egui::Shape::Rect(r) if r.stroke.width > 0.0 => {
+                        Some((r.rect, r.stroke.width, r.stroke.color))
+                    }
                     _ => None,
                 })
                 .collect();
         }
-        // 三圈内发光 + 一道边缘细线
-        assert_eq!(rects.len(), 4, "边框描边数量不对：{rects:?}");
-        for r in &rects {
-            // 每一圈都应当贴着窗口轮廓（最多向内收 6px 那一圈）
-            assert!(
-                r.left() >= screen.left() && r.left() <= screen.left() + 7.0,
-                "边框没贴住左边：{r:?}"
-            );
-            assert!(
-                r.right() <= screen.right() && r.right() >= screen.right() - 7.0,
-                "边框没贴住右边：{r:?}"
-            );
-            assert!(
-                r.top() >= screen.top() && r.top() <= screen.top() + 7.0,
-                "边框没贴住上边：{r:?}"
-            );
-            assert!(
-                r.bottom() <= screen.bottom() && r.bottom() >= screen.bottom() - 7.0,
-                "边框没贴住下边：{r:?}"
-            );
-        }
+        // 只此一条：1px、不透明、贴边（shrink 0.5 半像素对齐）。
+        assert_eq!(strokes.len(), 1, "边框应当只有一条描边：{strokes:?}");
+        let (r, w, c) = strokes[0];
+        assert!((w - 1.0).abs() < 0.01, "边框不是 1px：{w}");
+        assert_eq!(c.a(), 255, "边框必须不透明 —— 半透明在软渲染下会糊");
+        assert!(
+            (r.left() - screen.left()).abs() <= 1.0
+                && (screen.right() - r.right()).abs() <= 1.0
+                && (r.top() - screen.top()).abs() <= 1.0
+                && (screen.bottom() - r.bottom()).abs() <= 1.0,
+            "边框没贴住窗口轮廓：{r:?} vs {screen:?}"
+        );
     }
 
     /// 边框颜色与窗口底色必须有**足以看见**的反差。
     ///
     /// 光有描边不够 —— 若颜色和底色几乎一样（此前滚动条就吃过这个亏：白底画
     /// (252,252,253) 的条，等于没画），用户照样看不出两个窗口的边界在哪。
-    /// 这里把半透明描边与底色做 alpha 合成，量化实际反差。
+    /// 描边已是不透明色，直接量化色差即可。
     #[test]
-    fn window_glow_is_visibly_different_from_background() {
+    fn window_border_is_visibly_different_from_background() {
         for dark in [false, true] {
             let theme = Theme::from_dark(dark);
             let bg = theme.bg;
-            // 与 draw_window_glow 同一套取色
+            // 与 draw_window_border 同一套取色
             let c = if dark {
                 Color32::from_rgb(150, 150, 155)
             } else {
                 Color32::from_rgb(60, 60, 66)
             };
-            // 最外那道细线是 alpha 150，反差最大的一条
-            let a = 150.0 / 255.0;
-            let mix = |f: u8, b: u8| (a * f as f32 + (1.0 - a) * b as f32) as i32;
-            let (r, g, b) = (mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b()));
-            let diff =
-                (r - bg.r() as i32).abs() + (g - bg.g() as i32).abs() + (b - bg.b() as i32).abs();
+            let diff = (c.r() as i32 - bg.r() as i32).abs()
+                + (c.g() as i32 - bg.g() as i32).abs()
+                + (c.b() as i32 - bg.b() as i32).abs();
             assert!(
                 diff > 150,
-                "{}主题下边框与底色反差太小（合成后 ({r},{g},{b}) vs 底色 {bg:?}，差 {diff}），\
+                "{}主题下边框与底色反差太小（{c:?} vs 底色 {bg:?}，差 {diff}），\
                  两个窗口叠在一起会看不出边界",
                 if dark { "暗色" } else { "亮色" }
             );
         }
     }
 
-    /// 设置窗必须画这圈边框（否则与主界面完全糊在一起）。
+    /// 设置窗必须画这条边框（否则与主界面完全糊在一起）。
     #[test]
-    fn settings_window_draws_the_glow() {
+    fn settings_window_draws_the_border() {
         let src = include_str!("app.rs");
         let body = src
             .split("fn settings_ui(")
@@ -2160,8 +2150,8 @@ mod dialog_tests {
             .expect("settings_ui 不见了");
         let body = &body[..body.find("fn settings_body(").unwrap_or(body.len())];
         assert!(
-            body.contains("draw_window_glow"),
-            "设置窗没画发散边框 —— 它与主界面底色相同，没边框就看不出边界"
+            body.contains("draw_window_border"),
+            "设置窗没画边框 —— 它与主界面底色相同，没边框就看不出边界"
         );
     }
 
@@ -2224,7 +2214,7 @@ mod perf_tests {
                     // 与设置窗同样的构成：标题栏 + 边框 + 一屏控件
                     let mut open = true;
                     super::settings_window_chrome(ui, &theme, &mut open);
-                    super::draw_window_glow(ui.ctx(), false, "perf-glow");
+                    super::draw_window_border(ui.ctx(), false, "perf-border");
                     egui::CentralPanel::default().show(ui, |ui| {
                         for _ in 0..8 {
                             ui.horizontal(|ui| {

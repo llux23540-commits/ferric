@@ -305,10 +305,18 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// 应用已经稳定出帧了 —— 把本次用的后端记成 `last_good`，清掉 `pending` 与
 /// 黑名单（环境是会变好的：装了驱动、开了 3D 加速，不该永久拉黑一个后端）。
 ///
+/// 返回值：若用户**锁定**的后端本次没能启动、是靠兜底后端跑起来的，锁会被改回
+/// 「自动」，并返回被放弃的那个锁（调用方应当提示用户）。
+///
+/// 为什么必须改回自动：黑名单会在成功启动后清空（上一段的理由），但锁定项
+/// 不动的话，下次启动第一个又是它 —— 于是「锁了台机器上没有的后端」会变成
+/// **隔次启动必失败**的死循环：失败 → 兜底成功清黑名单 → 又试锁 → 又失败……
+/// （实测 startup.log 正是这个形状。）锁不可满足时，唯一稳定的出路就是放弃锁。
+///
 /// 由 `FerricApp` 在头几帧之后调用一次（只有第一次生效）。
-pub fn mark_running() {
+pub fn mark_running() -> Option<Backend> {
     if RUNNING.swap(true, Ordering::Relaxed) {
-        return;
+        return None;
     }
     let mut cfg = load();
     let used = cfg.pending.unwrap_or_else(|| {
@@ -316,11 +324,32 @@ pub fn mark_running() {
             .ok()
             .map_or(Backend::Auto, |v| Backend::from_env_value(&v))
     });
+    let dropped = resolve_lock_after_success(&mut cfg, used);
     cfg.last_good = Some(used);
     cfg.pending = None;
     cfg.failed.clear();
-    cfg.last_error = None;
+    if dropped.is_none() {
+        cfg.last_error = None;
+    }
     save(&cfg);
+    dropped
+}
+
+/// [`mark_running`] 的纯逻辑部分：本次成功用的是 `used`，检查用户锁是否已被
+/// 证明不可用（进了黑名单、且本次不是靠它跑起来的）。是则回退到自动，
+/// 把原因写进 `last_error`（设置页红字可见），返回被放弃的锁。
+fn resolve_lock_after_success(cfg: &mut LaunchCfg, used: Backend) -> Option<Backend> {
+    if cfg.backend != Backend::Auto && cfg.backend != used && cfg.failed.contains(&cfg.backend) {
+        let dropped = cfg.backend;
+        cfg.backend = Backend::Auto;
+        cfg.last_error = Some(format!(
+            "锁定的 {} 在本机不可用，已改回「自动」",
+            dropped.label()
+        ));
+        Some(dropped)
+    } else {
+        None
+    }
 }
 
 /// 本次启动是否已经成功出帧。
@@ -387,6 +416,52 @@ mod tests {
         assert_eq!(back.backend, Backend::Gl);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 锁定的后端起不来、靠兜底跑起来的 → 锁必须改回「自动」并说明原因。
+    /// 否则成功启动清掉黑名单后，下次又会先试那个锁 —— 隔次启动必失败的死循环。
+    #[test]
+    fn an_unsatisfiable_lock_falls_back_to_auto() {
+        let mut cfg = LaunchCfg {
+            backend: Backend::Gl,
+            failed: vec![Backend::Gl],
+            ..Default::default()
+        };
+        let dropped = resolve_lock_after_success(&mut cfg, Backend::Auto);
+        assert_eq!(dropped, Some(Backend::Gl));
+        assert_eq!(cfg.backend, Backend::Auto, "锁没被放弃，死循环还在");
+        let msg = cfg.last_error.as_deref().unwrap_or("");
+        assert!(msg.contains("OpenGL"), "原因没写给用户看：{msg:?}");
+    }
+
+    /// 锁定的后端本次**自己**跑起来了 → 锁保留（哪怕之前进过黑名单）。
+    #[test]
+    fn a_lock_that_started_fine_is_kept() {
+        let mut cfg = LaunchCfg {
+            backend: Backend::Gl,
+            failed: vec![Backend::Gl], // 上上次失败过，这次成功
+            ..Default::default()
+        };
+        assert_eq!(resolve_lock_after_success(&mut cfg, Backend::Gl), None);
+        assert_eq!(cfg.backend, Backend::Gl, "自己跑起来的锁不该被动");
+    }
+
+    /// 没锁（自动）或锁没进过黑名单 → 一切不动。
+    #[test]
+    fn auto_mode_and_healthy_locks_are_untouched() {
+        let mut auto = LaunchCfg::default();
+        assert_eq!(resolve_lock_after_success(&mut auto, Backend::Dx12), None);
+
+        let mut healthy = LaunchCfg {
+            backend: Backend::Vulkan,
+            ..Default::default()
+        };
+        // 本次因为别的原因用了 Auto（比如首次 pending 逻辑），但 Vulkan 没失败记录
+        assert_eq!(
+            resolve_lock_after_success(&mut healthy, Backend::Auto),
+            None
+        );
+        assert_eq!(healthy.backend, Backend::Vulkan);
     }
 
     /// 但锁定不等于「只用它」：它要是起不来，后面仍得有兜底，
