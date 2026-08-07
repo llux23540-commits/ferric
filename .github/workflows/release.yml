@@ -85,8 +85,10 @@ jobs:
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install cargo-packager
-        # binstall 直接下载预编译二进制，比 cargo install 从源码编译快一个数量级
-        run: cargo binstall -y cargo-packager
+        # binstall 直接下载预编译二进制，比 cargo install 从源码编译快一个数量级。
+        # 版本必须钉死：NSIS 安装模板是从这个版本 vendor 出来再打补丁的
+        # （crates/ferric-app/nsis/installer.nsi），上游模板占位符一变就会失配。
+        run: cargo binstall -y cargo-packager --version 0.11.8
       - name: Package installers
         shell: bash
         # out-dir 必须用绝对路径（相对路径会被解析到 crate 目录），

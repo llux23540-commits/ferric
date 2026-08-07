@@ -41,6 +41,13 @@ icons = [
     "icons/icon.icns",
 ]
 
+[package.metadata.packager.nsis]
+# 定制安装模板：**升级直接覆盖安装**，不再弹「已安装旧版，是否先卸载」页。
+# 基线 = cargo-packager v0.11.8 内置模板 + 一处补丁（见文件头注释）。
+# CI 已把 cargo-packager 钉在同版本，防止上游占位符漂移导致模板失配。
+# 路径相对本 crate 目录（cargo-packager 打包时会先 chdir 进包目录，实测 strace 为证）。
+template = "nsis/installer.nsi"
+
 [package.metadata.packager.macos]
 # ad-hoc 签名（"-"，不需要 Apple 证书）。cargo-packager 不配 signing-identity 就
 # **完全不签**，而 Apple Silicon 对未签名 .app 直接判「已损坏，无法打开」，连

@@ -605,14 +605,32 @@ pub fn launch(file: &Path) -> Result<(), String> {
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
         .unwrap_or_default();
+    let mut cmd = launch_command(std::env::consts::OS, &ext, file)?;
+    // 工作目录设为那个私有目录，对抗 Windows 安装程序从当前目录侧加载 DLL
+    cmd.current_dir(dir);
+    cmd.spawn().map_err(|e| format!("启动安装程序失败：{e}"))?;
+    Ok(())
+}
 
-    let mut cmd = match (std::env::consts::OS, ext.as_str()) {
+/// 构造安装命令（纯函数，供单测检查参数）。
+///
+/// Windows 的 NSIS 安装器带 `/P`（passive：只显示进度条，跳过所有询问页，
+/// 检测到旧版**直接覆盖**，不再弹「是否先卸载」）与 `/R`（装完自动重启应用）——
+/// 应用内更新的体验应当是「点一下安装，装完 Ferric 自己回来」，中间零问题。
+/// MSI 同理用 `/passive`。手动双击安装包的路径由定制 NSIS 模板负责同样的
+/// 「升级即覆盖」语义（见 crates/ferric-app/nsis/installer.nsi 头注释）。
+fn launch_command(os: &str, ext: &str, file: &Path) -> Result<std::process::Command, String> {
+    Ok(match (os, ext) {
         ("windows", ".msi") => {
             let mut c = std::process::Command::new("msiexec");
-            c.arg("/i").arg(file);
+            c.arg("/i").arg(file).arg("/passive");
             c
         }
-        ("windows", _) => std::process::Command::new(file),
+        ("windows", _) => {
+            let mut c = std::process::Command::new(file);
+            c.arg("/P").arg("/R");
+            c
+        }
         ("macos", _) => {
             let mut c = std::process::Command::new("open");
             c.arg(file);
@@ -625,11 +643,7 @@ pub fn launch(file: &Path) -> Result<(), String> {
             c
         }
         _ => return Err("本平台不支持自动安装".into()),
-    };
-    // 工作目录设为那个私有目录，对抗 Windows 安装程序从当前目录侧加载 DLL
-    cmd.current_dir(dir);
-    cmd.spawn().map_err(|e| format!("启动安装程序失败：{e}"))?;
-    Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -648,6 +662,36 @@ mod tests {
         assert!(!ext_allowed("linux", ".exe"));
         assert!(ext_allowed("macos", ".dmg"));
         assert!(!ext_allowed("macos", ""), "空扩展名也要拒绝");
+    }
+
+    /// 应用内更新的 Windows 安装必须是 passive 覆盖模式：`/P` 跳过所有询问页
+    ///（含「先卸载旧版」页，直接覆盖升级），`/R` 装完自动重启应用。
+    /// 没有这两个参数，用户点「安装」还要再答一轮安装向导 —— 那不叫自动更新。
+    #[test]
+    fn windows_installer_runs_passive_with_relaunch() {
+        let cmd = launch_command("windows", ".exe", Path::new("C:\\t\\setup.exe")).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.contains(&"/P".to_owned()),
+            "缺 /P（passive 覆盖）：{args:?}"
+        );
+        assert!(
+            args.contains(&"/R".to_owned()),
+            "缺 /R（装完重启）：{args:?}"
+        );
+
+        let msi = launch_command("windows", ".msi", Path::new("C:\\t\\a.msi")).unwrap();
+        let margs: Vec<String> = msi
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            margs.contains(&"/passive".to_owned()),
+            "MSI 缺 /passive：{margs:?}"
+        );
     }
 
     /// 魔数与扩展名不符要能查出来（廉价地兜住「platform 被劫持」这类情况）。
