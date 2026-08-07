@@ -18,6 +18,7 @@
 
 use crate::net::{self, NetErr, ServerProfile};
 use crate::release;
+use crate::source::Source;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -92,6 +93,13 @@ enum Msg {
     Failed(String),
 }
 
+/// 启动后多久做第一次自动检查（秒）。先让首屏画完、字体装完，别和启动抢资源。
+const FIRST_CHECK_DELAY_SECS: f64 = 4.0;
+
+/// 两次自动检查之间的最小间隔。检查更新会把本机版本号发给服务器，
+/// 没必要频繁 —— 一天四次足够，用户随时可以手动点。
+pub const AUTO_CHECK_INTERVAL_SECS: u64 = 6 * 3600;
+
 #[derive(Default)]
 pub struct Updater {
     pub phase: Phase,
@@ -99,6 +107,26 @@ pub struct Updater {
     /// 「中间人直接丢包压制更新」的唯一手段。
     pub last_ok: Option<std::time::SystemTime>,
     rx: Option<Receiver<Msg>>,
+    /// 自动检查的时刻（egui 的 `input().time` 轴），首帧时排定。
+    auto_check_at: Option<f64>,
+    /// 本次运行是否已经自动下载过一次。
+    ///
+    /// 失败了也不再自动重试：更新包动辄几十 MB，自动重试很容易变成
+    /// 「每帧都在重下」的流量灾难。手动按钮随时可以再来一次。
+    auto_downloaded: bool,
+    /// 「已就绪」是否已经通知过（否则每帧都会弹一次）。
+    notified: bool,
+}
+
+/// 一次 `tick` 之后值得让外壳知道的事。
+#[derive(Debug, PartialEq, Eq)]
+pub enum Tick {
+    Nothing,
+    /// 后台下载完成且三重校验通过，可以安装了（外壳弹一次提示）。
+    /// 版本号随事件一起带出去，省得外壳再去 `phase` 里翻一遍。
+    ReadyToInstall {
+        version: String,
+    },
 }
 
 impl Updater {
@@ -106,15 +134,78 @@ impl Updater {
         matches!(self.phase, Phase::Checking | Phase::Downloading { .. })
     }
 
+    /// 后台流水线：到点自动检查 → 发现新版自动下载 → 就绪后通知外壳。
+    ///
+    /// 每帧调用（`App::ui` 顶层，紧跟 `poll` 之后）。**只调度，不安装** ——
+    /// 拉起安装程序会关掉正在用的应用，那必须是用户点出来的动作，
+    /// 绝不能由后台替他决定（见 `Source::allows_install`）。
+    ///
+    /// - `source`：当前数据源；`None`（没配服务器又关了演示）直接什么都不做。
+    /// - `auto`：设置里的「自动检查并后台下载」开关。
+    /// - `stale`：距上次成功检查是否已超过 [`AUTO_CHECK_INTERVAL_SECS`]，
+    ///   由外壳依据持久化的时间戳判断（跨启动节流，否则每开一次应用就查一次）。
+    pub fn tick(
+        &mut self,
+        ctx: &egui::Context,
+        source: Option<&Source>,
+        auto: bool,
+        stale: bool,
+    ) -> Tick {
+        let Some(src) = source else {
+            return Tick::Nothing;
+        };
+        if !auto {
+            return Tick::Nothing;
+        }
+
+        // ① 到点自动检查（只在完全空闲、且这一轮还没查过的时候）
+        if stale && self.rx.is_none() && matches!(self.phase, Phase::Idle) {
+            let now = ctx.input(|i| i.time);
+            let due = *self
+                .auto_check_at
+                .get_or_insert(now + FIRST_CHECK_DELAY_SECS);
+            if now >= due {
+                self.check(src.clone(), ctx);
+            } else {
+                // 空闲时应用是不出帧的，必须约好那一刻醒过来，否则这次检查永远不发生
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(due - now));
+            }
+        }
+
+        // ② 发现新版 → 后台下载。只对可信来源自动下载：自定义更新源可能是
+        //    用户被诱导改的，不能让它在后台悄悄往盘上拉东西。
+        let to_download = match &self.phase {
+            Phase::Available(info) if !self.auto_downloaded && src.allows_auto_download() => {
+                Some(info.clone())
+            }
+            _ => None,
+        };
+        if let Some(info) = to_download {
+            self.auto_downloaded = true;
+            self.download(src.clone(), info, ctx);
+        }
+
+        // ③ 就绪 → 通知一次
+        match &self.phase {
+            Phase::Ready { info, .. } if !self.notified => {
+                self.notified = true;
+                Tick::ReadyToInstall {
+                    version: info.version.clone(),
+                }
+            }
+            _ => Tick::Nothing,
+        }
+    }
+
     /// 启动一次检查。UI 线程只负责起线程，SM2 标量乘法绝不能放主线程。
-    pub fn check(&mut self, profile: ServerProfile, ctx: &egui::Context) {
+    pub fn check(&mut self, source: Source, ctx: &egui::Context) {
         if self.busy() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let r = check_blocking(&profile);
+            let r = check_blocking(&source);
             let _ = tx.send(Msg::Checked(Box::new(r)));
             ctx.request_repaint();
         });
@@ -123,7 +214,7 @@ impl Updater {
     }
 
     /// 下载 + 校验 + 验签。只在内置服务器下允许调用（自定义服务器降级为仅通知）。
-    pub fn download(&mut self, profile: ServerProfile, info: ReleaseInfo, ctx: &egui::Context) {
+    pub fn download(&mut self, source: Source, info: ReleaseInfo, ctx: &egui::Context) {
         if self.busy() {
             return;
         }
@@ -131,7 +222,7 @@ impl Updater {
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
             let tx2 = tx.clone();
-            let r = download_blocking(&profile, &info, &mut |done, total| {
+            let r = download_blocking(&source, &info, &mut |done, total| {
                 let _ = tx2.send(Msg::Progress { done, total });
                 ctx2.request_repaint();
             });
@@ -199,7 +290,35 @@ impl Updater {
 }
 
 /// 检查更新（阻塞）。返回 `Ok(None)` 表示确实已是最新。
-fn check_blocking(profile: &ServerProfile) -> Result<Option<ReleaseInfo>, String> {
+///
+/// 演示源直接给一份固定的「有新版」数据，但**仍然走同一套本地重算**
+/// （`build` 不比本机大就当没更新）—— 演示要演的是真实逻辑，不是绕过它。
+fn check_blocking(source: &Source) -> Result<Option<ReleaseInfo>, String> {
+    match source {
+        Source::Server(p) => check_server(p),
+        Source::Mock => {
+            let info = crate::mock::latest_release();
+            Ok((info.build > my_build()).then_some(info))
+        }
+    }
+}
+
+/// 下载 + 三重校验（阻塞）。返回可执行的安装包路径。
+///
+/// 演示源只把进度跑完、不产生任何文件；它的返回路径也永远不会被执行
+/// （`Source::allows_install()` 为 false）。
+fn download_blocking(
+    source: &Source,
+    info: &ReleaseInfo,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    match source {
+        Source::Server(p) => download_server(p, info, on_progress),
+        Source::Mock => Ok(crate::mock::download_release(info, on_progress)),
+    }
+}
+
+fn check_server(profile: &ServerProfile) -> Result<Option<ReleaseInfo>, String> {
     let (platform, arch) = platform_arch()?;
     let channel = "stable";
     let path = format!(
@@ -278,8 +397,7 @@ fn magic_ok(ext: &str, head: &[u8]) -> bool {
     }
 }
 
-/// 下载 + 三重校验（阻塞）。返回可执行的安装包路径。
-fn download_blocking(
+fn download_server(
     profile: &ServerProfile,
     info: &ReleaseInfo,
     on_progress: &mut dyn FnMut(u64, u64),
@@ -564,6 +682,160 @@ mod tests {
         assert!(!my_version().is_empty());
     }
 
+    /// 把 egui 的时间轴推到 `t`（`tick` 里读的是上一帧的 `input().time`）。
+    fn frame_at(ctx: &egui::Context, t: f64) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                time: Some(t),
+                ..Default::default()
+            },
+            |_| {},
+        );
+    }
+
+    fn custom_server() -> Source {
+        Source::Server(ServerProfile {
+            base_url: "http://127.0.0.1:1/api/v1".into(),
+            pubkey: format!("04{}", "ab".repeat(64)),
+        })
+    }
+
+    /// 关掉自动更新、或压根没有数据源时，后台流水线必须**一动不动**。
+    ///
+    /// 这条守的是「用户明确关掉了，程序却还在偷偷联网」——
+    /// 检查更新会把本机版本号发给服务器，关了就必须是真的关了。
+    #[test]
+    fn auto_pipeline_stays_idle_when_disabled_or_sourceless() {
+        let ctx = egui::Context::default();
+        frame_at(&ctx, 100.0);
+
+        let mut u = Updater::default();
+        assert_eq!(
+            u.tick(&ctx, Some(&Source::Mock), false, true),
+            Tick::Nothing
+        );
+        assert!(matches!(u.phase, Phase::Idle), "关掉开关后仍然发起了检查");
+
+        let mut u = Updater::default();
+        assert!(matches!(u.tick(&ctx, None, true, true), Tick::Nothing));
+        assert!(matches!(u.phase, Phase::Idle), "没有数据源却发起了检查");
+
+        // 距上次检查还不够久 → 这一轮不查（跨启动节流）
+        let mut u = Updater::default();
+        assert_eq!(
+            u.tick(&ctx, Some(&Source::Mock), true, false),
+            Tick::Nothing
+        );
+        assert!(matches!(u.phase, Phase::Idle), "节流期内不该发起检查");
+    }
+
+    /// 自动检查要**延后**到启动之后一小会儿，别和首屏抢资源；到点了才真的查。
+    #[test]
+    fn auto_check_waits_a_moment_after_launch() {
+        let ctx = egui::Context::default();
+        frame_at(&ctx, 0.0);
+        let mut u = Updater::default();
+
+        u.tick(&ctx, Some(&Source::Mock), true, true);
+        assert!(matches!(u.phase, Phase::Idle), "刚启动就查了，太急");
+        assert_eq!(
+            u.auto_check_at,
+            Some(FIRST_CHECK_DELAY_SECS),
+            "没有排定检查时刻，这次检查将永远不会发生"
+        );
+
+        // 时间推过去 → 应当真的发起检查
+        frame_at(&ctx, FIRST_CHECK_DELAY_SECS + 1.0);
+        u.tick(&ctx, Some(&Source::Mock), true, true);
+        assert!(matches!(u.phase, Phase::Checking), "到点了却没发起检查");
+    }
+
+    /// 发现新版之后自动转入后台下载 —— 这是「点安装就能更新」的前提：
+    /// 用户点的时候东西已经在盘上了，不必现等几十 MB。
+    #[test]
+    fn a_found_update_starts_downloading_in_the_background() {
+        let ctx = egui::Context::default();
+        frame_at(&ctx, 100.0);
+        let mut u = Updater {
+            phase: Phase::Available(crate::mock::latest_release()),
+            ..Default::default()
+        };
+        u.tick(&ctx, Some(&Source::Mock), true, false);
+        assert!(
+            matches!(u.phase, Phase::Downloading { .. }),
+            "发现新版却没有开始后台下载：{:?}",
+            u.phase
+        );
+
+        // 一次运行只自动下一次：失败了也不再自动重试，免得变成流量灾难
+        let mut u2 = Updater {
+            phase: Phase::Available(crate::mock::latest_release()),
+            auto_downloaded: true,
+            ..Default::default()
+        };
+        u2.tick(&ctx, Some(&Source::Mock), true, false);
+        assert!(
+            matches!(u2.phase, Phase::Available(_)),
+            "自动下载重复触发了"
+        );
+    }
+
+    /// 自定义更新源**不许**后台自动下载 —— 那个地址可能是用户被诱导改的，
+    /// 让它在后台往盘上拉东西是不可接受的（手动按钮仍然可用，且不会自动安装）。
+    #[test]
+    fn a_custom_source_never_downloads_by_itself() {
+        let ctx = egui::Context::default();
+        frame_at(&ctx, 100.0);
+        let src = custom_server();
+        assert!(!src.allows_auto_download());
+
+        let mut u = Updater {
+            phase: Phase::Available(crate::mock::latest_release()),
+            ..Default::default()
+        };
+        u.tick(&ctx, Some(&src), true, false);
+        assert!(
+            matches!(u.phase, Phase::Available(_)),
+            "自定义源竟然自动下载了：{:?}",
+            u.phase
+        );
+    }
+
+    /// 就绪只通知一次，不能每帧弹一遍。
+    #[test]
+    fn ready_notifies_exactly_once() {
+        let ctx = egui::Context::default();
+        frame_at(&ctx, 100.0);
+        let mut u = Updater {
+            phase: Phase::Ready {
+                info: crate::mock::latest_release(),
+                file: PathBuf::from("x"),
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            u.tick(&ctx, Some(&Source::Mock), true, false),
+            Tick::ReadyToInstall { .. }
+        ));
+        for _ in 0..5 {
+            assert!(
+                matches!(
+                    u.tick(&ctx, Some(&Source::Mock), true, false),
+                    Tick::Nothing
+                ),
+                "已就绪的提示重复弹了"
+            );
+        }
+    }
+
+    /// 演示源必须能走完「有更新」的判定 —— 否则整条演示流程第一步就断了。
+    #[test]
+    fn mock_source_reports_an_update() {
+        let r = check_blocking(&Source::Mock).expect("演示源检查不该失败");
+        let info = r.expect("演示源应当报告有新版");
+        assert!(info.build > my_build());
+    }
+
     /// 版本串的形状合同：恰好三段、每段纯数字（UI 显示、更新服务器、安装包
     /// 元数据三方都按这个形状消费）。来源是发布 tag 或 Cargo.toml 占位，
     /// 哪边塞进来一个不合形状的值，这里立刻红。
@@ -605,7 +877,7 @@ mod e2e {
         eprintln!("公钥指纹: {}", profile.fingerprint());
         eprintln!("本机版本: v{} build {}", my_version(), my_build());
 
-        let info = check_blocking(&profile)
+        let info = check_server(&profile)
             .expect("检查更新失败")
             .expect("服务端应有比本机更新的版本");
         eprintln!(
@@ -616,7 +888,7 @@ mod e2e {
         assert!(!info.signature.is_empty(), "服务端必须下发离线签名");
         assert!(!info.ext.is_empty(), "扩展名必须走加密信道下发");
 
-        let file = download_blocking(&profile, &info, &mut |d, t| {
+        let file = download_server(&profile, &info, &mut |d, t| {
             if t > 0 && d == t {
                 eprintln!("下载完成: {d}/{t}");
             }
@@ -744,7 +1016,7 @@ mod attacks {
             base_url: url,
             pubkey: pk,
         };
-        let r = check_blocking(&p).expect("检查不应失败");
+        let r = check_server(&p).expect("检查不应失败");
         assert!(
             r.is_some(),
             "服务端说 has_update=false，但本地重算 build 更大，必须仍报告有更新"
@@ -767,7 +1039,7 @@ mod attacks {
             base_url: url,
             pubkey: pk,
         };
-        let e = check_blocking(&p).expect_err("回显不符必须判定为攻击");
+        let e = check_server(&p).expect_err("回显不符必须判定为攻击");
         assert!(e.contains("篡改"), "错误信息应指出被篡改：{e}");
     }
 
@@ -786,7 +1058,7 @@ mod attacks {
             base_url: url,
             pubkey: pk,
         };
-        let e = check_blocking(&p).expect_err("明文响应必须失败");
+        let e = check_server(&p).expect_err("明文响应必须失败");
         assert!(
             e.contains("加密协议") || e.contains("中间人"),
             "必须明确是加密协议问题，而不是被当成「已是最新」：{e}"

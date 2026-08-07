@@ -47,8 +47,9 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
 ];
 
-/// 注册全部字体族。
-pub fn install_fonts(ctx: &egui::Context) {
+/// 注册全部字体族。返回**是否找到了中文字体** —— 没找到的话界面上的中文会是
+/// 一片方块（本应用的文案几乎全是中文，等于整个界面废掉），调用方应当提示用户。
+pub fn install_fonts(ctx: &egui::Context) -> bool {
     let mut fonts = FontDefinitions::default();
 
     fonts
@@ -102,6 +103,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     );
 
     ctx.set_fonts(fonts);
+    has_cjk
 }
 
 /// 把 `primary`（+可选 cjk）前置到已有族的最前，保留原有回退于末尾。
@@ -130,5 +132,63 @@ fn load_first_cjk() -> Option<Vec<u8>> {
             return Some(bytes);
         }
     }
+    scan_for_cjk()
+}
+
+/// 硬编码路径全落空之后再扫一遍常见位置。
+///
+/// Windows 上写死 `C:\Windows\Fonts` 会在三种真实情况下失手：系统不装在 C 盘、
+/// 用户自己装的字体（无管理员权限时装到 `%LOCALAPPDATA%`）、以及精简版 / 英文版
+/// 系统（微软雅黑压根没预装，用户手动装了 Noto / 思源）。这里按优先级在两个目录里
+/// 逐个找，找到哪个用哪个。
+#[cfg(target_os = "windows")]
+fn scan_for_cjk() -> Option<Vec<u8>> {
+    use std::path::PathBuf;
+
+    // 优先级：雅黑 → 常见系统字体 → 用户可能自己装的开源中文字体
+    const FILES: &[&str] = &[
+        "msyh.ttc",
+        "msyh.ttf",
+        "msyhl.ttc",
+        "msyhbd.ttc",
+        "simhei.ttf",
+        "simsun.ttc",
+        "simkai.ttf",
+        "simfang.ttf",
+        "Deng.ttf",
+        "msjh.ttc", // 微软正黑（繁体系统）
+        "mingliu.ttc",
+        "NotoSansSC-Regular.otf",
+        "NotoSansCJKsc-Regular.otf",
+        "SourceHanSansSC-Regular.otf",
+        "SarasaGothicSC-Regular.ttf",
+    ];
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(win) = std::env::var_os("WINDIR") {
+        dirs.push(PathBuf::from(win).join("Fonts"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
+    }
+    for file in FILES {
+        for dir in &dirs {
+            if let Ok(bytes) = std::fs::read(dir.join(file)) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+/// 非 Windows 平台：常见发行版路径已经写在 `CANDIDATES` 里，再扫一遍
+/// fontconfig 的目录收益不大（缺字体时用户装一个包就好），这里不做额外事。
+#[cfg(not(target_os = "windows"))]
+fn scan_for_cjk() -> Option<Vec<u8>> {
     None
 }

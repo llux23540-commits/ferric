@@ -30,8 +30,8 @@ use egui::text_selection::text_cursor_state::{cursor_rect, TextCursorState};
 use egui::text_selection::visuals::{paint_cursor_end, paint_text_selection};
 use egui::text_selection::CCursorRange;
 use egui::{
-    pos2, vec2, Align2, Color32, Event, EventFilter, Key, Pos2, Rect, Response, Sense, Shape,
-    TextBuffer, Ui, Vec2,
+    pos2, vec2, Align2, Color32, Event, EventFilter, Key, Modifiers, Pos2, Rect, Response, Sense,
+    Shape, TextBuffer, Ui, Vec2,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -51,6 +51,38 @@ struct EditorState {
     want_focus: bool,
     /// 调试：最近事件日志（临时）。
     dbg: Vec<String>,
+}
+
+/// Ctrl+F 搜索条状态。与 [`EditorState`] 分开存：搜索是叠加在编辑器上的视图物件，
+/// 打开/关闭不该牵动光标与折叠状态的读写路径。
+#[derive(Clone, Default)]
+struct SearchState {
+    open: bool,
+    query: String,
+    /// 当前匹配序号（0 起）。匹配总数变化时由渲染帧收敛回合法区间。
+    cur: usize,
+    /// 最近一个渲染帧统计出的匹配总数（搜索条显示 n/total 用）。
+    total: usize,
+    /// 需要把当前匹配滚进视口（查询变化 / 导航之后置真，滚完即清）。
+    goto: bool,
+    /// 搜索框需要抢焦点（刚按 Ctrl+F）。
+    focus: bool,
+    /// 打开时把编辑器当前选区带进查询框（选区文本只有渲染帧里拿得到）。
+    prefill: bool,
+}
+
+impl SearchState {
+    fn step(&mut self, forward: bool) {
+        if self.total == 0 {
+            return;
+        }
+        self.cur = if forward {
+            (self.cur + 1) % self.total
+        } else {
+            (self.cur + self.total - 1) % self.total
+        };
+        self.goto = true;
+    }
 }
 
 /// 调试开关：在编辑器右上角画出焦点/事件，用于诊断输入法问题（默认关闭）。
@@ -221,6 +253,35 @@ fn code_editor_inner(
     let mut state: EditorState = ui
         .data_mut(|d| d.get_temp::<EditorState>(id))
         .unwrap_or_default();
+    let sid = id.with("__search");
+    let mut search: SearchState = ui
+        .data_mut(|d| d.get_temp::<SearchState>(sid))
+        .unwrap_or_default();
+
+    // Ctrl+F：打开（或重新聚焦）搜索条。在进 ScrollArea 之前消费掉，
+    // 编辑器的事件循环与全局快捷键就都看不到这个按键了。
+    if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::F)) {
+        search.open = true;
+        search.focus = true;
+        search.prefill = true;
+        // 焦点让给搜索框。不清这个闩锁的话，编辑器每帧都会把焦点抢回去。
+        state.want_focus = false;
+    }
+    if search.open {
+        // F3 / Shift+F3：焦点在编辑器或搜索框都可用。先查带 Shift 的组合。
+        if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F3)) {
+            search.step(false);
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F3)) {
+            search.step(true);
+        }
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
+            search.open = false;
+            state.want_focus = true; // 关掉搜索条后焦点还给编辑器
+        }
+    }
+    // 搜索条锚在编辑区视口右上角；进 ScrollArea 之前量，进去之后坐标系就变了。
+    let search_anchor = ui.available_rect_before_wrap();
 
     let out = egui::ScrollArea::new([!wrap, true])
         .id_salt((id, "sc"))
@@ -237,7 +298,8 @@ fn code_editor_inner(
 
             // ---- 2. 构建可见文本 + 段映射 ----
             let (vis, segs) = build_visible(&chars, n, &regions, &state.folded);
-            let vis_chars_len = vis.chars().count();
+            let vis_chars: Vec<char> = vis.chars().collect();
+            let vis_chars_len = vis_chars.len();
 
             // 行号栏宽度（含折叠箭头区）。先算它，换行宽度要把它扣掉。
             let last_line = src_nl.len() + 1;
@@ -294,11 +356,15 @@ fn code_editor_inner(
             let gutter_x = ui.clip_rect().left().max(rect.left());
 
             // ---- 4. 待映射源光标（上一帧结构编辑后）→ 可见坐标 ----
+            // follow_cursor：本帧光标位置有意义地移动过（编辑落点重映射 / 键盘移动），
+            // 帧尾把光标滚回视口 —— 「选区往下扩时滚动条不跟着走」就是缺这一步。
+            let mut follow_cursor = false;
             if let Some(src) = state.pending.take() {
                 let v = map_src(&segs, src, vis_chars_len);
                 state
                     .cursor
                     .set_char_range(Some(CCursorRange::one(CCursor::new(v))));
+                follow_cursor = true;
             }
 
             // ---- 5. 折叠箭头命中框 ----
@@ -409,6 +475,52 @@ fn code_editor_inner(
                 }
             }
 
+            // 三连击「快速选值」：点在字符串上 → 直接选中整个值（不含引号，从头到尾）；
+            // 点在数字 / true / false / null 上 → 选中该标量。都不是则维持
+            // `pointer_interaction` 刚做完的默认整行选择。
+            if resp.triple_clicked() && !gutter_click {
+                if let Some(ptr) = resp.interact_pointer_pos() {
+                    let ci = galley.cursor_from_pos(ptr - text_origin).index.0;
+                    let quick = string_content_range(&vis_chars, ci)
+                        .or_else(|| scalar_token_range(&vis_chars, ci));
+                    if let Some((s, e)) = quick {
+                        state.cursor.set_char_range(Some(CCursorRange::two(
+                            CCursor::new(s),
+                            CCursor::new(e),
+                        )));
+                    }
+                }
+            }
+
+            // 拖拽选择时让视口跟着指针走：越过可视区边缘就按越界距离滚动。
+            // 没有这个的话拖到底就停住，选区只能覆盖当前屏幕内的内容。
+            if resp.dragged() && !gutter_click {
+                if let Some(ptr) = resp.interact_pointer_pos() {
+                    let clip = ui.clip_rect();
+                    let dy = if ptr.y < clip.top() {
+                        ptr.y - clip.top()
+                    } else if ptr.y > clip.bottom() {
+                        ptr.y - clip.bottom()
+                    } else {
+                        0.0
+                    };
+                    let dx = if wrap {
+                        0.0 // 开着换行没有横向滚动
+                    } else if ptr.x < clip.left() {
+                        ptr.x - clip.left()
+                    } else if ptr.x > clip.right() {
+                        ptr.x - clip.right()
+                    } else {
+                        0.0
+                    };
+                    if dx != 0.0 || dy != 0.0 {
+                        // 每帧滚越界距离的三成：离得越远滚得越快，又不会一步跳过头。
+                        ui.scroll_with_delta(vec2(-dx, -dy) * 0.3);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+
             // ---- 7. 键盘 / 文本事件（仅聚焦时消费）----
             if has_focus && !gutter_click {
                 let os = ui.ctx().os();
@@ -493,12 +605,61 @@ fn code_editor_inner(
                         } => {
                             // 方向 / Home/End / 按词 / 全选：作用在可见 galley 上。
                             vrange.on_key_press(os, &galley, modifiers, *key);
+                            if matches!(
+                                key,
+                                Key::ArrowUp
+                                    | Key::ArrowDown
+                                    | Key::ArrowLeft
+                                    | Key::ArrowRight
+                                    | Key::Home
+                                    | Key::End
+                                    | Key::PageUp
+                                    | Key::PageDown
+                            ) {
+                                follow_cursor = true;
+                            }
                         }
                         _ => {}
                     }
                 }
                 if state.pending.is_none() {
                     state.cursor.set_char_range(Some(vrange));
+                }
+            }
+
+            // ---- 7.5 搜索匹配（Ctrl+F）----
+            //
+            // 在**可见文本**上找：折叠区间里的内容既看不见也选不着，跳过去只会把
+            // 视口甩到一个「什么都没有」的占位上。大小写不敏感，逐字符 lowercase
+            // 比对（1:1 映射，下标不会因 lowercase 变长而错位）。
+            let mut match_list: Vec<usize> = Vec::new();
+            let mut match_len = 0usize;
+            if search.open {
+                if search.prefill {
+                    search.prefill = false;
+                    // 把当前选区带进查询框（单行、别太长），VS Code 同款行为。
+                    if let Some(rg) = state.cursor.range(&galley) {
+                        if !rg.is_empty() {
+                            if let Some(s) = selection_src(text, &segs, n, &rg) {
+                                if !s.is_empty() && !s.contains('\n') && s.chars().count() <= 128 {
+                                    search.query = s;
+                                    search.cur = 0;
+                                }
+                            }
+                        }
+                    }
+                    search.goto = true;
+                }
+                // 查询串截到 256 字符再匹配：朴素匹配是 O(n·m)，往查询框里粘一大段
+                // 文本不该有能力把每一帧拖死。256 远超正常查询长度，截断无感。
+                let needle: Vec<char> = search.query.chars().take(256).collect();
+                match_len = needle.len();
+                if match_len > 0 && search.query.chars().count() <= 256 {
+                    match_list = find_matches(&vis_chars, &needle, 5000);
+                }
+                search.total = match_list.len();
+                if search.cur >= search.total {
+                    search.cur = 0;
                 }
             }
 
@@ -518,6 +679,44 @@ fn code_editor_inner(
                 }
             }
             let painter = ui.painter().clone();
+
+            // 搜索命中底色：画在正文 galley 之下、选区之上不强求（选区自带半透明）。
+            if !match_list.is_empty() {
+                let clip = ui.clip_rect();
+                let normal_bg = theme.accent_soft;
+                let cur_bg = theme.accent.gamma_multiply(0.35);
+                for (mi, &s) in match_list.iter().enumerate() {
+                    let is_cur = mi == search.cur;
+                    // 离屏快速跳过：先看命中首字符所在行的 y，整段在视口外就不必
+                    // 逐字符算矩形（5000 个命中逐个 pos_from_cursor 不是免费的）。
+                    let head = galley.pos_from_cursor(CCursor::new(s));
+                    let head_top = head.top() + text_origin.y;
+                    if head_top > clip.bottom() + row_h {
+                        break; // 命中按位置升序，后面的只会更靠下
+                    }
+                    let tail = galley.pos_from_cursor(CCursor::new(s + match_len));
+                    if tail.bottom() + text_origin.y < clip.top() - row_h {
+                        continue;
+                    }
+                    for r in match_rects(&galley, s, s + match_len, char_w) {
+                        let rr = r.translate(text_origin.to_vec2());
+                        if rr.bottom() < clip.top() || rr.top() > clip.bottom() {
+                            continue;
+                        }
+                        if is_cur {
+                            painter.rect(
+                                rr.expand(1.0),
+                                2.0,
+                                cur_bg,
+                                egui::Stroke::new(1.0, theme.accent),
+                                egui::StrokeKind::Outside,
+                            );
+                        } else {
+                            painter.rect_filled(rr, 2.0, normal_bg);
+                        }
+                    }
+                }
+            }
             painter.galley(text_origin, galley.clone(), theme.fg);
 
             // 行号栏底：横向滚动时正文会从行号栏下面穿过去，必须先铺一层不透明底色盖住。
@@ -600,10 +799,139 @@ fn code_editor_inner(
                 }
             }
 
+            // 键盘移动 / 编辑之后：让光标留在视口内（往下扩选区时视口跟着下滑）。
+            if follow_cursor {
+                if let Some(r) = state.cursor.range(&galley) {
+                    let cr =
+                        cursor_rect(&galley, &r.primary, row_h).translate(text_origin.to_vec2());
+                    ui.scroll_to_rect(cr.expand2(vec2(char_w * 2.0, row_h)), None);
+                }
+            }
+
+            // 搜索跳转：把当前匹配滚到视口中部。
+            if search.goto {
+                search.goto = false;
+                if let Some(&s) = match_list.get(search.cur) {
+                    let r = galley
+                        .pos_from_cursor(CCursor::new(s))
+                        .translate(text_origin.to_vec2());
+                    ui.scroll_to_rect(r, Some(egui::Align::Center));
+                    ui.ctx().request_repaint();
+                }
+            }
+
             resp
         });
 
+    // ---- 搜索条（浮在编辑区右上角）----
+    //
+    // 用 Foreground 层的 Area 而不是在编辑器上方挤一行：编辑区高度是外面给死的，
+    // 挤一行会让打开搜索的瞬间整个正文跳 40px；浮层则完全不动排版。
+    if search.open {
+        let bar_w = 296.0;
+        let pos = pos2(
+            (search_anchor.right() - bar_w - 18.0).max(search_anchor.left() + 4.0),
+            search_anchor.top() + 6.0,
+        );
+        egui::Area::new(id.with("__searchbar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::NONE
+                    .fill(theme.bg)
+                    .stroke(egui::Stroke::new(1.0_f32, theme.border_2))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(8, 5))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 12,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if theme.dark { 100 } else { 30 }),
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(crate::icons::text(crate::icons::SEARCH, 12.0, theme.muted));
+                            let te = egui::TextEdit::singleline(&mut search.query)
+                                .id(id.with("__searchbox"))
+                                .desired_width(120.0)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("查找")
+                                .show(ui);
+                            if search.focus {
+                                search.focus = false;
+                                te.response.request_focus();
+                            }
+                            if te.response.changed() {
+                                search.cur = 0;
+                                search.goto = true;
+                                ui.ctx().request_repaint();
+                            }
+                            // Enter = 下一个，Shift+Enter = 上一个。回车会让 TextEdit
+                            // 交出焦点，导航完再抢回来，连续回车才能连续跳。
+                            if te.response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                search.step(!ui.input(|i| i.modifiers.shift));
+                                te.response.request_focus();
+                                ui.ctx().request_repaint();
+                            }
+                            let count = if search.query.is_empty() {
+                                String::new()
+                            } else if search.total == 0 {
+                                "0/0".to_owned()
+                            } else {
+                                format!("{}/{}", search.cur + 1, search.total)
+                            };
+                            ui.label(
+                                egui::RichText::new(count)
+                                    .size(11.0)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(theme.muted),
+                            );
+                            if crate::widgets::tb_text_btn(
+                                ui,
+                                theme,
+                                "↑",
+                                false,
+                                "上一个（Shift+Enter / Shift+F3）",
+                            )
+                            .clicked()
+                            {
+                                search.step(false);
+                                ui.ctx().request_repaint();
+                            }
+                            if crate::widgets::tb_text_btn(
+                                ui,
+                                theme,
+                                "↓",
+                                false,
+                                "下一个（Enter / F3）",
+                            )
+                            .clicked()
+                            {
+                                search.step(true);
+                                ui.ctx().request_repaint();
+                            }
+                            if crate::widgets::tb_icon_btn(
+                                ui,
+                                theme,
+                                crate::icons::X,
+                                false,
+                                false,
+                                "关闭（Esc）",
+                            )
+                            .clicked()
+                            {
+                                search.open = false;
+                                state.want_focus = true;
+                                ui.ctx().request_repaint();
+                            }
+                        });
+                    });
+            });
+    }
+
     ui.data_mut(|d| d.insert_temp(id, state));
+    ui.data_mut(|d| d.insert_temp(sid, search));
     out.inner
 }
 
@@ -1050,6 +1378,135 @@ fn selection_src(text: &str, segs: &[Seg], n: usize, vrange: &CCursorRange) -> O
     Some(text.chars().skip(lo).take(hi - lo).collect())
 }
 
+// ============================ 搜索 / 快速选值 ============================
+
+/// 大小写不敏感的字符比较。逐字符做 Unicode lowercase 对比 —— 1:1 映射，
+/// 不会像整串 `to_lowercase()` 那样因个别字符变长（ß→ss）导致下标错位。
+fn char_eq_ci(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// 在 `hay` 里找出 `needle` 的所有**不重叠**匹配起点（大小写不敏感）。
+/// 朴素 O(n·m)：查询串通常只有几个字符，n 是可见文本长度，一帧扫得完；
+/// `cap` 是命中数上限，防止「查一个空格」这类病态输入把一帧拖死。
+fn find_matches(hay: &[char], needle: &[char], cap: usize) -> Vec<usize> {
+    let (n, m) = (hay.len(), needle.len());
+    let mut out = Vec::new();
+    if m == 0 || n < m {
+        return out;
+    }
+    let mut i = 0;
+    while i + m <= n {
+        if hay[i..i + m]
+            .iter()
+            .zip(needle)
+            .all(|(&a, &b)| char_eq_ci(a, b))
+        {
+            out.push(i);
+            i += m; // 不重叠：跳过整个命中
+            if out.len() >= cap {
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `ci` 落在某个 JSON 字符串字面量**内容**里时，给出内容区间（不含引号）。
+/// 三连击「快速选值」用：字符串再长（base64 / URL），三击一次就整值到手。
+fn string_content_range(chars: &[char], ci: usize) -> Option<(usize, usize)> {
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '"' {
+            let open = i;
+            i += 1;
+            let mut esc = false;
+            while i < n {
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    break;
+                }
+                i += 1;
+            }
+            // 此时 i 停在闭引号（或文本末尾）。光标在两引号之间即算命中；
+            // 贴着闭引号（ci == i）也算 —— 那是「点在最后一个字符右半边」。
+            if ci > open && ci <= i && i < n {
+                return Some((open + 1, i));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `ci` 所在的标量 token（数字 / true / false / null）区间。
+/// 只认字面量字符集；点在冒号、括号、空白上返回 None（回落默认整行选择）。
+fn scalar_token_range(chars: &[char], ci: usize) -> Option<(usize, usize)> {
+    let is_tok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-' | '_');
+    let n = chars.len();
+    let anchor = if ci < n && is_tok(chars[ci]) {
+        ci
+    } else if ci > 0 && ci <= n && is_tok(chars[ci - 1]) {
+        ci - 1
+    } else {
+        return None;
+    };
+    let mut s = anchor;
+    while s > 0 && is_tok(chars[s - 1]) {
+        s -= 1;
+    }
+    let mut e = anchor + 1;
+    while e < n && is_tok(chars[e]) {
+        e += 1;
+    }
+    Some((s, e))
+}
+
+/// 可见字符区间 `[start, end)` 在 galley 里占用的矩形（按视觉行切分）。
+/// 命中跨越折行时拆成多个矩形；行尾那截用 `char_w` 近似补上最后一个字符的宽度
+///（等宽字体下正确，CJK 稍窄 —— 高亮底色差半个字宽不影响识别）。
+fn match_rects(galley: &egui::Galley, start: usize, end: usize, char_w: f32) -> Vec<Rect> {
+    let mut out = Vec::new();
+    if end <= start {
+        return out;
+    }
+    let first = galley.pos_from_cursor(CCursor::new(start));
+    let (mut left, mut top, mut bottom) = (first.left(), first.top(), first.bottom());
+    let mut right = first.left();
+    for k in start + 1..=end {
+        let r = galley.pos_from_cursor(CCursor::new(k));
+        if (r.top() - top).abs() < 0.5 {
+            right = r.left();
+        } else {
+            // 折行：上一行收尾（补一个字符宽），从新行重新起段。
+            out.push(Rect::from_min_max(
+                pos2(left, top),
+                pos2(right.max(left) + char_w, bottom),
+            ));
+            if k == end {
+                // 命中正好在行尾结束：别在下一行开头再画半个字宽的空段。
+                return out;
+            }
+            left = r.left();
+            top = r.top();
+            bottom = r.bottom();
+            right = r.left();
+        }
+    }
+    out.push(Rect::from_min_max(
+        pos2(left, top),
+        pos2(right.max(left + char_w * 0.5), bottom),
+    ));
+    out
+}
+
 // ============================ 绘制 ============================
 
 /// 在 `hit` 行号栏区绘制折叠箭头：折叠时 ▸（右），展开时 ▾（下）。
@@ -1127,6 +1584,82 @@ mod tests {
             wrapped.rows.len(),
             no_wrap.rows.len()
         );
+    }
+    // ---- Ctrl+F 搜索 / 三连击快速选值：纯函数行为 ----
+
+    #[test]
+    fn search_matches_are_case_insensitive_and_non_overlapping() {
+        let hay: Vec<char> = "Token TOKEN token".chars().collect();
+        let needle: Vec<char> = "token".chars().collect();
+        assert_eq!(find_matches(&hay, &needle, 100), vec![0, 6, 12]);
+
+        // 不重叠：aaa 里查 aa 只算一次（0..2），剩下一个 a 不够长
+        let hay: Vec<char> = "aaa".chars().collect();
+        let needle: Vec<char> = "aa".chars().collect();
+        assert_eq!(find_matches(&hay, &needle, 100), vec![0]);
+
+        // 上限生效：病态输入不会无限膨胀
+        let hay: Vec<char> = "x".repeat(100).chars().collect();
+        let needle: Vec<char> = "x".chars().collect();
+        assert_eq!(find_matches(&hay, &needle, 7).len(), 7);
+    }
+
+    #[test]
+    fn search_matches_handle_cjk_and_empty_query() {
+        let hay: Vec<char> = r#"{"名称":"值"}"#.chars().collect();
+        let needle: Vec<char> = "名称".chars().collect();
+        assert_eq!(find_matches(&hay, &needle, 100), vec![2]);
+        assert!(find_matches(&hay, &[], 100).is_empty());
+    }
+
+    /// 三连击选值的核心约定：点在字符串值内部 → 给出**不含引号**的内容区间，
+    /// 转义引号不会把字符串提前截断。
+    #[test]
+    fn triple_click_selects_whole_string_value() {
+        let s: Vec<char> = r#"{"key": "hello world"}"#.chars().collect();
+        // "hello world" 的内容是下标 9..20（h 在 9，闭引号在 20）
+        for ci in [10, 15, 20] {
+            assert_eq!(string_content_range(&s, ci), Some((9, 20)), "ci={ci}");
+        }
+        // 点在键上选键内容
+        assert_eq!(string_content_range(&s, 2), Some((2, 5)));
+        // 点在冒号后的空格上不算字符串
+        assert_eq!(string_content_range(&s, 7), None);
+
+        // 含转义引号：\" 不结束字符串
+        let e: Vec<char> = r#"{"a": "x\"y"}"#.chars().collect();
+        assert_eq!(string_content_range(&e, 8), Some((7, 11)));
+    }
+
+    #[test]
+    fn triple_click_selects_scalar_tokens() {
+        let s: Vec<char> = r#"{"n": 1234.5, "b": true}"#.chars().collect();
+        // 1234.5 在 6..12
+        assert_eq!(scalar_token_range(&s, 8), Some((6, 12)));
+        // true 在 19..23
+        assert_eq!(scalar_token_range(&s, 21), Some((19, 23)));
+        // 空格上：无标量（回落整行选择）
+        assert_eq!(scalar_token_range(&s, 13), None);
+    }
+
+    /// 命中矩形按视觉行切分：跨折行的命中拆成多段，各自贴在自己那一行上。
+    #[test]
+    fn match_rects_split_at_wrapped_rows() {
+        // 40 个 a，200px 宽度强制折行
+        let galley = layout(&"a".repeat(40), 200.0);
+        assert!(galley.rows.len() >= 2, "前提：确实折行了");
+        let char_w = 12.0 * 0.6; // 近似等宽字符宽，只用于验证段数
+        let rects = match_rects(&galley, 0, 40, char_w);
+        assert_eq!(
+            rects.len(),
+            galley.rows.len(),
+            "跨 {} 个视觉行的命中应拆成同样多的矩形",
+            galley.rows.len()
+        );
+        // 每段的纵向范围应互不相同（各自属于不同的行）
+        for w in rects.windows(2) {
+            assert!(w[1].top() > w[0].top() + 0.5);
+        }
     }
 
     /// 中间没有空格的长 token 必须能从中间断开。JSON 里这是常态（base64 / URL），
@@ -1685,6 +2218,49 @@ mod tests {
             ],
         );
         assert!(!copied.is_empty(), "双击没有选中任何东西");
+    }
+    /// 三连击「快速选值」端到端：在字符串值上点三次 → 复制，
+    /// 拿到的应当**恰好**是值内容（不含引号、不含整行的键与标点）。
+    ///
+    /// 测试字体的字符宽度不便硬编码，沿值区间横向扫一段 x：只要采样点里
+    /// 有多个命中 "gateway"，特性就成立；一个都没有 = 特性坏了。
+    #[test]
+    fn triple_click_copies_exact_string_value() {
+        let text = "{\n  \"service\": \"gateway\"\n}";
+        let mut exact = 0usize;
+        let mut seen = Vec::new();
+        for xi in 0..30 {
+            let at = pos2(60.0 + xi as f32 * 5.0, 26.0); // 第二行（行高约 17.5px）
+            let btn = |p: bool| Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: p,
+                modifiers: Default::default(),
+            };
+            let copied = run_events(
+                text,
+                true,
+                520.0,
+                vec![
+                    vec![Event::PointerMoved(at)],
+                    vec![btn(true)],
+                    vec![btn(false)],
+                    vec![btn(true)],
+                    vec![btn(false)],
+                    vec![btn(true)], // 第三次按下 → 三连击
+                    vec![btn(false)],
+                    vec![Event::Copy],
+                ],
+            );
+            if copied == "gateway" {
+                exact += 1;
+            }
+            seen.push(copied);
+        }
+        assert!(
+            exact >= 3,
+            "三连击在整个值区间内都没有精确选中值内容；各采样点结果：{seen:?}"
+        );
     }
 
     /// Shift + 方向键扩选，然后复制。

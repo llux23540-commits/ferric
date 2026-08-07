@@ -13,6 +13,15 @@ const TZ_SEARCH_H: f32 = 36.0;
 /// 不能只露出一两条让人再去滚。
 const TZ_LIST_H: f32 = 360.0;
 
+/// 静置多久之后自动停掉实时刷新（秒）。
+///
+/// 失焦已经是零重绘了，剩下的坑是「窗口就摆在前台、人却去干别的」：那种情况下
+/// 时钟会一直以 1Hz 把**整个应用**重画一遍。在软件渲染的环境里（无 GPU 驱动的
+/// 虚拟机走 WARP / llvmpipe）单帧就是几十毫秒的纯 CPU，挂一下午的账单很可观。
+/// 静置到点就停，任意一次输入（移动鼠标、按键、滚动）立刻恢复 —— 人在看的时候
+/// 它一定是走的，人不在的时候它一定是停的。
+const IDLE_PAUSE_SECS: f64 = 90.0;
+
 /// 下拉里一行时区怎么显示：配了中文的带上中文名（`Asia/Shanghai · 上海`），
 /// 没配的就只有英文标识 —— 让人一眼认出自己要的那个，而不是在 590 行英文里数。
 fn tz_label(name: &str) -> String {
@@ -34,6 +43,19 @@ pub struct TimestampTool {
     tz_filter: String,
     /// 下拉刚展开、待把焦点送进搜索框。
     tz_focus_pending: bool,
+    /// 当前筛选词命中的时区 + 它们的显示文案，**缓存**下来只在筛选词变化时重建。
+    ///
+    /// 下拉展开期间这个列表每帧都要走一遍（597 条）。原先是每帧现算：`tz_matches`
+    /// （内含 2~3 次堆分配）+ 每个命中项一次 `format!` 拼中文名 —— 空搜索时就是
+    /// 每帧近 1200 次分配，而下拉展开期间鼠标一动就是几十帧。
+    /// 实测这块约 40~60µs/帧，不是 CPU 大头（大头是整窗重绘本身，见 `ui` 开头的
+    /// 调度说明），但它是纯白烧，缓存一下就没了。
+    tz_hits: Vec<(chrono_tz::Tz, String)>,
+    /// `tz_hits` 是按哪个筛选词算出来的（缓存键）。
+    tz_hits_key: String,
+    /// 系统时区偏移的缓存：(第几分钟, 文案)。`Local::now()` 每帧都问一次系统时区
+    /// 纯属浪费 —— 它一小时也变不了一次（夏令时），按分钟刷新绰绰有余。
+    offset_cache: (i64, String),
     ts_input: String,
     ts_output: String,
     date_input: String,
@@ -41,6 +63,10 @@ pub struct TimestampTool {
     /// 当前时间戳是否实时刷新；暂停时显示 `paused_ms` 的定格值。
     running: bool,
     paused_ms: i64,
+    /// 最近一次收到用户输入的时刻（`ctx.input().time`），用于静置自动停表。
+    last_input: f64,
+    /// 上一帧是否处于「静置停表」状态（只影响提示文案）。
+    idle: bool,
 }
 
 impl Default for TimestampTool {
@@ -49,13 +75,44 @@ impl Default for TimestampTool {
             tz: chrono_tz::Asia::Shanghai,
             tz_filter: String::new(),
             tz_focus_pending: false,
+            tz_hits: Vec::new(),
+            // 空串既是「还没算过」也是「筛选词为空」，两者不能同义 ——
+            // 用一个不可能出现的哨兵值当初值，保证首次一定会重建。
+            tz_hits_key: "\u{0}".to_owned(),
+            offset_cache: (i64::MIN, String::new()),
             ts_input: String::new(),
             ts_output: String::new(),
             date_input: "2025-07-08 12:03:05".to_owned(),
             date_output: String::new(),
             running: true,
             paused_ms: 0,
+            last_input: 0.0,
+            idle: false,
         }
+    }
+}
+
+impl TimestampTool {
+    /// 按当前筛选词重建命中列表（筛选词没变就直接返回）。
+    fn sync_tz_hits(&mut self) {
+        if self.tz_hits_key == self.tz_filter {
+            return;
+        }
+        self.tz_hits = chrono_tz::TZ_VARIANTS
+            .iter()
+            .filter(|z| timestamp::tz_matches(z.name(), &self.tz_filter))
+            .map(|z| (*z, tz_label(z.name())))
+            .collect();
+        self.tz_hits_key.clone_from(&self.tz_filter);
+    }
+
+    /// 系统时区偏移文案（按分钟缓存）。
+    fn system_offset(&mut self, now_ms: i64) -> &str {
+        let minute = now_ms.div_euclid(60_000);
+        if self.offset_cache.0 != minute {
+            self.offset_cache = (minute, timestamp::system_offset());
+        }
+        &self.offset_cache.1
     }
 }
 
@@ -94,12 +151,36 @@ impl Tool for TimestampTool {
         // 曾经是 100ms 一跳 —— 即时模式下这等于整个应用以 10Hz 无限重绘（完整布局
         // + 渲染管线），挂着这个工具 CPU 就下不来。秒级显示 1Hz 就是精准的；毫秒行
         // 退化为每秒采样，但**复制拿的是点击瞬间的新值**（见下），显示陈旧无害。
-        // 窗口失焦时干脆不调度：后台零重绘，回到前台时 egui 自动补帧追上。
-        // 暂停时显示定格值，同样零调度。
-        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
+        // 暂停时显示定格值，零调度。
+        //
+        // 关键在于**帧数**而不是每帧的 CPU：本视图一帧的 UI 构建 + 细分实测约 25µs
+        // （release），真正贵的是随后那次整窗呈现 —— 没有 GPU 驱动时（虚拟机的 WARP、
+        // llvmpipe）那是整块 1320×840 的软件光栅化。所以省 CPU 的唯一有效手段是
+        // **该不画的时候一帧都别画**。三种「没人在看」的情形一律不调度，
+        // 回到前台 / 一有输入 egui 会自动补帧：
+        // - 窗口失焦；
+        // - 窗口最小化或被完全遮挡（最小化时 Windows 甚至收不到重绘事件，白排队）；
+        // - 静置超过 IDLE_PAUSE_SECS（窗口在前台但人没在操作）。
+        let (time, had_input, awake) = ui.ctx().input(|i| {
+            let vp = i.viewport();
+            (
+                i.time,
+                !i.events.is_empty(),
+                // `visible()`（未最小化、未被完全遮挡）平台支持不全，拿不到就当可见。
+                vp.focused.unwrap_or(true) && vp.visible().unwrap_or(true),
+            )
+        });
+        if had_input {
+            self.last_input = time;
+        }
+        // 时间倒流（测试里换了 Context 重跑）时按「刚刚有输入」处理，免得一上来就判静置。
+        if time < self.last_input {
+            self.last_input = time;
+        }
+        self.idle = time - self.last_input > IDLE_PAUSE_SECS;
         let now_ms = if self.running {
             let v = timestamp::now(Precision::Millis);
-            if focused {
+            if awake && !self.idle {
                 let wait = 1000 - (v % 1000) + 5;
                 ui.ctx()
                     .request_repaint_after(Duration::from_millis(wait as u64));
@@ -124,6 +205,14 @@ impl Tool for TimestampTool {
                 if !self.running {
                     ui.add_space(6.0);
                     ui.label(RichText::new("已暂停").size(12.0).color(theme.muted));
+                } else if self.idle {
+                    // 静置停表要说清楚，否则看着就是「时钟卡死了」。
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("已静置暂停 · 动一下鼠标即恢复")
+                            .size(12.0)
+                            .color(theme.muted),
+                    );
                 }
             });
             ui.add_space(6.0);
@@ -197,7 +286,11 @@ impl Tool for TimestampTool {
                             self.tz_focus_pending = false;
                         }
                         ui.add_space(4.0);
-                        let f = self.tz_filter.clone();
+                        // 命中列表按筛选词缓存，只在筛选词变化时重建（见 `sync_tz_hits`）。
+                        self.sync_tz_hits();
+                        // 借出来再放回去：循环里要 `&mut self.tz`，不能同时借着 `self.tz_hits`。
+                        // 移一次 Vec 而已，不复制内容。
+                        let hits = std::mem::take(&mut self.tz_hits);
                         // 全量列出（约 590 个），超长部分靠下拉内滚动，不截断。
                         egui::ScrollArea::vertical()
                             .max_height(TZ_LIST_H)
@@ -206,19 +299,16 @@ impl Tool for TimestampTool {
                                 // 否则每敲一个字弹层就跳一下高度：本来瞄准的那一行会跑掉，
                                 // 越筛越难点。宁可留一块空白，也要让位置是稳的。
                                 ui.set_min_height(TZ_LIST_H);
-                                let mut hits = 0usize;
-                                for z in chrono_tz::TZ_VARIANTS
-                                    .iter()
-                                    .filter(|z| timestamp::tz_matches(z.name(), &f))
-                                {
-                                    hits += 1;
-                                    let label = tz_label(z.name());
-                                    if ui.selectable_value(&mut self.tz, *z, label).clicked() {
+                                for (z, label) in &hits {
+                                    if ui
+                                        .selectable_value(&mut self.tz, *z, label.as_str())
+                                        .clicked()
+                                    {
                                         // 改了关闭策略之后，选完得自己收起来
                                         egui::Popup::close_all(ui.ctx());
                                     }
                                 }
-                                if hits == 0 {
+                                if hits.is_empty() {
                                     // 一条都没匹配上时给句话，否则就是一片空白，
                                     // 看着像卡住了而不是「没找到」。
                                     ui.add_space(10.0);
@@ -229,6 +319,7 @@ impl Tool for TimestampTool {
                                     );
                                 }
                             });
+                        self.tz_hits = hits; // 借完还回去
                     });
                 if combo.response.clicked() {
                     // 每次重新展开都从空搜索开始，免得沿用上次的过滤条件让人以为列表少了
@@ -237,11 +328,8 @@ impl Tool for TimestampTool {
                 }
             });
             ui.add_space(6.0);
-            ui.label(
-                RichText::new(format!("当前系统时区：{}", timestamp::system_offset()))
-                    .size(12.0)
-                    .color(theme.muted),
-            );
+            let offset_text = format!("当前系统时区：{}", self.system_offset(now_ms));
+            ui.label(RichText::new(offset_text).size(12.0).color(theme.muted));
         });
         ui.add_space(14.0);
 
@@ -404,6 +492,88 @@ mod tests {
         let out = frame(&mut tool, &mut shared, 10.0);
         let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         assert!(d > Duration::from_secs(3600), "暂停后仍在调度重绘：{d:?}");
+    }
+
+    /// 静置到点就停表，一有输入立刻恢复。
+    ///
+    /// 守的是「窗口摆在前台、人却去干别的」这一档：失焦已经是零重绘了，这一档
+    /// 原先仍在以 1Hz 重画整个应用。软件渲染的机器上那是实打实的 CPU 账单。
+    #[test]
+    fn idle_stops_the_clock_and_any_input_resumes_it() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let theme = crate::theme::Theme::light();
+        theme.apply(&ctx);
+        let mut shared = Shared::new(theme);
+        let mut tool = TimestampTool::default();
+
+        let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64, events: Vec<Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
+                    time: Some(t),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| tool.ui(ui, shared));
+                },
+            )
+        };
+
+        // 静置未到点：照常按秒调度
+        let out = frame(&mut tool, &mut shared, IDLE_PAUSE_SECS - 1.0, vec![]);
+        let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(
+            d <= Duration::from_millis(1100),
+            "还没到静置时限就停表了：{d:?}"
+        );
+
+        // 越过时限：一次重绘都不许再调度
+        let out = frame(&mut tool, &mut shared, IDLE_PAUSE_SECS + 5.0, vec![]);
+        let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(d > Duration::from_secs(3600), "静置后仍在调度重绘：{d:?}");
+        assert!(tool.idle, "静置状态没置位，界面上不会有任何说明");
+
+        // 动一下鼠标：立刻恢复按秒调度
+        let out = frame(
+            &mut tool,
+            &mut shared,
+            IDLE_PAUSE_SECS + 5.1,
+            vec![Event::PointerMoved(Pos2::new(100.0, 100.0))],
+        );
+        let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(!tool.idle, "有输入之后仍算静置");
+        assert!(
+            d <= Duration::from_millis(1100),
+            "有输入之后没恢复刷新：{d:?}"
+        );
+    }
+
+    /// 时区命中列表按筛选词缓存：筛选词不变就不该重算（这是下拉展开时的 CPU 大头）。
+    #[test]
+    fn timezone_hits_are_cached_per_filter() {
+        let mut tool = TimestampTool {
+            tz_filter: "上海".to_owned(),
+            ..Default::default()
+        };
+        tool.sync_tz_hits();
+        let first = tool.tz_hits.as_ptr();
+        let n = tool.tz_hits.len();
+        assert_eq!(n, 1, "「上海」应当只命中 Asia/Shanghai，实得 {n} 条");
+
+        // 同一个筛选词再来一次：连指针都不该动（说明整块没被重建）
+        tool.sync_tz_hits();
+        assert_eq!(tool.tz_hits.as_ptr(), first, "筛选词没变却重建了命中列表");
+
+        // 换词才重建
+        tool.tz_filter = "东京".to_owned();
+        tool.sync_tz_hits();
+        assert_eq!(
+            tool.tz_hits.first().map(|(z, _)| z.name()),
+            Some("Asia/Tokyo"),
+            "换了筛选词却没重建命中列表"
+        );
     }
 
     fn press(pos: Pos2, pressed: bool) -> Event {

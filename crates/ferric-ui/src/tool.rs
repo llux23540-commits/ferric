@@ -62,9 +62,14 @@ pub struct Shared {
     pub content_height: f32,
     /// 界面语言。
     pub lang: Lang,
-    /// 当前生效的更新/插件服务器（地址 + 固定公钥）。None = 本构建未配置。
+    /// 当前生效的插件/更新数据源（真服务端或演示数据）。None = 两者都没有。
     /// 由外壳每帧写入，供插件市场视图使用。
-    pub server: Option<crate::net::ServerProfile>,
+    pub source: Option<crate::source::Source>,
+    /// 请求外壳热加载插件（装完 / 卸完置位）。
+    ///
+    /// 为什么不由视图自己重建：此刻正在 `self.tools[i].ui()` 里面，
+    /// 那个向量的元素正被借着，谁也不能在这里改它。外壳在本帧渲染结束后处理。
+    pub reload_plugins: bool,
     /// 代码编辑区的排版（字号 / 字重 / 行距）。
     ///
     /// 放在 Shared 而不是各工具自己存：设置面板与 JSON 工具条上的字体菜单改的是
@@ -79,7 +84,8 @@ impl Shared {
             toasts: Vec::new(),
             content_height: 0.0,
             lang: Lang::default(),
-            server: None,
+            source: None,
+            reload_plugins: false,
             code_font: Default::default(),
         }
     }

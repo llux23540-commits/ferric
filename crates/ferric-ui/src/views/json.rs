@@ -256,7 +256,15 @@ impl JsonTool {
             }
             if widgets::tb_icon_btn(ui, theme, icons::CODE, false, false, "去除转义").clicked()
             {
-                self.run_op(json::unescape, "已去除转义");
+                // 深层去转义：多层转义一次剥完，内嵌的 JSON 字符串字段也展开。
+                // 结果若是合法 JSON 就顺手按当前缩进重排，免得用户再点一次格式化。
+                self.run_op(
+                    |s| {
+                        json::unescape_deep(s)
+                            .map(|out| json::format(&out, indent, sort).unwrap_or(out))
+                    },
+                    "已去除转义",
+                );
             }
             if widgets::tb_icon_btn(ui, theme, icons::ERASER, false, false, "去除全部空白")
                 .clicked()

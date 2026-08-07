@@ -18,11 +18,42 @@ struct DiffDraft {
     right_name: String,
 }
 
+/// 搜索范围侧别：由「最近一次获得焦点的编辑面板」决定。
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
+/// 左右滚动同步状态（存 egui 临时数据，一帧一读写）。
+#[derive(Clone, Copy, Default)]
+struct ScrollSync {
+    /// 上一帧两侧 ScrollArea 的 y 偏移（[左, 右]）。
+    prev: [f32; 2],
+    /// 本帧要强加给两侧的偏移：程序性设置，判定用户滚动时要排除，
+    /// 否则镜像回来的偏移会被当成新滚动，左右互相追着抖。
+    force: [Option<f32>; 2],
+}
+
 pub struct DiffTool {
     left: String,
     right: String,
     left_name: String,
     right_name: String,
+    // —— 搜索状态（会话内临时，不进草稿）——
+    /// 搜索条是否展开（Ctrl+F 开 / Esc 关）。
+    search_open: bool,
+    search_query: String,
+    /// 上一帧的搜索词：变化时回到第一个匹配并请求跳转。
+    search_prev_query: String,
+    /// 当前匹配的全局序号（左侧全部在前、右侧在后）。
+    search_current: usize,
+    /// 本帧发生打开 / 导航 / 词变化：把当前匹配滚进视口。
+    search_nav: bool,
+    /// 下一次渲染把焦点交给搜索输入框（Ctrl+F 刚按下）。
+    search_focus_req: bool,
+    /// 最近一次获得焦点的面板：决定搜索范围（None = 两侧）。
+    focus_side: Option<Side>,
 }
 
 impl Default for DiffTool {
@@ -32,6 +63,13 @@ impl Default for DiffTool {
             right: "hello\nferric\nfoo\nbar\n".to_owned(),
             left_name: String::new(),
             right_name: String::new(),
+            search_open: false,
+            search_query: String::new(),
+            search_prev_query: String::new(),
+            search_current: 0,
+            search_nav: false,
+            search_focus_req: false,
+            focus_side: None,
         }
     }
 }
@@ -70,6 +108,19 @@ impl DiffTool {
             }
         }
     }
+
+    /// 循环前进 / 后退当前匹配，并请求把它滚进视口。
+    fn step_match(&mut self, total: usize, forward: bool) {
+        if total == 0 {
+            return;
+        }
+        self.search_current = if forward {
+            (self.search_current + 1) % total
+        } else {
+            (self.search_current + total - 1) % total
+        };
+        self.search_nav = true;
+    }
 }
 
 /// 选择并读取文件。`Ok(None)` 表示用户取消；读取失败返回 `Err(原因)`。
@@ -92,6 +143,40 @@ fn pick_file() -> Result<Option<(String, String)>, String> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     Ok(Some((name, text)))
+}
+
+/// 大小写不敏感搜索：逐 char 滑窗比较，不对全文做 to_lowercase——
+/// 个别字符小写后 byte 长度会变（如 'İ'），整体转换会让区间映射回原文时错位。
+/// 返回各匹配在原文中的 byte 区间，升序且互不重叠。
+///
+/// 护栏：查询超过 256 字符按无匹配处理（朴素匹配 O(n·m)，粘一大段文本进
+/// 查询框不该有能力拖死每一帧）；命中数上限 5000（同代码编辑器）。
+fn search_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
+    let q: Vec<char> = query.chars().collect();
+    if q.is_empty() || q.len() > 256 {
+        return Vec::new();
+    }
+    let idx: Vec<(usize, char)> = text.char_indices().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + q.len() <= idx.len() {
+        let hit = q
+            .iter()
+            .zip(&idx[i..])
+            .all(|(&qc, &(_, tc))| qc == tc || qc.to_lowercase().eq(tc.to_lowercase()));
+        if hit {
+            let start = idx[i].0;
+            let end = idx.get(i + q.len()).map_or(text.len(), |&(b, _)| b);
+            out.push((start, end));
+            if out.len() >= 5000 {
+                break;
+            }
+            i += q.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// 由统一 diff 行派生左右两侧面板各自的行样式：
@@ -153,8 +238,55 @@ impl Tool for DiffTool {
         let theme = shared.theme;
         self.handle_drops(ui, shared);
 
+        // Ctrl+F 展开搜索条（打开即请求跳到当前匹配）；Esc 收起。
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.search_open = true;
+            self.search_focus_req = true;
+            self.search_nav = true;
+        }
+        if self.search_open && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search_open = false;
+        }
+
         let (lines, stats) = diff::line_diff(&self.left, &self.right);
         let (left_styles, right_styles) = side_styles(&lines, &theme);
+
+        // —— 搜索匹配：渲染前算好，搜索条计数与两侧高亮共用一份。——
+        // 范围由「最近获得焦点的面板」决定：左 / 右有过焦点就只搜那一侧，否则两侧一起。
+        let scope = if self.search_open {
+            self.focus_side
+        } else {
+            None
+        };
+        // 搜索词变化：回到第一个匹配并请求跳转。
+        if self.search_query != self.search_prev_query {
+            self.search_prev_query = self.search_query.clone();
+            self.search_current = 0;
+            self.search_nav = true;
+        }
+        let (l_matches, r_matches) = if self.search_open && !self.search_query.is_empty() {
+            (
+                if scope == Some(Side::Right) {
+                    Vec::new()
+                } else {
+                    search_matches(&self.left, &self.search_query)
+                },
+                if scope == Some(Side::Left) {
+                    Vec::new()
+                } else {
+                    search_matches(&self.right, &self.search_query)
+                },
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let total = l_matches.len() + r_matches.len();
+        self.search_current = self.search_current.min(total.saturating_sub(1));
+        // 当前匹配落在哪一侧（全局序号：左侧全部在前、右侧在后）。
+        let cur_left =
+            (total > 0 && self.search_current < l_matches.len()).then_some(self.search_current);
+        let cur_right = (total > 0 && self.search_current >= l_matches.len())
+            .then(|| self.search_current - l_matches.len());
 
         // 铺满模式下自己负责边距；宽度随窗口变化，两栏始终均分。
         egui::Frame::NONE
@@ -191,13 +323,78 @@ impl Tool for DiffTool {
                 });
                 ui.add_space(10.0);
 
+                // 搜索条（统计行下方）：输入 + 范围 + 计数 + 上/下一个 + 关闭。
+                // 占掉的高度记下来，从面板高度预算里扣除，保持底边对齐。
+                let mut search_extra = 0.0;
+                if self.search_open {
+                    let bar = ui.horizontal(|ui| {
+                        ui.label(icons::text(icons::SEARCH, 13.0, theme.muted));
+                        ui.add_space(2.0);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.search_query)
+                                .id_salt("diff-search")
+                                .desired_width(220.0)
+                                .hint_text("搜索…"),
+                        );
+                        if self.search_focus_req {
+                            resp.request_focus();
+                            self.search_focus_req = false;
+                        }
+                        // Enter 前进 / Shift+Enter 后退：单行 TextEdit 回车会交出焦点，
+                        // 导航完再把焦点夺回来，方便连按。
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let back = ui.input(|i| i.modifiers.shift);
+                            self.step_match(total, !back);
+                            resp.request_focus();
+                        }
+                        ui.add_space(8.0);
+                        let scope_txt = match scope {
+                            Some(Side::Left) => "左侧",
+                            Some(Side::Right) => "右侧",
+                            None => "两侧",
+                        };
+                        ui.label(
+                            RichText::new(format!("范围：{scope_txt}"))
+                                .size(11.5)
+                                .color(theme.muted),
+                        );
+                        ui.add_space(8.0);
+                        if !self.search_query.is_empty() {
+                            let count = if total == 0 {
+                                "0/0".to_owned()
+                            } else {
+                                format!("{}/{}", self.search_current + 1, total)
+                            };
+                            ui.label(
+                                RichText::new(count)
+                                    .size(11.5)
+                                    .color(theme.fg_soft)
+                                    .monospace(),
+                            );
+                            ui.add_space(4.0);
+                        }
+                        if widgets::subtle_button(ui, &theme, None, "上一个").clicked() {
+                            self.step_match(total, false);
+                        }
+                        if widgets::subtle_button(ui, &theme, None, "下一个").clicked() {
+                            self.step_match(total, true);
+                        }
+                        ui.add_space(4.0);
+                        if widgets::icon_btn(ui, &theme, icons::X, 24.0).clicked() {
+                            self.search_open = false;
+                        }
+                    });
+                    ui.add_space(8.0);
+                    search_extra = bar.response.rect.height() + 8.0;
+                }
+
                 // 双栏卡片：同高、铺满剩余高度（同 JSON→YAML 页的布局策略）。
                 let gutter = 16.0;
                 let colw = ((ui.available_width() - gutter) / 2.0).max(200.0);
                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
                 // 固定开销：统计行、卡片头（含载入按钮）、内边距与各级间距（实测约 108），
                 // 底部留和左右一致的 24px 边距，面板高度取精确值。
-                let pin_h = (avail_h - 108.0 - 24.0).max(160.0);
+                let pin_h = (avail_h - 108.0 - 24.0 - search_extra).max(160.0);
                 // 行数向下取整（内容 ≤ 视口，避免 1-2px 常驻滚动），
                 // 除不尽的余数由 code_area_diff 的 min_inner_h 撑满补齐。
                 let rows = (((pin_h - 28.0) / row_h).floor() as usize).max(6);
@@ -210,6 +407,25 @@ impl Tool for DiffTool {
                 let right_lines = self.right.lines().count();
                 let left_name = self.left_name.clone();
                 let right_name = self.right_name.clone();
+
+                let l_paint = (!l_matches.is_empty()).then_some(widgets::SearchPaint {
+                    matches: &l_matches,
+                    current: cur_left,
+                });
+                let r_paint = (!r_matches.is_empty()).then_some(widgets::SearchPaint {
+                    matches: &r_matches,
+                    current: cur_right,
+                });
+
+                // —— 同步滚动：读上一帧状态，取出本帧要强加的偏移。——
+                let sync_id = ui.id().with("diff-scroll-sync");
+                let mut sync: ScrollSync = ui.data_mut(|d| d.get_temp(sync_id)).unwrap_or_default();
+                let force = sync.force;
+                sync.force = [None, None];
+
+                // 两个面板的输出（编辑框响应 + 匹配 y + 实际滚动偏移），出闭包后统一处理。
+                let mut l_view: Option<(widgets::DiffAreaOutput, f32)> = None;
+                let mut r_view: Option<(widgets::DiffAreaOutput, f32)> = None;
 
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -247,22 +463,28 @@ impl Tool for DiffTool {
                                 );
                             },
                             |ui| {
-                                egui::ScrollArea::vertical()
+                                let mut sa = egui::ScrollArea::vertical()
                                     .id_salt("diff-l-sc")
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        widgets::code_area_diff(
-                                            ui,
-                                            &theme,
-                                            "diff-l",
-                                            &mut self.left,
-                                            rows,
-                                            &left_styles,
-                                            min_inner_h,
-                                        );
-                                    });
+                                    .auto_shrink([false, false]);
+                                // 上一帧判定对侧被用户滚动（或搜索跳转）：强加偏移过来。
+                                if let Some(y) = force[0] {
+                                    sa = sa.vertical_scroll_offset(y);
+                                }
+                                let out = sa.show(ui, |ui| {
+                                    widgets::code_area_diff(
+                                        ui,
+                                        &theme,
+                                        "diff-l",
+                                        &mut self.left,
+                                        rows,
+                                        &left_styles,
+                                        min_inner_h,
+                                        l_paint.as_ref(),
+                                    )
+                                });
+                                l_view = Some((out.inner, out.state.offset.y));
                             },
                         );
                     });
@@ -302,26 +524,92 @@ impl Tool for DiffTool {
                                 );
                             },
                             |ui| {
-                                egui::ScrollArea::vertical()
+                                let mut sa = egui::ScrollArea::vertical()
                                     .id_salt("diff-r-sc")
                                     .min_scrolled_height(pin_h)
                                     .max_height(pin_h)
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        widgets::code_area_diff(
-                                            ui,
-                                            &theme,
-                                            "diff-r",
-                                            &mut self.right,
-                                            rows,
-                                            &right_styles,
-                                            min_inner_h,
-                                        );
-                                    });
+                                    .auto_shrink([false, false]);
+                                if let Some(y) = force[1] {
+                                    sa = sa.vertical_scroll_offset(y);
+                                }
+                                let out = sa.show(ui, |ui| {
+                                    widgets::code_area_diff(
+                                        ui,
+                                        &theme,
+                                        "diff-r",
+                                        &mut self.right,
+                                        rows,
+                                        &right_styles,
+                                        min_inner_h,
+                                        r_paint.as_ref(),
+                                    )
+                                });
+                                r_view = Some((out.inner, out.state.offset.y));
                             },
                         );
                     });
                 });
+
+                // panel 的 body 闭包一定会执行，这里必然有值。
+                let (l_area, l_scroll) = l_view.expect("左面板已渲染");
+                let (r_area, r_scroll) = r_view.expect("右面板已渲染");
+
+                // —— 焦点范围跟踪：记住最近获得焦点的面板；点击空白让焦点彻底落空时
+                // 回到「两侧」。点搜索框 / 按钮时焦点仍有归属，不会误改范围。——
+                if l_area.response.gained_focus() {
+                    self.focus_side = Some(Side::Left);
+                }
+                if r_area.response.gained_focus() {
+                    self.focus_side = Some(Side::Right);
+                }
+                if ui.input(|i| i.pointer.any_pressed())
+                    && ui.ctx().memory(|m| m.focused()).is_none()
+                {
+                    self.focus_side = None;
+                }
+
+                // —— 同步滚动判定：被程序强加的一侧不算用户滚动；
+                // 两侧同时变化时以变化量大的一侧为准，把绝对偏移镜像给对侧（下一帧生效）。——
+                let dl = if force[0].is_some() {
+                    0.0
+                } else {
+                    l_scroll - sync.prev[0]
+                };
+                let dr = if force[1].is_some() {
+                    0.0
+                } else {
+                    r_scroll - sync.prev[1]
+                };
+                if dl.abs() > 0.5 || dr.abs() > 0.5 {
+                    if dl.abs() >= dr.abs() {
+                        if (r_scroll - l_scroll).abs() > 0.5 {
+                            sync.force[1] = Some(l_scroll);
+                        }
+                    } else if (l_scroll - r_scroll).abs() > 0.5 {
+                        sync.force[0] = Some(r_scroll);
+                    }
+                }
+                sync.prev = [l_scroll, r_scroll];
+
+                // —— 搜索跳转：导航帧从面板拿到当前匹配 y，下一帧把两侧一起滚到
+                // 视口约 1/3 处（偏移镜像，天然带动另一侧）。——
+                if self.search_nav {
+                    let y = if cur_left.is_some() {
+                        l_area.current_match_y
+                    } else {
+                        r_area.current_match_y
+                    };
+                    if let Some(y) = y {
+                        let off = (y - pin_h / 3.0).max(0.0);
+                        sync.force = [Some(off), Some(off)];
+                    }
+                    self.search_nav = false;
+                }
+                // 有待强加的偏移就再画一帧，让它立即生效。
+                if sync.force.iter().any(Option::is_some) {
+                    ui.ctx().request_repaint();
+                }
+                ui.data_mut(|d| d.insert_temp(sync_id, sync));
 
                 // 卡片头里点了「载入文件」：出布局后统一弹窗读取
                 if load_left {
@@ -364,5 +652,37 @@ impl Tool for DiffTool {
             self.left_name = d.left_name;
             self.right_name = d.right_name;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 命中区间必须是**原文 byte 区间**且落在 char 边界上 —— 含 CJK 时
+    /// 直接决定高亮切分与跳转不会 panic。
+    #[test]
+    fn search_matches_returns_byte_ranges_on_char_boundaries() {
+        let text = "标记 Needle 与 needle 两处";
+        let hits = search_matches(text, "NEEDLE");
+        assert_eq!(hits.len(), 2);
+        for (s, e) in hits {
+            assert!(text.is_char_boundary(s) && text.is_char_boundary(e));
+            assert!(text[s..e].eq_ignore_ascii_case("needle"));
+        }
+    }
+
+    /// 护栏：超长查询按无匹配处理；命中数不超过上限。
+    #[test]
+    fn search_matches_guards_pathological_input() {
+        assert!(search_matches("aaaa", &"a".repeat(300)).is_empty());
+        let text = "x".repeat(20_000);
+        assert_eq!(search_matches(&text, "x").len(), 5000);
+    }
+
+    /// 空查询：无匹配（搜索条刚打开时不该把全文都圈起来）。
+    #[test]
+    fn search_matches_empty_query_is_empty() {
+        assert!(search_matches("anything", "").is_empty());
     }
 }

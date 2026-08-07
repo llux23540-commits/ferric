@@ -30,6 +30,7 @@
 use crate::net::{self, ServerProfile};
 use crate::plugin_host;
 use crate::release;
+use crate::source::Source;
 use sha2::{Digest, Sha256};
 
 /// 一次能问的插件数上限，与服务端 `CHECK_UPDATES_MAX` 对齐。
@@ -56,8 +57,73 @@ pub struct MarketItem {
     pub has_update: bool,
 }
 
+// ============================ 数据源分发 ============================
+//
+// 下面三个 `pub fn` 只做一件事：按数据源选实现。真实分支（`*_server`）的函数体
+// 与接入演示数据之前**一字未改** —— 那条路上的每一处校验都还在原地，
+// 演示分支是完全独立的另一条实现（见 `mock` 模块头）。
+
+/// 拉市场列表（真服务端或演示数据）。
+pub fn browse(source: &Source, query: &str) -> Result<Vec<MarketItem>, String> {
+    match source {
+        Source::Server(p) => browse_server(p, query),
+        Source::Mock => Ok(crate::mock::browse(query)),
+    }
+}
+
+/// 问「本地这些插件有没有新版」。
+pub fn check_updates(source: &Source) -> Result<Vec<String>, String> {
+    match source {
+        Source::Server(p) => check_updates_server(p),
+        Source::Mock => Ok(crate::mock::check_updates()),
+    }
+}
+
+/// 下载并安装一个插件版本，`on_progress(已下载, 总大小)` 用于驱动进度条。
+pub fn install(
+    source: &Source,
+    it: &MarketItem,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), String> {
+    match source {
+        Source::Server(p) => install_server(p, it, on_progress),
+        Source::Mock => {
+            crate::mock::install(&it.slug, &it.version, it.size, on_progress);
+            Ok(())
+        }
+    }
+}
+
+/// 卸载。真实源删插件目录里的文件，演示源只改演示存档。
+pub fn uninstall(source: &Source, slug: &str) -> Result<(), String> {
+    match source {
+        Source::Server(_) => plugin_host::uninstall(slug),
+        Source::Mock => {
+            crate::mock::uninstall(slug);
+            Ok(())
+        }
+    }
+}
+
+/// 演示源专用：把演示状态恢复成初始的样子（真实源无操作）。
+pub fn reset_demo(source: &Source) {
+    if source.is_mock() {
+        crate::mock::reset_demo();
+    }
+}
+
+/// 装完之后，侧栏是不是立刻就能看到这个插件。
+///
+/// 真实安装会落到插件目录，宿主随后热加载即可生效；演示安装**不写**插件目录
+/// （没有可验签的字节），所以它永远不会出现在侧栏 —— 这一点必须如实告诉用户。
+pub fn takes_effect_in_sidebar(source: &Source) -> bool {
+    matches!(source, Source::Server(_))
+}
+
+// ============================ 真服务端实现 ============================
+
 /// 拉市场列表，并与本地已装插件对账。
-pub fn browse(profile: &ServerProfile, query: &str) -> Result<Vec<MarketItem>, String> {
+fn browse_server(profile: &ServerProfile, query: &str) -> Result<Vec<MarketItem>, String> {
     // 只要与本宿主 api_version 完全相同的插件 —— 宿主侧是严格相等校验，
     // 装了别的版本也加载不了，不如根本不展示。
     let api_version = ferric_core::plugin::API_VERSION;
@@ -105,7 +171,7 @@ pub fn browse(profile: &ServerProfile, query: &str) -> Result<Vec<MarketItem>, S
 ///
 /// 版本比较交给服务端做 —— 它有 semver 排序的权威数据（`sort_key`），
 /// 客户端自己比字符串迟早会在 `0.10.0` vs `0.9.0` 上翻车。
-pub fn check_updates(profile: &ServerProfile) -> Result<Vec<String>, String> {
+fn check_updates_server(profile: &ServerProfile) -> Result<Vec<String>, String> {
     let installed = plugin_host::installed();
     if installed.is_empty() {
         return Ok(Vec::new());
@@ -141,7 +207,11 @@ pub fn check_updates(profile: &ServerProfile) -> Result<Vec<String>, String> {
 ///
 /// 校验顺序：先用离线签名确认「这份元数据是发布者签发的」，再用其中的 sha256
 /// 确认「拿到的字节就是被签的那份」。两步都过才落盘。
-pub fn install(profile: &ServerProfile, it: &MarketItem) -> Result<(), String> {
+fn install_server(
+    profile: &ServerProfile,
+    it: &MarketItem,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), String> {
     let (slug, expect_sha256, expect_size) = (&it.slug, &it.sha256, it.size);
     if expect_sha256.len() != 64 {
         return Err("服务端未提供有效的 sha256，已中止安装".into());
@@ -190,9 +260,13 @@ pub fn install(profile: &ServerProfile, it: &MarketItem) -> Result<(), String> {
     let path = url.strip_prefix("/api/v1").unwrap_or(url);
 
     // wasm 只有 10MB 上限，直接收在内存里即可（不像安装包要流式落盘）
+    let total = expect_size as u64;
     let mut buf: Vec<u8> = Vec::with_capacity(expect_size as usize);
-    net::download_to(profile, path, expect_size as u64, &mut |chunk| {
+    on_progress(0, total);
+    net::download_to(profile, path, total, &mut |chunk| {
         buf.extend_from_slice(chunk);
+        // 插件只有几十 KB，不必像安装包那样按时间节流：块数本来就不多
+        on_progress(buf.len() as u64, total);
         Ok(())
     })
     .map_err(|e| e.to_string())?;
@@ -273,12 +347,13 @@ mod tests {
         let p = unreachable_server();
         let sig = "3045";
         // sha256 长度不对 —— 必须在发起任何请求之前就失败
-        let e = install(&p, &item("abc", 10, sig)).unwrap_err();
+        let e = install_server(&p, &item("abc", 10, sig), &mut |_, _| {}).unwrap_err();
         assert!(e.contains("sha256"), "{e}");
         // 大小非法
-        let e = install(&p, &item(&"a".repeat(64), 0, sig)).unwrap_err();
+        let e = install_server(&p, &item(&"a".repeat(64), 0, sig), &mut |_, _| {}).unwrap_err();
         assert!(e.contains("大小"), "{e}");
-        let e = install(&p, &item(&"a".repeat(64), 99_000_000, sig)).unwrap_err();
+        let e = install_server(&p, &item(&"a".repeat(64), 99_000_000, sig), &mut |_, _| {})
+            .unwrap_err();
         assert!(e.contains("大小"), "{e}");
     }
 
@@ -289,7 +364,7 @@ mod tests {
     #[test]
     fn install_refuses_unsigned_plugin() {
         let p = unreachable_server();
-        let e = install(&p, &item(&"a".repeat(64), 100, "")).unwrap_err();
+        let e = install_server(&p, &item(&"a".repeat(64), 100, ""), &mut |_, _| {}).unwrap_err();
         // 没烘入验签公钥的构建同样必须拒绝，只是理由不同 —— 两种都绝不能放行
         assert!(
             e.contains("未签名") || e.contains("未烘入"),
@@ -317,7 +392,12 @@ mod tests {
         let payload = release::plugin_signing_payload("demo", "1.0.0", 1, &sha, 100);
         let sig = hex::encode(ctx.sign(&payload, &sk, &pk).unwrap().der_encode());
 
-        let e = install(&unreachable_server(), &item(&sha, 100, &sig)).unwrap_err();
+        let e = install_server(
+            &unreachable_server(),
+            &item(&sha, 100, &sig),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
         assert!(e.contains("签名"), "自签的插件必须被拒绝：{e}");
     }
 }
@@ -339,7 +419,7 @@ mod e2e {
         // 从干净状态开始，免得上一轮的残留干扰断言
         let _ = plugin_host::uninstall("url-codec");
 
-        let items = browse(&profile, "").expect("拉市场列表失败");
+        let items = browse_server(&profile, "").expect("拉市场列表失败");
         eprintln!("市场共 {} 个插件", items.len());
         let it = items
             .iter()
@@ -361,7 +441,7 @@ mod e2e {
         );
 
         // 安装：验签 → 换票 → 下载 → sha256 校验 → wasm 魔数 → 落盘
-        install(&profile, it).expect("安装失败");
+        install_server(&profile, it, &mut |_, _| {}).expect("安装失败");
 
         // 必须固定写成 <slug>.wasm，否则 load_all 的字典序陷阱会让旧版赢
         let path = plugin_host::plugins_dir().unwrap().join("url-codec.wasm");
@@ -386,7 +466,7 @@ mod e2e {
         );
 
         // 装好之后再问一次更新：不应再有更新
-        let updatable = check_updates(&profile).expect("检查更新失败");
+        let updatable = check_updates_server(&profile).expect("检查更新失败");
         assert!(
             !updatable.contains(&"url-codec".to_owned()),
             "刚装的就是最新版，不该报有更新：{updatable:?}"
@@ -398,12 +478,13 @@ mod e2e {
         let mut bad = it.sha256.clone();
         let last = bad.pop().unwrap();
         bad.push(if last == 'a' { 'b' } else { 'a' });
-        let e = install(
+        let e = install_server(
             &profile,
             &MarketItem {
                 sha256: bad,
                 ..it.clone()
             },
+            &mut |_, _| {},
         )
         .unwrap_err();
         assert!(
@@ -412,12 +493,13 @@ mod e2e {
         );
 
         // 冒名顶替：拿这个版本的合法签名去装成另一个 slug —— 清单绑了 slug，必须失败
-        let e = install(
+        let e = install_server(
             &profile,
             &MarketItem {
                 slug: "not-url-codec".into(),
                 ..it.clone()
             },
+            &mut |_, _| {},
         )
         .unwrap_err();
         assert!(e.contains("签名"), "换 slug 必须验签失败：{e}");

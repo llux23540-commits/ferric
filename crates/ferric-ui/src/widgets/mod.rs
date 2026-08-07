@@ -492,10 +492,27 @@ impl DiffLineStyle {
     }
 }
 
+/// 搜索高亮参数：`matches` 为本面板全文中各匹配的 byte 区间（升序、互不重叠），
+/// `current` 为「当前匹配」在 `matches` 中的下标（当前匹配不在本面板时为 `None`）。
+pub struct SearchPaint<'a> {
+    pub matches: &'a [(usize, usize)],
+    pub current: Option<usize>,
+}
+
+/// [`code_area_diff`] 的返回：编辑框响应 + 当前搜索匹配的纵向位置。
+pub struct DiffAreaOutput {
+    pub response: Response,
+    /// 当前搜索匹配所在视觉行相对滚动内容顶部的 y；
+    /// 调用方据此给外层 ScrollArea 设置跳转偏移（无当前匹配时为 `None`）。
+    pub current_match_y: Option<f32>,
+}
+
 /// 等宽多行编辑框（外观同 [`code_area`]），按 `line_styles` 就地渲染 diff 高亮：
 /// 改动行整行底色横向铺满（折行的续行同底色），emph 片段画字符级标记。
 /// `min_inner_h` 为内容区最小高度：行数除不尽的余数由白框撑满补齐，
 /// 保证框体高度精确等于外部预算、左右两栏底边严格对齐。
+/// `search` 提供搜索匹配区间时，在 diff 样式之上叠加匹配底色。
+#[allow(clippy::too_many_arguments)] // 单一调用方（diff 视图），拆参数结构体只添噪音
 pub fn code_area_diff(
     ui: &mut Ui,
     theme: &Theme,
@@ -504,11 +521,16 @@ pub fn code_area_diff(
     rows: usize,
     line_styles: &[DiffLineStyle],
     min_inner_h: f32,
-) -> Response {
+    search: Option<&SearchPaint<'_>>,
+) -> DiffAreaOutput {
     let fill = ui.visuals().extreme_bg_color;
     let border = ui.visuals().window_stroke; // border_2，很浅
     let accent = ui.visuals().hyperlink_color; // = accent
     let fg = theme.fg;
+    // 搜索匹配底色：普通匹配用主色浅底，当前匹配用半透明主色加深（更醒目），
+    // 与代码编辑器的搜索配色观感保持一致。
+    let hit_bg = theme.accent_soft;
+    let cur_bg = theme.accent.gamma_multiply(0.55);
     let out = Frame::NONE
         .fill(fill)
         .stroke(border)
@@ -529,22 +551,102 @@ pub fn code_area_diff(
                 let mut job = egui::text::LayoutJob::default();
                 job.wrap.max_width = wrap_width;
                 let lines: Vec<&str> = buf.as_str().split('\n').collect();
+                let mut line_start = 0usize; // 行首在全文中的 byte 偏移
                 for (i, line) in lines.iter().enumerate() {
-                    match line_styles.get(i).filter(|s| s.matches(line)) {
-                        Some(style) => {
-                            for seg in &style.segs {
-                                let mut fmt = plain.clone();
-                                if seg.emph {
-                                    fmt.background = style.mark;
-                                }
-                                job.append(&seg.text, 0.0, fmt);
+                    let line_end = line_start + line.len();
+                    // 落在本行内的搜索区间（换算成行内偏移；跨行匹配按行裁剪）。
+                    let mut hits: Vec<(usize, usize, bool)> = Vec::new();
+                    if let Some(sp) = search {
+                        for (mi, &(s, e)) in sp.matches.iter().enumerate() {
+                            if e <= line_start {
+                                continue;
                             }
+                            if s >= line_end {
+                                break;
+                            }
+                            hits.push((
+                                s.max(line_start) - line_start,
+                                e.min(line_end) - line_start,
+                                sp.current == Some(mi),
+                            ));
                         }
-                        None => job.append(line, 0.0, plain.clone()),
+                        // 匹配区间在输入后的一帧内可能落后于文本（同 DiffLineStyle 的
+                        // 一帧延迟问题）：丢掉不再落在 char 边界上的区间，避免切片 panic。
+                        hits.retain(|&(a, b, _)| {
+                            line.is_char_boundary(a) && line.is_char_boundary(b)
+                        });
+                    }
+                    let style = line_styles.get(i).filter(|s| s.matches(line));
+                    if hits.is_empty() {
+                        // 无搜索命中：按 diff 段直接排版（原路径）。
+                        match style {
+                            Some(style) => {
+                                for seg in &style.segs {
+                                    let mut fmt = plain.clone();
+                                    if seg.emph {
+                                        fmt.background = style.mark;
+                                    }
+                                    job.append(&seg.text, 0.0, fmt);
+                                }
+                            }
+                            None => job.append(line, 0.0, plain.clone()),
+                        }
+                    } else {
+                        // 命中行：diff 段与搜索区间可能交叉，把两组边界合并后逐子段排版；
+                        // 底色优先级：当前匹配 > 普通匹配 > diff 字符标记。
+                        let base: Vec<(usize, usize, Color32)> = match style {
+                            Some(style) => {
+                                let mut off = 0usize;
+                                style
+                                    .segs
+                                    .iter()
+                                    .map(|seg| {
+                                        let s = off;
+                                        off += seg.text.len();
+                                        let c = if seg.emph {
+                                            style.mark
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        (s, off, c)
+                                    })
+                                    .collect()
+                            }
+                            None => vec![(0, line.len(), Color32::TRANSPARENT)],
+                        };
+                        let mut cuts: Vec<usize> =
+                            Vec::with_capacity((base.len() + hits.len()) * 2);
+                        for &(a, b, _) in &base {
+                            cuts.push(a);
+                            cuts.push(b);
+                        }
+                        for &(a, b, _) in &hits {
+                            cuts.push(a);
+                            cuts.push(b);
+                        }
+                        cuts.sort_unstable();
+                        cuts.dedup();
+                        // 切分点含全部边界：每个 [a,b) 子段必然整体处于同一 diff 段、同一搜索状态。
+                        for w in cuts.windows(2) {
+                            let (a, b) = (w[0], w[1]);
+                            let seg_bg = base
+                                .iter()
+                                .find(|&&(s, e, _)| s <= a && b <= e)
+                                .map_or(Color32::TRANSPARENT, |&(_, _, c)| c);
+                            let hit = hits.iter().find(|&&(s, e, _)| s <= a && a < e);
+                            let mut fmt = plain.clone();
+                            fmt.background = match hit {
+                                Some(&(_, _, true)) => cur_bg,
+                                Some(_) => hit_bg,
+                                None => seg_bg,
+                            };
+                            job.append(&line[a..b], 0.0, fmt);
+                        }
                     }
                     if i + 1 < lines.len() {
                         job.append("\n", 0.0, plain.clone());
                     }
+                    line_start = line_end + 1;
                 }
                 ui.fonts_mut(|f| f.layout_job(job))
             };
@@ -589,20 +691,34 @@ pub fn code_area_diff(
                 }
             }
             ui.painter().set(bg_idx, egui::Shape::Vec(shapes));
-            edit.response.response
+
+            // 当前搜索匹配的 y：galley 内坐标换算为「相对 Frame 外沿（= 滚动内容顶部）」。
+            // 匹配区间可能比文本旧一帧，用 get 兜底避免切在 char 中间。
+            let current_match_y = search
+                .and_then(|sp| sp.current.and_then(|ci| sp.matches.get(ci)))
+                .and_then(|&(s, _)| text.get(..s))
+                .map(|prefix| {
+                    let ccursor = egui::text::CCursor::new(prefix.chars().count());
+                    let row_y = edit.galley.pos_from_cursor(ccursor).min.y;
+                    // inner.top() 是内容顶，减去 inner_margin 顶得 Frame 外沿。
+                    edit.galley_pos.y + row_y - (inner.top() - 12.0)
+                });
+
+            (edit.response.response, current_match_y)
         });
+    let (response, current_match_y) = out.inner;
     // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
-    if out.inner.gained_focus() {
-        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
+    if response.gained_focus() {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), response.id) {
             let end = egui::text::CCursor::new(text.chars().count());
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::one(end)));
-            state.store(ui.ctx(), out.inner.id);
+            state.store(ui.ctx(), response.id);
         }
     }
     // 聚焦时显示主色环
-    if out.inner.has_focus() {
+    if response.has_focus() {
         ui.painter().rect_stroke(
             out.response.rect,
             CornerRadius::same(10),
@@ -610,7 +726,10 @@ pub fn code_area_diff(
             egui::StrokeKind::Inside,
         );
     }
-    out.inner
+    DiffAreaOutput {
+        response,
+        current_match_y,
+    }
 }
 
 /// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。返回复制点击。

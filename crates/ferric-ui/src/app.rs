@@ -51,6 +51,20 @@ struct Persist {
     /// 代码编辑区排版（字号 / 字重 / 行距）。
     #[serde(default)]
     code_font: crate::widgets::code_editor::FontCfg,
+    /// 自动检查更新并在后台下载。默认开 —— 更新只有及时装上才有意义。
+    #[serde(default = "default_true")]
+    auto_update: bool,
+    /// 是否使用演示数据：`None` = 自动（没烘入服务器时才用），`Some` = 用户显式选择。
+    #[serde(default)]
+    mock_source: Option<bool>,
+    /// 上次成功检查更新的 Unix 时间戳（秒）。跨启动节流用 ——
+    /// 只放在内存里的话，开十次应用就查十次。
+    #[serde(default)]
+    last_update_check: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_ui_scale() -> f32 {
@@ -70,8 +84,19 @@ impl Default for Persist {
             server: None,
             ui_scale: 1.0,
             code_font: Default::default(),
+            auto_update: true,
+            mock_source: None,
+            last_update_check: None,
         }
     }
+}
+
+/// 当前 Unix 时间戳（秒）。系统时钟异常时回落到 0（= 「很久没查过」）。
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 设置窗自绘的标题栏：与主窗同一套语言（无边框 + 拖拽 + 关闭），
@@ -158,11 +183,49 @@ pub struct FerricApp {
     settings_raise: bool,
     /// 「调到最前」的状态机，见 [`SettingsRaise`]。
     raise: SettingsRaise,
+    /// 已经画过的帧数（只数到 [`STABLE_FRAMES`] 为止），用于确认本次启动是成功的。
+    frames: u32,
+    /// 启动期配置（渲染后端等）。改动即刻落盘，下次启动生效。
+    launch_cfg: crate::launch::LaunchCfg,
+    /// 自动检查更新并后台下载。
+    auto_update: bool,
+    /// 演示数据开关：None = 自动。
+    mock_source: Option<bool>,
+    /// 上次成功检查更新的 Unix 时间戳（秒）。
+    last_update_check: Option<i64>,
+    /// 内置工具的数量。插件工具一律追加在它们之后，热加载时按这个位置截断 ——
+    /// 这样内置工具（连同它们的界面状态）不会被重建，只有插件那截换掉。
+    builtin_tools: usize,
+    /// 上一帧是否持有系统焦点（Alt+Tab 切回时的旧帧频闪缓解，见 `present_hygiene`）。
+    was_focused: bool,
+    /// 窗口外沿左上角在上一帧的位置（拖动窗口检测）。
+    last_outer_pos: Option<egui::Pos2>,
+    /// 最近一次检测到窗口移动的时刻。
+    last_moved_at: Option<std::time::Instant>,
+    /// 当前表面是否处于「拖动期免等垂直同步」模式（避免每帧重复重配表面）。
+    fast_present: bool,
 }
+
+/// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
+///
+/// 不在第 1 帧就记：wgpu 的适配器是有了，但首次真正提交画面时才可能暴露问题
+/// （设备丢失、表面配置不受支持）。多等两帧，代价是零，换来的是这个标记名副其实。
+const STABLE_FRAMES: u32 = 3;
 
 /// 等 `Focus` 生效的帧数；到期还没拿到焦点就走重建兜底。
 /// 8 帧 ≈ 130ms @60fps：够窗口管理器响应，又不至于让人察觉延迟。
 const RAISE_WAIT_FRAMES: u8 = 8;
+
+/// 「销毁窗口再建一个」这条兜底，是否是本平台唯一能把窗口提到前面的办法。
+///
+/// 只有 Wayland 是（合成器不让客户端抢焦点，`Focus` 与 `AlwaysOnTop` 都是空操作）。
+/// X11 / Windows / macOS 的 `Focus` 是有效的 —— 在那些平台上重建窗口纯粹是**白闪一下**，
+/// 而且 Windows 的 `SetForegroundWindow` 有它自己的节流规则，偶尔慢一拍就会被
+/// 「等 8 帧没焦点」误判成失败，于是每点一次设置就闪一次。
+fn recreate_is_the_only_raise() -> bool {
+    // winit 在两个后端都编进来时优先选 Wayland，因此以 WAYLAND_DISPLAY 是否存在为准。
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
 
 /// 把设置窗「调到最前」的状态机。
 ///
@@ -200,13 +263,16 @@ impl SettingsRaise {
     }
 
     /// 每帧推进一次。返回 `true` 表示这一帧**不要渲染**设置视口（即销毁它）。
-    fn tick(&mut self) -> bool {
+    ///
+    /// `can_recreate` = 本平台是否需要「销毁重建」这条兜底（见
+    /// [`recreate_is_the_only_raise`]）。为 false 时等超时只是放弃，不闪。
+    fn tick(&mut self, can_recreate: bool) -> bool {
         if self.wait > 0 {
             if self.focused {
                 self.wait = 0; // Focus 生效了，不必重建
             } else {
                 self.wait -= 1;
-                if self.wait == 0 {
+                if self.wait == 0 && can_recreate {
                     self.reopen = 2; // 等超时 → 重建窗口
                 }
             }
@@ -222,7 +288,7 @@ impl SettingsRaise {
 
 impl FerricApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        fonts::install_fonts(&cc.egui_ctx);
+        let has_cjk = fonts::install_fonts(&cc.egui_ctx);
 
         let persist: Persist = cc
             .storage
@@ -248,6 +314,7 @@ impl FerricApp {
         crate::updater::cleanup_stale();
 
         let mut tools = views::registry();
+        let builtin_tools = tools.len();
         // WASM 插件：内置工具之后追加（加载失败只提示，不影响启动）
         let (plugin_tools, plugin_warns) = crate::plugin_host::load_all();
         for t in plugin_tools {
@@ -264,11 +331,24 @@ impl FerricApp {
             .position(|t| t.meta().id == persist.active_id)
             .unwrap_or(0);
 
+        // 界面缩放在**第一帧之前**就落定。放到 update() 里意味着首帧按 100% 排完版、
+        // 窗口显示出来、下一帧才跳到用户设定的比例 —— 那一跳就是开窗时的闪。
+        let ui_scale = persist.ui_scale.clamp(0.8, 1.6);
+        cc.egui_ctx.set_zoom_factor(ui_scale);
+
         let mut shared = Shared::new(theme);
         shared.lang = persist.lang;
         shared.code_font = persist.code_font.clamped();
         for w in plugin_warns {
             shared.toast(format!("插件加载失败 · {w}"));
+        }
+        // 没有中文字体 = 满屏方块。提示必须中英双语：这条消息本身也会是方块，
+        // 英文那半句是用户唯一读得懂的部分。
+        if !has_cjk {
+            shared.toast(
+                "未找到中文字体，界面会显示为方块 / No CJK font found: \
+                 please install Microsoft YaHei or Noto Sans SC",
+            );
         }
 
         Self {
@@ -286,11 +366,78 @@ impl FerricApp {
             updater: crate::updater::Updater::default(),
             shared,
             shot_frames: 0,
-            ui_scale: persist.ui_scale.clamp(0.8, 1.6),
-            applied_ui_scale: None,
+            ui_scale,
+            applied_ui_scale: Some(ui_scale),
             settings_raise: false,
             raise: SettingsRaise::default(),
+            frames: 0,
+            launch_cfg: crate::launch::load(),
+            auto_update: persist.auto_update,
+            mock_source: persist.mock_source,
+            last_update_check: persist.last_update_check,
+            builtin_tools,
+            was_focused: true,
+            last_outer_pos: None,
+            last_moved_at: None,
+            fast_present: false,
         }
+    }
+
+    /// 当前生效的数据源（真服务端 or 演示数据）。
+    fn source(&self) -> Option<crate::source::Source> {
+        crate::source::Source::resolve(self.mock_source, self.server_profile())
+    }
+
+    /// 距上次成功检查更新是否已经够久（跨启动节流）。
+    fn update_check_is_stale(&self) -> bool {
+        match self.last_update_check {
+            None => true,
+            Some(t) => {
+                now_unix().saturating_sub(t) >= crate::updater::AUTO_CHECK_INTERVAL_SECS as i64
+            }
+        }
+    }
+
+    /// 热加载插件：把插件那截工具换成磁盘上的当前状态，内置工具原封不动。
+    ///
+    /// 只能由**外壳**在一帧渲染结束之后调用 —— 视图自己正被 `self.tools[i]` 借着。
+    ///
+    /// 保留：当前选中的工具（按 id 找回，插件被卸载则回落到市场页）、
+    /// 各插件的输入草稿（按 id 搬回去）。
+    ///
+    /// ⚠️ `PluginTool` 的 `ToolMeta` 需要 `&'static str`，加载时用 `Box::leak` 得到 ——
+    /// 因此每次热加载都会漏掉一份插件元数据（每个插件几百字节）。装插件是低频动作，
+    /// 这点代价换「不用重启」是划算的；但别把这个函数接到什么每帧调用的地方去。
+    fn reload_plugins(&mut self) {
+        let active_id = self.tools[self.active].meta().id.to_owned();
+        // 插件的输入草稿：重建前先收起来，重建后按 id 放回去
+        let drafts: HashMap<String, String> = self.tools[self.builtin_tools..]
+            .iter()
+            .filter_map(|t| t.save_draft().map(|d| (t.meta().id.to_owned(), d)))
+            .collect();
+
+        self.tools.truncate(self.builtin_tools);
+        let (plugin_tools, warns) = crate::plugin_host::load_all();
+        let loaded = plugin_tools.len();
+        for mut t in plugin_tools {
+            if let Some(d) = drafts.get(t.meta().id) {
+                t.load_draft(d);
+            }
+            self.tools.push(Box::new(t));
+        }
+        for w in warns {
+            self.shared.toast(format!("插件加载失败 · {w}"));
+        }
+
+        // 选中的工具可能刚被卸载 —— 找不回来就退回插件市场（用户就是从那儿来的）
+        self.active = self
+            .tools
+            .iter()
+            .position(|t| t.meta().id == active_id)
+            .or_else(|| self.tools.iter().position(|t| t.meta().id == "market"))
+            .unwrap_or(0);
+        self.shared
+            .toast(format!("插件已重新加载（当前 {loaded} 个）"));
     }
 
     /// 当前生效的更新服务器。None = 本构建未配置（更新功能整体禁用，
@@ -301,12 +448,8 @@ impl FerricApp {
             .or_else(crate::net::ServerProfile::builtin)
     }
 
-    /// 是不是编译期烘入的那个服务器。不是的话自动安装会被禁用。
-    fn server_is_builtin(&self) -> bool {
-        self.server_override
-            .as_ref()
-            .map_or(true, |p| p.is_builtin())
-    }
+    // 「是不是内置服务器」现在问数据源本身（`Source::is_builtin_server`）——
+    // 演示数据也要参与这个判断，而它根本没有 ServerProfile。
 
     fn set_mode(&mut self, ctx: &egui::Context, mode: ThemeMode) {
         self.mode = mode;
@@ -638,6 +781,9 @@ impl FerricApp {
             self.tools[self.active].header_actions(ui, &mut self.shared);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(side);
+                // 更新入口就放在这儿：更新是全局的事，挂在设置窗里意味着
+                // 「东西早就下好了，但用户永远不知道」。
+                self.update_badge(ui);
                 let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
                 if resp.hovered() {
                     ui.painter()
@@ -671,6 +817,55 @@ impl FerricApp {
             ui.max_rect().bottom(),
             Stroke::new(1.0_f32, theme.border),
         );
+    }
+
+    /// 顶栏右侧的更新入口：下载中显示进度，就绪时是一个「安装 vX」按钮。
+    ///
+    /// 点它 = 拉起安装程序并退出本进程。**只有内置服务器的包才允许这么做**
+    /// （演示数据与自定义源都只提示，见 `Source::allows_install`）——
+    /// 这一步是把一个下载来的文件交给操作系统执行，门槛必须是最高的那一档。
+    fn update_badge(&mut self, ui: &mut egui::Ui) {
+        use crate::updater::Phase;
+        let theme = self.shared.theme;
+        match self.updater.phase.clone() {
+            Phase::Downloading { done, total } => {
+                // 与设置页那处同一种写法：`if total > 0 { .. / total }` 会被
+                // clippy 的 manual_checked_ops 拦下（CI 是 -D warnings）
+                let pct = done
+                    .checked_mul(100)
+                    .and_then(|x| x.checked_div(total))
+                    .unwrap_or(0);
+                ui.label(
+                    RichText::new(format!("更新下载中 {pct}%"))
+                        .size(11.5)
+                        .color(theme.muted),
+                );
+            }
+            Phase::Ready { info, file } => {
+                let can_install = self.source().is_some_and(|s| s.allows_install());
+                if widgets::primary_button(ui, &theme, &format!("安装 v{}", info.version))
+                    .on_hover_text(if can_install {
+                        "已下载并通过 sha256 与签名校验 · 点击安装（将退出 Ferric）"
+                    } else {
+                        "演示数据 / 自定义更新源不会真的安装"
+                    })
+                    .clicked()
+                {
+                    if can_install {
+                        match crate::updater::launch(&file) {
+                            Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(e) => {
+                                self.updater.phase = Phase::Failed(e);
+                            }
+                        }
+                    } else {
+                        self.shared
+                            .toast("演示模式：不会真的执行安装程序（换成真实更新源即可）");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn content_body(&mut self, ui: &mut egui::Ui) {
@@ -798,7 +993,7 @@ impl FerricApp {
         if self.raise.busy() {
             ctx.request_repaint(); // 处理期间保持出帧，否则计数推不下去
         }
-        if self.raise.tick() {
+        if self.raise.tick(recreate_is_the_only_raise()) {
             // 这一帧不 show 这个视口 → eframe 会销毁对应的系统窗口，下一帧重新建出来
             return;
         }
@@ -896,6 +1091,8 @@ impl FerricApp {
                     });
                 });
                 ui.separator();
+                self.renderer_settings_ui(ui);
+                ui.separator();
                 self.update_settings_ui(ui);
                 ui.add_space(10.0);
                 ui.label(
@@ -992,6 +1189,67 @@ impl FerricApp {
         *font = font.clamped();
     }
 
+    /// 设置弹窗里的「渲染后端」区块。
+    ///
+    /// 为什么要把这个开关暴露给用户：同一份二进制在不同机器上走的图形路径完全不同 ——
+    /// 有独显的走 DX12/Vulkan，虚拟机与精简系统会退化到 WARP 软件光栅化，
+    /// 远程桌面又是另一套。**画面撕裂 / 闪屏 / 白框**这类毛病高度依赖驱动实现，
+    /// 换一个后端往往立刻就好，而这件事没有任何自动判据可言（画面对不对只有人眼知道）。
+    /// 所以：给一个开关、记住选择、下次启动直接用。
+    ///
+    /// 改动写进 launch.json（eframe 状态目录里），由 `main` 在建窗之前读 ——
+    /// 因此必须重启才生效，文案要说清楚。
+    fn renderer_settings_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::launch::Backend;
+        let theme = self.shared.theme;
+
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "渲染后端");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // seg 在 right_to_left 里会倒着排：按自然顺序定义，绘制前反转，
+                // 拿到下标再反转回来（与「界面缩放」那一处同一套写法）。
+                let names: Vec<&str> = Backend::ALL.iter().rev().map(|b| b.label()).collect();
+                let nat = Backend::ALL
+                    .iter()
+                    .position(|b| *b == self.launch_cfg.backend)
+                    .unwrap_or(0);
+                if let Some(n) = widgets::seg(ui, &theme, &names, Backend::ALL.len() - 1 - nat) {
+                    let want = Backend::ALL[Backend::ALL.len() - 1 - n];
+                    if want != self.launch_cfg.backend {
+                        // 经 set_backend 走一遍磁盘：内存里这份是启动时读的，
+                        // 之后 mark_running 改过盘上的内容，直接存回去会把它抹掉。
+                        self.launch_cfg = crate::launch::set_backend(want);
+                        self.shared.toast(format!(
+                            "渲染后端已设为 {}，重启 Ferric 后生效",
+                            want.label()
+                        ));
+                    }
+                }
+            });
+        });
+        ui.label(
+            RichText::new("画面闪烁 / 撕裂 / 打不开时换一个试试；「自动」由系统挑。重启后生效")
+                .size(11.0)
+                .color(theme.faint),
+        );
+        if let Some(b) = self.launch_cfg.last_good {
+            ui.label(
+                RichText::new(format!("上次成功启动使用：{}", b.label()))
+                    .family(FontFamily::Monospace)
+                    .size(10.5)
+                    .color(theme.faint),
+            );
+        }
+        // 上次启动失败的原因要给用户看见 —— 这是他判断该换成哪个的唯一依据。
+        if let Some(e) = &self.launch_cfg.last_error {
+            ui.label(
+                RichText::new(format!("上次启动失败：{e}"))
+                    .size(10.5)
+                    .color(theme.danger),
+            );
+        }
+    }
+
     /// 设置弹窗里的「软件更新」区块。
     ///
     /// 这里刻意把**服务器身份**摊开给用户看（地址 + 公钥指纹），因为自定义服务器的
@@ -1001,16 +1259,47 @@ impl FerricApp {
         use crate::updater::Phase;
         let theme = self.shared.theme;
 
-        let Some(profile) = self.server_profile() else {
-            widgets::field_label(ui, &theme, "软件更新");
+        // —— 数据源：真服务端 / 演示数据。
+        // 没烘入服务器的构建里，插件市场与更新原本是两块空白界面 ——
+        // 演示数据让它们在任何构建下都能打开、能点、能演示（细节见 `mock` 模块头）。
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "数据源");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                const CHOICES: [(Option<bool>, &str); 3] = [
+                    (None, "自动"),
+                    (Some(false), "服务器"),
+                    (Some(true), "演示"),
+                ];
+                let names: Vec<&str> = CHOICES.iter().rev().map(|(_, n)| *n).collect();
+                let nat = CHOICES
+                    .iter()
+                    .position(|(v, _)| *v == self.mock_source)
+                    .unwrap_or(0);
+                if let Some(n) = widgets::seg(ui, &theme, &names, CHOICES.len() - 1 - nat) {
+                    let want = CHOICES[CHOICES.len() - 1 - n].0;
+                    if want != self.mock_source {
+                        self.mock_source = want;
+                        // 换了源，之前那次检查的结论就作废了
+                        self.updater.phase = Phase::Idle;
+                        self.shared.toast(match self.source() {
+                            Some(s) if s.is_mock() => "已切换到演示数据（不联网）",
+                            Some(_) => "已切换到更新服务器",
+                            None => "本构建未配置服务器，且演示数据已关闭",
+                        });
+                    }
+                }
+            });
+        });
+
+        let Some(source) = self.source() else {
             ui.label(
-                RichText::new("本构建未配置更新服务器，自动更新不可用")
-                    .size(11.5)
+                RichText::new("本构建未配置更新服务器；把数据源切到「演示」可预览完整流程")
+                    .size(11.0)
                     .color(theme.faint),
             );
             return;
         };
-        let builtin = self.server_is_builtin();
+        let builtin = source.is_builtin_server();
 
         ui.horizontal(|ui| {
             widgets::field_label(ui, &theme, "软件更新");
@@ -1019,7 +1308,7 @@ impl FerricApp {
                 ui.add_enabled_ui(!busy, |ui| {
                     if widgets::ghost_button(ui, &theme, "检查更新").clicked() {
                         let ctx = ui.ctx().clone();
-                        self.updater.check(profile.clone(), &ctx);
+                        self.updater.check(source.clone(), &ctx);
                     }
                 });
                 if self.server_override.is_some()
@@ -1033,20 +1322,48 @@ impl FerricApp {
             });
         });
 
-        // 服务器身份：地址 + 公钥指纹。指纹便于口头核对。
-        ui.label(
-            RichText::new(format!("服务器  {}", profile.base_url))
-                .family(FontFamily::Monospace)
-                .size(10.5)
+        // 自动检查 + 后台下载。默认开：更新只有及时装上才有意义，
+        // 但**安装始终要用户点**（见 `update_badge`），后台不替他做那个决定。
+        ui.horizontal(|ui| {
+            if widgets::pill_toggle(ui, &theme, self.auto_update, "自动检查并后台下载") {
+                self.auto_update = !self.auto_update;
+            }
+            ui.label(
+                RichText::new(if self.auto_update {
+                    "下好后在顶栏出现「安装」按钮"
+                } else {
+                    "只在手动点「检查更新」时联网"
+                })
+                .size(11.0)
                 .color(theme.faint),
-        );
-        ui.label(
-            RichText::new(format!("公钥指纹 {}", profile.fingerprint()))
-                .family(FontFamily::Monospace)
-                .size(10.5)
-                .color(if builtin { theme.faint } else { theme.danger }),
-        );
-        if !builtin {
+            );
+        });
+
+        // 来源身份：地址 + 公钥指纹。指纹便于口头核对。
+        match &source {
+            crate::source::Source::Server(profile) => {
+                ui.label(
+                    RichText::new(format!("服务器  {}", profile.base_url))
+                        .family(FontFamily::Monospace)
+                        .size(10.5)
+                        .color(theme.faint),
+                );
+                ui.label(
+                    RichText::new(format!("公钥指纹 {}", profile.fingerprint()))
+                        .family(FontFamily::Monospace)
+                        .size(10.5)
+                        .color(if builtin { theme.faint } else { theme.danger }),
+                );
+            }
+            crate::source::Source::Mock => {
+                ui.label(
+                    RichText::new("演示数据 · 不联网；下载进度是模拟的，安装不会真的执行")
+                        .size(11.0)
+                        .color(theme.danger),
+                );
+            }
+        }
+        if !builtin && !source.is_mock() {
             ui.label(
                 RichText::new("⚠ 更新源已被修改，自动安装已禁用（只会提示新版本）")
                     .size(11.0)
@@ -1086,9 +1403,14 @@ impl FerricApp {
                 .size(11.5)
                 .color(theme.faint),
             |ui| {
-                let (url, key) = self
-                    .server_draft
-                    .get_or_insert_with(|| (profile.base_url.clone(), profile.pubkey.clone()));
+                // 草稿初值取当前服务器；演示模式下没有服务器，就从空开始填
+                let (url, key) =
+                    self.server_draft.get_or_insert_with(
+                        || match crate::net::ServerProfile::builtin() {
+                            Some(p) => (p.base_url, p.pubkey),
+                            None => (String::new(), String::new()),
+                        },
+                    );
                 ui.label(RichText::new("服务器地址").size(10.5).color(theme.faint));
                 ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY));
                 ui.label(
@@ -1170,13 +1492,14 @@ impl FerricApp {
                     ui.label(RichText::new(&info.notes).size(11.0).color(theme.faint));
                 }
                 ui.horizontal(|ui| {
-                    if builtin {
+                    // 演示源也允许「下载」——它下的是模拟进度，且永远不会被执行。
+                    // 自定义源则只通知：那个地址可能是用户被诱导改的。
+                    if source.allows_auto_download() {
                         if widgets::ghost_button(ui, &theme, "下载并校验").clicked() {
                             let ctx = ui.ctx().clone();
-                            self.updater.download(profile.clone(), info.clone(), &ctx);
+                            self.updater.download(source.clone(), info.clone(), &ctx);
                         }
                     } else {
-                        // 自定义服务器：只通知，不下载不执行
                         ui.label(
                             RichText::new("请自行前往更新源手动下载安装")
                                 .size(11.0)
@@ -1193,20 +1516,29 @@ impl FerricApp {
                     &format!("v{} 已下载，签名与校验和均已通过", info.version),
                 );
                 // 各平台行为并不一致，文案要如实说明
-                let hint = match std::env::consts::OS {
-                    "windows" => "将启动安装程序并退出 Ferric",
-                    "macos" => "将打开安装包，需你手动完成安装",
-                    _ => "将交给系统的软件安装器，可能需要授权",
+                let hint = if !source.allows_install() {
+                    "演示数据：不会真的执行安装程序"
+                } else {
+                    match std::env::consts::OS {
+                        "windows" => "将启动安装程序并退出 Ferric",
+                        "macos" => "将打开安装包，需你手动完成安装",
+                        _ => "将交给系统的软件安装器，可能需要授权",
+                    }
                 };
                 ui.label(RichText::new(hint).size(11.0).color(theme.faint));
                 if widgets::ghost_button(ui, &theme, "立即安装").clicked() {
-                    match crate::updater::launch(&file) {
-                        Ok(()) => {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    if source.allows_install() {
+                        match crate::updater::launch(&file) {
+                            Ok(()) => {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(e) => {
+                                self.updater.phase = Phase::Failed(e);
+                            }
                         }
-                        Err(e) => {
-                            self.updater.phase = Phase::Failed(e);
-                        }
+                    } else {
+                        self.shared
+                            .toast("演示模式：不会真的执行安装程序（换成真实更新源即可）");
                     }
                 }
             }
@@ -1313,6 +1645,72 @@ impl FerricApp {
     }
 }
 
+impl FerricApp {
+    /// Windows 呈现卫生：缓解两类由 DX12 flip-model 呈现引起的观感问题。
+    /// 其余平台整个函数是空操作。
+    ///
+    /// 1. **Alt+Tab 切回时闪一下旧画面**：DWM 合成窗口用的是交换链里最后 present
+    ///    的那一帧，而 winit 的 Windows 后端不产生 `Occluded` 事件 —— 失焦期间没有
+    ///    任何重绘，那帧可以旧到任意程度；切回后新帧又要等下一轮事件循环才出。
+    ///    两手一起做：焦点上升沿立即请求重绘，把旧帧停留压到一帧；失焦期间保持
+    ///    500ms 一次的低频心跳，让交换链里的「旧帧」与走时的画面始终一致 ——
+    ///    切回来看到的内容没有差异，就谈不上闪。
+    /// 2. **拖动窗口时整窗「发花」**：flip-model 的 present 与窗口移动天然不同步，
+    ///    Fifo（等 vblank）让画面恒定落后窗口约一帧；无边框窗口整个客户区都是内容，
+    ///    错一帧就是全屏残影。窗口位置一变就临时把表面切到 AutoNoVsync（wgpu 的
+    ///    DX12 交换链常开 ALLOW_TEARING，present 不再排队等 vblank），位置稳定
+    ///    300ms 后切回 [`eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY`]。
+    ///    代价是拖动瞬间可能有轻微撕裂，但远好于整窗残影。
+    fn present_hygiene(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+
+        // —— 焦点上升沿立即重绘 + 失焦低频心跳。
+        // 心跳在**最小化**时豁免：最小化的窗口不参与 DWM 合成，恢复时本来就有
+        // 重绘事件，没有「旧帧先亮相」的问题 —— 那 2fps 就纯属烧电了。
+        let focused = ctx.input(|i| i.focused);
+        let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
+        if focused && !self.was_focused {
+            ctx.request_repaint();
+        }
+        if !focused && !minimized {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        self.was_focused = focused;
+
+        // —— 拖动 / 交互式移动检测：外沿左上角变了就算在动。
+        let pos = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
+        let now = std::time::Instant::now();
+        if let (Some(p), Some(q)) = (pos, self.last_outer_pos) {
+            if (p - q).length_sq() > 0.25 {
+                self.last_moved_at = Some(now);
+            }
+        }
+        if pos.is_some() {
+            self.last_outer_pos = pos;
+        }
+        let moving = self
+            .last_moved_at
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(300));
+        if moving != self.fast_present {
+            self.fast_present = moving;
+            frame.set_wgpu_surface_config(if moving {
+                eframe::egui_wgpu::SurfaceConfig {
+                    present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                    desired_maximum_frame_latency: Some(1),
+                }
+            } else {
+                eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY
+            });
+        }
+        if moving {
+            // 移动期间保持出帧：位置一变就有新画面可 present，残影窗口最短。
+            ctx.request_repaint();
+        }
+    }
+}
+
 impl eframe::App for FerricApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let c = self.shared.theme.bg;
@@ -1341,13 +1739,25 @@ impl eframe::App for FerricApp {
             server: self.server_override.clone(),
             ui_scale: self.ui_scale,
             code_font: self.shared.code_font,
+            auto_update: self.auto_update,
+            mock_source: self.mock_source,
+            last_update_check: self.last_update_check,
         };
         eframe::set_value(storage, eframe::APP_KEY, &persist);
     }
 
-    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
+        self.present_hygiene(ctx, frame);
+        // 稳定出帧 = 本次启动成功。把当前渲染后端记成 last_good 并清掉「正在尝试」
+        // 标记，否则下次启动会以为上次是崩在启动路上的（见 launch::plan）。
+        if self.frames < STABLE_FRAMES {
+            self.frames += 1;
+            if self.frames == STABLE_FRAMES {
+                crate::launch::mark_running();
+            }
+        }
         self.debug_screenshot(ctx);
         // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
         self.sync_theme(ctx);
@@ -1355,8 +1765,39 @@ impl eframe::App for FerricApp {
         // 更新进度轮询必须在**外壳顶层**，不能挂在某个视图里 ——
         // 更新是全局的，挂在视图里会导致用户不切到那页就永远收不到结果。
         self.updater.poll(ctx);
-        // 插件市场视图需要知道当前服务器；每帧同步，覆盖设置后立刻生效
-        self.shared.server = self.server_profile();
+        // 插件市场视图需要知道数据源；每帧同步，改了设置立刻生效
+        let source = self.source();
+        self.shared.source = source.clone();
+
+        // 后台流水线：到点自动检查 → 发现新版自动下载 → 就绪后提示一次。
+        // 只调度不安装 —— 安装会关掉正在用的应用，那必须由用户点。
+        let stale = self.update_check_is_stale();
+        let tick = self
+            .updater
+            .tick(ctx, source.as_ref(), self.auto_update, stale);
+        if let crate::updater::Tick::ReadyToInstall { version } = tick {
+            self.shared.toast(format!(
+                "v{version} 已下载并校验通过 · 点右上角「安装」即可更新"
+            ));
+        }
+        // 成功检查过就记下时间，供下次启动节流。
+        // 比大小而不是「只记一次」：只记一次的话时间戳永远停在第一次，
+        // 过了间隔之后每启动一次都会重新查。
+        if let Some(t) = self.updater.last_ok {
+            let secs = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // 写成 match 而不是 `map_or` / `is_none_or`：前者会被新版 clippy 判为
+            // 「该用 is_none_or」，后者要 Rust 1.82，而本仓库声明的 MSRV 是 1.80。
+            let newer = match self.last_update_check {
+                Some(prev) => secs > prev,
+                None => true,
+            };
+            if newer {
+                self.last_update_check = Some(secs);
+            }
+        }
 
         // Ctrl+K 聚焦搜索框
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::K)) {
@@ -1426,6 +1867,12 @@ impl eframe::App for FerricApp {
 
         self.settings_ui(ctx);
         self.toasts_ui(ctx);
+
+        // 插件热加载放在**所有视图渲染完之后**：市场视图正是 self.tools 里的一员，
+        // 在它的 ui() 里改这个向量是不可能的（元素正被借着）。
+        if std::mem::take(&mut self.shared.reload_plugins) {
+            self.reload_plugins();
+        }
     }
 }
 
@@ -1433,9 +1880,15 @@ impl eframe::App for FerricApp {
 mod dialog_tests {
     use super::{Color32, SettingsRaise, Theme, RAISE_WAIT_FRAMES};
 
-    /// 跑 `n` 帧状态机，返回其中要求「跳过渲染」（= 销毁窗口重建）的帧数。
+    /// 跑 `n` 帧状态机（按「本平台需要重建兜底」跑，即 Wayland 那条路径），
+    /// 返回其中要求「跳过渲染」（= 销毁窗口重建）的帧数。
     fn run(r: &mut SettingsRaise, n: usize) -> usize {
-        (0..n).filter(|_| r.tick()).count()
+        (0..n).filter(|_| r.tick(true)).count()
+    }
+
+    /// 同上，但模拟 `Focus` 有效的平台（X11 / Windows / macOS）。
+    fn run_no_recreate(r: &mut SettingsRaise, n: usize) -> usize {
+        (0..n).filter(|_| r.tick(false)).count()
     }
 
     /// 窗口已经在前台时再点「设置」：什么都不该发生。
@@ -1487,6 +1940,36 @@ mod dialog_tests {
         assert_eq!(run(&mut r, 60), 0);
     }
 
+    /// `Focus` 有效的平台（X11 / Windows / macOS）上**绝不能**走重建兜底。
+    ///
+    /// 那些平台上重建窗口只是白闪一下；Windows 的 `SetForegroundWindow` 还有自己的
+    /// 节流规则，偶尔慢一拍就会被「等 8 帧没焦点」误判成失败 ——
+    /// 于是每点一次「设置」就闪一次，正是用户报的「屏闪」之一。
+    #[test]
+    fn platforms_with_working_focus_never_recreate() {
+        let mut r = SettingsRaise::default();
+        r.request();
+        assert_eq!(
+            run_no_recreate(&mut r, 60),
+            0,
+            "Focus 可用的平台上仍然重建了窗口（会闪）"
+        );
+        assert!(!r.busy(), "等超时之后状态没归零，会一直请求出帧");
+    }
+
+    /// 平台判定本身：只有 Wayland 需要重建兜底。
+    #[test]
+    fn only_wayland_needs_the_recreate_fallback() {
+        let is_wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        assert_eq!(super::recreate_is_the_only_raise(), is_wayland);
+        if !cfg!(target_os = "linux") {
+            assert!(
+                !super::recreate_is_the_only_raise(),
+                "非 Linux 平台不该走重建兜底"
+            );
+        }
+    }
+
     /// 点「设置」的接线：已经开着才请求置顶（新开的窗口本来就在最前，不必折腾）。
     #[test]
     fn clicking_settings_requests_a_raise_only_when_already_open() {
@@ -1505,7 +1988,7 @@ mod dialog_tests {
             "设置窗没有发置顶（Focus）指令"
         );
         assert!(
-            body.contains("self.raise.tick()"),
+            body.contains("self.raise.tick("),
             "settings_ui 没有接上置顶状态机，重建兜底不会发生"
         );
     }
