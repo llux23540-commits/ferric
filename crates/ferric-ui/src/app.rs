@@ -383,9 +383,10 @@ impl FerricApp {
         shared.lang = persist.lang;
         shared.code_font = persist.code_font.clamped();
         shared.gpu_software = gpu_software;
-        // 软渲染环境的清晰度自适应要在首帧前生效，否则第一屏就带着灰雾阴影。
+        // 软渲染环境的清晰度与流畅度自适应要在首帧前生效，否则第一屏就带着灰雾
+        // 阴影、且第一帧就用最慢的羽化路径把整窗光栅化一遍。
         if gpu_software {
-            Self::strip_soft_render_haze(&cc.egui_ctx);
+            Self::apply_soft_render_compat(&cc.egui_ctx);
         }
         for w in plugin_warns {
             shared.toast(format!("插件加载失败 · {w}"));
@@ -523,9 +524,10 @@ impl FerricApp {
             self.dark = want;
             self.shared.theme = Theme::from_dark(want);
             self.shared.theme.apply(ctx);
-            // 主题重铺会把阴影写回来 —— 软渲染环境要立刻再剥掉。
+            // 主题重铺会把阴影写回来 —— 软渲染环境要立刻再剥掉（羽化在 Options 里，
+            // 重铺不会动它，但一并调用保持三项适配同进同出）。
             if self.gpu_software {
-                Self::strip_soft_render_haze(ctx);
+                Self::apply_soft_render_compat(ctx);
             }
             // 换主题会重铺样式，字号缩放要跟着重新落一次
             self.applied_ui_scale = None;
@@ -538,7 +540,7 @@ impl FerricApp {
     /// 阴影是大范围半透明渐变：硬件渲染下是「柔和」，软渲染 + 低分屏下叠在内容
     /// 边上就是一圈灰雾 —— 用户的原话是「一片糊」。这类环境里全部清零，
     /// 界面靠 1px 边框与底色分层；直角、文本的像素对齐 egui 默认已开。
-    /// 硬件渲染路径完全不受影响。
+    /// 硬件渲染路径完全不受影响（本函数只在 `gpu_software` 时调用）。
     ///
     /// 同时把 `animation_time` 清零。egui 的每一段动画（悬停高亮渐变、折叠展开、
     /// 浮层淡入）在播放期间都会**每帧请求重绘整窗** —— 而 egui 没有局部重绘，
@@ -546,12 +548,25 @@ impl FerricApp {
     /// 靠 CPU 画的时候正好相反：动画本身画不满帧，却把 CPU 占满，于是每次
     /// 鼠标扫过侧栏都能感到一次顿挫。没有动画 = 状态切换是瞬时的，
     /// 观感上「干脆」，代价只是少了几十毫秒的渐变。
-    fn strip_soft_render_haze(ctx: &egui::Context) {
+    ///
+    /// 最后关掉**抗锯齿羽化**（feathering）—— 这是「无 GPU 加速也要默认能平稳跑」
+    /// 的关键一环。egui 给每个矢量形状（面板、圆角、边框、分隔线、导航项高亮）的
+    /// 边缘都补一圈约 1px 的半透明过渡三角形来做抗锯齿：三角形数量因此翻倍，还要
+    /// 逐像素做 alpha 混合，而这两样恰恰是软件光栅化最慢的路径。关掉后矢量边缘
+    /// 硬一档，但**文字完全不受影响**（字形走的是字体图集纹理采样，不是羽化），
+    /// 换来的是滚动 / 输入 / 拖动时肉眼可见的流畅度 —— 与上面「去动画、去阴影」
+    /// 是同一套「这种环境优先流畅、清晰胜过柔和」的取舍。
+    ///
+    /// feathering 存在 [`egui::Options`] 里而非 `Style`，主题重铺（[`Theme::apply`]）
+    /// 不会碰它，严格说设一次就够；仍放在这里，是让软渲染的三项适配同进同出、
+    /// 切深浅色重铺样式时也不漏项。
+    fn apply_soft_render_compat(ctx: &egui::Context) {
         ctx.all_styles_mut(|s| {
             s.visuals.window_shadow = egui::epaint::Shadow::NONE;
             s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
             s.animation_time = 0.0;
         });
+        ctx.options_mut(|o| o.tessellation_options.feathering = false);
     }
 
     /// 全局界面缩放。
@@ -2231,12 +2246,29 @@ mod dialog_tests {
             egui::epaint::Shadow::NONE,
             "主题不再定义弹层阴影，本测试的前提失效"
         );
-        super::FerricApp::strip_soft_render_haze(&ctx);
+        super::FerricApp::apply_soft_render_compat(&ctx);
         for slot in [egui::Theme::Light, egui::Theme::Dark] {
             let v = &ctx.style_of(slot).visuals;
             assert_eq!(v.popup_shadow, egui::epaint::Shadow::NONE, "{slot:?} 弹层");
             assert_eq!(v.window_shadow, egui::epaint::Shadow::NONE, "{slot:?} 卡片");
         }
+    }
+
+    /// 软渲染必须关掉**抗锯齿羽化**：它给每个矢量形状的边缘补一圈半透明过渡三角形，
+    /// 三角形翻倍 + 逐像素 alpha 混合，正是 CPU 光栅化每帧最大的一笔开销。
+    /// 这是「无 GPU 加速也要默认能平稳跑」的关键一环；文字走字体图集，不受影响。
+    #[test]
+    fn soft_render_disables_feathering() {
+        let ctx = egui::Context::default();
+        assert!(
+            ctx.options(|o| o.tessellation_options.feathering),
+            "前提：egui 默认开启羽化，本测试才有意义"
+        );
+        super::FerricApp::apply_soft_render_compat(&ctx);
+        assert!(
+            !ctx.options(|o| o.tessellation_options.feathering),
+            "软渲染没关羽化 —— 矢量边缘的抗锯齿在 CPU 上每帧都很贵"
+        );
     }
 
     /// 跑 `n` 帧状态机（按「本平台需要重建兜底」跑，即 Wayland 那条路径），
@@ -2604,7 +2636,7 @@ mod dialog_tests {
             ctx.style_of(egui::Theme::Dark).animation_time > 0.0,
             "前提：硬件路径下是有动画的"
         );
-        super::FerricApp::strip_soft_render_haze(&ctx);
+        super::FerricApp::apply_soft_render_compat(&ctx);
         for slot in [egui::Theme::Dark, egui::Theme::Light] {
             assert_eq!(
                 ctx.style_of(slot).animation_time,
