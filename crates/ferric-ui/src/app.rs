@@ -1478,6 +1478,15 @@ impl FerricApp {
                     .size(10.5)
                     .color(theme.danger),
                 );
+                // 无 GPU 时每帧开销 ∝ 窗口像素数，这是唯一真正见效的软件侧手段。
+                ui.label(
+                    RichText::new(
+                        "提速最有效的一招：把窗口拖小。软件渲染下开销与窗口像素数成正比，\
+                         边长减半 ≈ 快 4 倍，尺寸会被记住。",
+                    )
+                    .size(10.5)
+                    .color(theme.muted),
+                );
             }
         }
         // Alt+Tab 卡顿缓解（仅 Windows/DX12 有意义）：把此前只能用 PowerShell 环境
@@ -2665,7 +2674,7 @@ mod perf_tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(428.0, 620.0));
 
         // 先跑几帧预热（字体装载、布局缓存）
-        let mut worst = std::time::Duration::ZERO;
+        let mut best = std::time::Duration::MAX;
         for i in 0..12 {
             let t0 = std::time::Instant::now();
             let _ = ctx.run_ui(
@@ -2691,14 +2700,17 @@ mod perf_tests {
                 },
             );
             if i >= 4 {
-                worst = worst.max(t0.elapsed());
+                best = best.min(t0.elapsed());
             }
         }
-        // debug 构建下也应远低于一帧预算；这里给足余量，只拦住数量级劣化
+        // 用**最快一帧**而非最坏一帧：共享 CI runner（尤其 macOS）上偶发的调度抖动
+        // 会把最坏值推到秒级，导致这条 flaky（实测 macOS 上因此假失败）；而最快一帧
+        // 最贴近代码本身的开销，真有数量级劣化时连它也会被抬起来。守的是「别让设置
+        // 面板本身变重」——min 足够，且不受一次性噪声干扰。
         assert!(
-            worst.as_millis() < 16,
-            "设置窗内容构建太慢：最坏 {:?}（debug 构建实测约 3-4ms）",
-            worst
+            best.as_millis() < 16,
+            "设置窗内容构建太慢：最快 {:?}（debug 构建实测约 3-4ms）",
+            best
         );
     }
 }
