@@ -2,7 +2,7 @@
 
 use crate::theme::Theme;
 use crate::tool::{Shared, Tool, ToolMeta};
-use crate::widgets::DiffLineStyle;
+use crate::widgets::{DiffGap, DiffLineStyle};
 use crate::{icons, widgets};
 use egui::{Color32, RichText, Ui};
 use ferric_core::diff::{self, Tag};
@@ -222,15 +222,38 @@ fn search_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
     out
 }
 
-/// 由统一 diff 行派生左右两侧面板各自的行样式：
+/// 由统一 diff 行派生左右两侧面板各自的行样式与缺口标记：
 /// 左侧只关心删除（红），右侧只关心新增（绿），未变行透明。
+///
+/// 缺口的推导：走一遍带 `Tag` 的统一行表，`Insert` 只存在于右侧 —— 它连续出现
+/// 几行，左侧就在当前行下标处缺几行；`Delete` 反之。
 fn side_styles(
     lines: &[diff::DiffLine],
     theme: &Theme,
-) -> (Vec<DiffLineStyle>, Vec<DiffLineStyle>) {
+) -> (
+    Vec<DiffLineStyle>,
+    Vec<DiffLineStyle>,
+    Vec<DiffGap>,
+    Vec<DiffGap>,
+) {
     let mut left = Vec::new();
     let mut right = Vec::new();
+    let mut lgaps: Vec<DiffGap> = Vec::new();
+    let mut rgaps: Vec<DiffGap> = Vec::new();
+    // 把连续的 Insert / Delete 合并成一个缺口，而不是一行一个标记
+    let push_gap = |gaps: &mut Vec<DiffGap>, at: usize| match gaps.last_mut() {
+        Some(g) if g.before_line == at => g.lines += 1,
+        _ => gaps.push(DiffGap {
+            before_line: at,
+            lines: 1,
+        }),
+    };
     for line in lines {
+        match line.tag {
+            Tag::Delete => push_gap(&mut rgaps, right.len()),
+            Tag::Insert => push_gap(&mut lgaps, left.len()),
+            Tag::Equal => {}
+        }
         match line.tag {
             Tag::Equal => {
                 let plain = DiffLineStyle {
@@ -253,7 +276,7 @@ fn side_styles(
             }),
         }
     }
-    (left, right)
+    (left, right, lgaps, rgaps)
 }
 
 impl Tool for DiffTool {
@@ -292,7 +315,7 @@ impl Tool for DiffTool {
         }
 
         let (lines, stats) = diff::line_diff(&self.left, &self.right);
-        let (left_styles, right_styles) = side_styles(&lines, &theme);
+        let (left_styles, right_styles, left_gaps, right_gaps) = side_styles(&lines, &theme);
 
         // —— 搜索匹配：渲染前算好，搜索条计数与两侧高亮共用一份。——
         // 范围由「最近获得焦点的面板」决定：左 / 右有过焦点就只搜那一侧，否则两侧一起。
@@ -541,6 +564,7 @@ impl Tool for DiffTool {
                                             &mut self.left,
                                             rows,
                                             &left_styles,
+                                            &left_gaps,
                                             min_inner_h,
                                             l_paint.as_ref(),
                                         )
@@ -600,6 +624,7 @@ impl Tool for DiffTool {
                                             &mut self.right,
                                             rows,
                                             &right_styles,
+                                            &right_gaps,
                                             min_inner_h,
                                             r_paint.as_ref(),
                                         )
@@ -708,6 +733,54 @@ impl Tool for DiffTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 用户报的问题：**「左侧多了一部分，右侧就看不出来差异在哪」**。
+    ///
+    /// 两栏是各自独立的编辑框，一侧被删掉几行，另一侧的后续内容只是整体上移，
+    /// 对面那栏没有任何痕迹。这条断言「缺口」被算了出来 —— 位置与行数都要对，
+    /// 它是缺口标记能画对的前提。
+    #[test]
+    fn a_run_of_deletions_becomes_one_gap_on_the_other_side() {
+        let theme = Theme::light();
+        // 左边多出 DEL-1..3；右边多出 ADD-1..2
+        let left = "alpha\nbravo\nDEL-1\nDEL-2\nDEL-3\ncharlie\ndelta\n";
+        let right = "alpha\nbravo\ncharlie\nADD-1\nADD-2\ndelta\n";
+        let (lines, _) = diff::line_diff(left, right);
+        let (_, _, lgaps, rgaps) = side_styles(&lines, &theme);
+
+        // 右侧在「charlie 之前」缺 3 行（左边那三条 DEL）
+        assert_eq!(
+            rgaps.len(),
+            1,
+            "连续删除应当合并成一个缺口：{:?}",
+            rgaps
+                .iter()
+                .map(|g| (g.before_line, g.lines))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(rgaps[0].lines, 3, "右侧缺口行数不对");
+        assert_eq!(
+            rgaps[0].before_line, 2,
+            "右侧缺口应落在第 3 行（charlie）之前"
+        );
+
+        // 左侧在「delta 之前」缺 2 行（右边那两条 ADD）
+        assert_eq!(lgaps.len(), 1, "连续新增应当合并成一个缺口");
+        assert_eq!(lgaps[0].lines, 2, "左侧缺口行数不对");
+        assert_eq!(
+            lgaps[0].before_line, 6,
+            "左侧缺口应落在第 7 行（delta）之前"
+        );
+    }
+
+    /// 两边完全一样时不该冒出任何缺口标记 —— 否则界面上会凭空多出横线。
+    #[test]
+    fn identical_sides_have_no_gaps() {
+        let theme = Theme::light();
+        let (lines, _) = diff::line_diff("a\nb\nc\n", "a\nb\nc\n");
+        let (_, _, lgaps, rgaps) = side_styles(&lines, &theme);
+        assert!(lgaps.is_empty() && rgaps.is_empty());
+    }
 
     /// 命中区间必须是**原文 byte 区间**且落在 char 边界上 —— 含 CJK 时
     /// 直接决定高亮切分与跳转不会 panic。

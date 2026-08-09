@@ -125,8 +125,16 @@ impl Theme {
         v.extreme_bg_color = self.code_bg; // TextEdit 底：用浅灰 code_bg，避免白底叠白页发平
         v.faint_bg_color = self.code_bg;
         v.hyperlink_color = self.accent;
-        v.selection.bg_fill = self.accent.gamma_multiply(0.35);
-        v.selection.stroke = Stroke::new(1.0_f32, self.accent);
+        // 选区底色：0.35 的主色薄涂在白底上还看得见，可**盖到 diff 的红/绿改动行上
+        // 就几乎分辨不出来了** —— 对比工具里「选中了哪几个字」全靠它。加到 0.55，
+        // 并把描边也调实一点，让选区在任何行底色上都有明确边界。
+        v.selection.bg_fill = self.accent.gamma_multiply(0.55);
+        v.selection.stroke = Stroke::new(1.0_f32, self.accent_strong);
+
+        // 文本光标。**必须显式设**：egui 的默认值是浅蓝 rgb(192,222,255)，
+        // 那是给深色主题配的，落在本应用的浅色底上几乎看不见 —— 用户报的
+        // 「编辑时光标不够明显」就是它。用前景色 + 2px，深浅两套主题都够黑白分明。
+        v.text_cursor.stroke = Stroke::new(2.0_f32, self.fg);
 
         // 去掉控件的自动描边（按钮/输入/下拉不再有硬边），靠底色区分。
         v.widgets.noninteractive.bg_stroke = Stroke::NONE;

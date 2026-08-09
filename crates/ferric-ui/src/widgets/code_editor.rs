@@ -1,4 +1,4 @@
-//! 自研代码编辑器：可自由编辑 + 语法高亮 + **代码折叠**（单视图共存）。
+﻿//! 自研代码编辑器：可自由编辑 + 语法高亮 + **代码折叠**（单视图共存）。
 //!
 //! 设计：`text: String` 为唯一真相。每帧由源文本构建一份「可见文本」（被折叠的
 //! 括号区间替换成占位 `⋯`）以及「可见↔源」字符段映射。galley / 光标 / 选区都作用在
@@ -2221,7 +2221,6 @@ mod tests {
     #[test]
     fn selection_highlight_is_actually_painted() {
         let theme = crate::theme::Theme::dark();
-        let sel_color = theme.accent.gamma_multiply(0.35);
         let mut lines = vec!["{".to_owned()];
         for i in 0..40 {
             lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
@@ -2233,6 +2232,10 @@ mod tests {
         // 必须把主题装上：选区底色取自 ui.visuals().selection.bg_fill，
         // 不装主题扫到的就是 egui 的默认色，等于没测
         theme.apply(&ctx);
+        // 期望色**从主题读**，不要在这里复算一遍 `accent.gamma_multiply(..)`：
+        // 那是把主题常量抄进测试，调一次选区浓淡就会误报成「选区没画出来」。
+        // 这条要守的是「选区用的是主题的选区色」，不是某个具体数值。
+        let sel_color = ctx.style_of(egui::Theme::Dark).visuals.selection.bg_fill;
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0));
         let (from, to) = (pos2(80.0, 20.0), pos2(300.0, 60.0));
         let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
@@ -2487,12 +2490,13 @@ mod tests {
     #[test]
     fn selection_stays_visible_after_losing_focus() {
         let theme = crate::theme::Theme::dark();
-        let sel = theme.accent.gamma_multiply(0.35);
-        let dim = sel.gamma_multiply(0.5);
         let mut buf = "{\n  \"a\": 1,\n  \"b\": 2\n}".to_owned();
 
         let ctx = egui::Context::default();
         theme.apply(&ctx);
+        // 同上：期望色从主题读，别把常量抄进测试。
+        let sel = ctx.style_of(egui::Theme::Dark).visuals.selection.bg_fill;
+        let dim = sel.gamma_multiply(0.5);
         // 屏幕比编辑器高，底部可以点到「编辑器之外」
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 460.0));
         let (from, to, outside) = (pos2(60.0, 20.0), pos2(200.0, 20.0), pos2(260.0, 440.0));

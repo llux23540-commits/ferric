@@ -32,12 +32,25 @@ pub struct JsonTool {
     status: String,
     undo: Vec<String>,
     redo: Vec<String>,
+    /// 上一次「已记录」的正文。手动编辑靠它与 `input` 的差异发现 —— 编辑器直接
+    /// 就地改 `&mut String`，不会通知我们，只能每帧比一次。
+    baseline: String,
+    /// 最近一次手动编辑的时刻，用于把连续打字合并成一个撤销点。
+    last_edit_at: Option<std::time::Instant>,
 }
+
+/// 连续打字多久算同一个撤销步。太小则一个字一步（撤销要按几十次），
+/// 太大则一次撤销吞掉半分钟的输入。600ms 约等于「停顿一下再继续打」。
+const EDIT_COALESCE: std::time::Duration = std::time::Duration::from_millis(600);
+/// 撤销栈上限。正文可以很大（内置演示 JSON 就有 9KB），不设限等于慢性泄漏。
+const UNDO_MAX: usize = 50;
 
 impl Default for JsonTool {
     fn default() -> Self {
+        let input = demo_json();
         Self {
-            input: demo_json(),
+            baseline: input.clone(),
+            input,
             indent: Indent::Two,
             sort: false,
             wrap: true,
@@ -45,6 +58,7 @@ impl Default for JsonTool {
             status: "就绪".to_owned(),
             undo: Vec::new(),
             redo: Vec::new(),
+            last_edit_at: None,
         }
     }
 }
@@ -58,6 +72,7 @@ impl JsonTool {
                 self.input = out;
                 self.ok = true;
                 self.status = done.to_owned();
+                self.sync_baseline();
             }
             Err(e) => {
                 self.ok = false;
@@ -72,6 +87,7 @@ impl JsonTool {
         self.input = out;
         self.ok = true;
         self.status = done.to_owned();
+        self.sync_baseline();
     }
 
     /// 切换缩进并**立即**按新缩进重排（内容为合法 JSON 时）。
@@ -82,6 +98,7 @@ impl JsonTool {
                 self.undo.push(self.input.clone());
                 self.redo.clear();
                 self.input = out;
+                self.sync_baseline();
             }
             self.ok = true;
             self.status = "已按新缩进格式化".to_owned();
@@ -92,6 +109,7 @@ impl JsonTool {
         if let Some(prev) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.input, prev));
             self.status = "已撤销".to_owned();
+            self.sync_baseline();
         }
     }
 
@@ -99,7 +117,46 @@ impl JsonTool {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.input, next));
             self.status = "已重做".to_owned();
+            self.sync_baseline();
         }
+    }
+
+    /// 把「已记录」的基线对齐到当前正文，并断开打字合并。
+    ///
+    /// 每个**自己动过 `input` 的**入口都必须调它，否则下一帧的
+    /// [`Self::record_manual_edit`] 会把这次改动当成用户手打的，再记一遍 ——
+    /// 撤销一次就得点两下，撤销本身还会被反过来记成一步。
+    fn sync_baseline(&mut self) {
+        self.baseline = self.input.clone();
+        self.last_edit_at = None;
+    }
+
+    /// 把**手动编辑**也记进撤销栈。
+    ///
+    /// 撤销栈原本只由工具条操作（格式化 / 压缩 / 去转义…）压栈，用户在编辑器里
+    /// 敲完字再点「撤销」是**毫无反应**的 —— 栈是空的。而按钮既不置灰、状态条又
+    /// 被实时校验立刻覆盖，看着就像按钮坏了。
+    ///
+    /// 编辑器直接就地改 `&mut String`、不发通知，所以只能每帧比对基线。
+    /// 按时间合并成一步：否则一个字符一个撤销点，撤销一句话要按几十次。
+    fn record_manual_edit(&mut self) {
+        if self.input == self.baseline {
+            return;
+        }
+        let now = std::time::Instant::now();
+        // 不用 `is_none_or`：它 Rust 1.82 才稳定，本仓库 MSRV 是 1.80。
+        let new_step = self
+            .last_edit_at
+            .map_or(true, |t| now.duration_since(t) > EDIT_COALESCE);
+        if new_step {
+            self.undo.push(std::mem::take(&mut self.baseline));
+            self.redo.clear();
+            if self.undo.len() > UNDO_MAX {
+                self.undo.remove(0);
+            }
+        }
+        self.last_edit_at = Some(now);
+        self.baseline = self.input.clone();
     }
 
     /// 字体设置：一个图标按钮 + 一张贴着它展开的小卡片。
@@ -267,10 +324,25 @@ impl JsonTool {
                 self.run_op(json::minify, "已去除全部空白");
             }
             widgets::tb_sep(ui, theme);
-            if widgets::tb_icon_btn(ui, theme, icons::UNDO_2, false, false, "撤销").clicked() {
+            // 栈空时置灰：撤销/重做是**有没有可撤销的东西**决定的，
+            // 一直画成可点、点了又毫无反应，用户只会以为按钮坏了。
+            let (can_undo, can_redo) = (!self.undo.is_empty(), !self.redo.is_empty());
+            let undo_hit = ui
+                .add_enabled_ui(can_undo, |ui| {
+                    widgets::tb_icon_btn(ui, theme, icons::UNDO_2, false, false, "撤销")
+                })
+                .inner
+                .clicked();
+            if undo_hit {
                 self.undo();
             }
-            if widgets::tb_icon_btn(ui, theme, icons::REDO_2, false, false, "重做").clicked() {
+            let redo_hit = ui
+                .add_enabled_ui(can_redo, |ui| {
+                    widgets::tb_icon_btn(ui, theme, icons::REDO_2, false, false, "重做")
+                })
+                .inner
+                .clicked();
+            if redo_hit {
                 self.redo();
             }
             widgets::tb_sep(ui, theme);
@@ -388,6 +460,12 @@ impl Tool for JsonTool {
     fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
         let theme = shared.theme;
 
+        // 先把上一帧编辑器里的手动改动记进撤销栈。
+        // 放在这里而不是编辑器之后：`header_actions`（工具条）在本帧更早跑完，
+        // 它改过 `input` 的话已经自己压过栈并对齐了基线，这里就不会重复记账；
+        // 而编辑器的改动在本帧稍后发生，留到下一帧的这一行来收，差一帧无感。
+        self.record_manual_edit();
+
         // 实时校验语法：结果直接反映到底部状态条（顶部工具条不再放“校验”按钮）。
         if self.input.trim().is_empty() {
             self.ok = true;
@@ -474,6 +552,9 @@ impl Tool for JsonTool {
             self.indent = d.indent;
             self.sort = d.sort;
             self.wrap = d.wrap;
+            // 载入草稿不是「用户的一次编辑」，基线要跟着走，
+            // 否则切回本工具的第一帧会把整份草稿记成一步撤销。
+            self.sync_baseline();
         }
     }
 }
@@ -614,6 +695,68 @@ mod tests {
         assert!(
             copied.iter().any(|s| !s.is_empty()),
             "格式化之后拖拽选不中任何东西 —— 用户报的问题复现了"
+        );
+    }
+
+    /// 用户报的问题：**「撤销」按钮点了没反应。**
+    ///
+    /// 根因不在按钮接线（它一直调着 `undo()`），而在**撤销栈里根本没有东西**：
+    /// 压栈只发生在工具条操作（格式化 / 压缩 / 去转义…），编辑器是直接就地改
+    /// `&mut String` 的，手打的字从来没被记过。于是「敲两个字 → 点撤销」这条
+    /// 最自然的路径上，栈是空的，按钮毫无反应。
+    ///
+    /// 这条走完整链路：点进编辑区 → 打字 → 撤销，断言回到编辑前。
+    #[test]
+    fn typing_is_undoable() {
+        let mut tool = JsonTool {
+            input: "{}".to_owned(),
+            baseline: "{}".to_owned(),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+
+        // 点进编辑区拿到焦点，再敲两个字符
+        let mut frames = click_frames(pos2(120.0, 140.0));
+        frames.push(vec![Event::Text("a".to_owned())]);
+        frames.push(vec![Event::Text("b".to_owned())]);
+        // 手动改动由下一帧开头的 record_manual_edit 收账，所以要多跑一帧
+        frames.push(vec![]);
+        drive_tool(&mut tool, screen, frames);
+
+        assert_ne!(tool.input, "{}", "字没敲进编辑器，用例失效");
+        assert!(
+            !tool.undo.is_empty(),
+            "手动编辑没进撤销栈 —— 撤销按钮会毫无反应（用户报的就是这个）"
+        );
+
+        tool.undo();
+        assert_eq!(tool.input, "{}", "撤销没能回到编辑前的内容");
+        tool.redo();
+        assert_ne!(tool.input, "{}", "重做没能把编辑恢复回来");
+    }
+
+    /// 连续打字必须合并成**一个**撤销点：一个字符一步的话，
+    /// 撤销一句话要按几十次，等于没有撤销。
+    #[test]
+    fn a_burst_of_typing_is_one_undo_step() {
+        let mut tool = JsonTool {
+            input: "{}".to_owned(),
+            baseline: "{}".to_owned(),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let mut frames = click_frames(pos2(120.0, 140.0));
+        for ch in ["a", "b", "c", "d", "e"] {
+            frames.push(vec![Event::Text(ch.to_owned())]);
+        }
+        frames.push(vec![]);
+        drive_tool(&mut tool, screen, frames);
+
+        assert_eq!(
+            tool.undo.len(),
+            1,
+            "一串连打应当只记一个撤销点，实际记了 {} 个",
+            tool.undo.len()
         );
     }
 

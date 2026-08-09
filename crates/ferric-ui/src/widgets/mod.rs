@@ -502,6 +502,21 @@ pub struct SearchPaint<'a> {
     pub current: Option<usize>,
 }
 
+/// 「对面在这里多出 n 行」的缺口位置。
+///
+/// 两栏是各自独立的编辑框，行与行没有对齐关系：一侧被删掉三行，另一侧的后续内容
+/// 就整体上移三行，**对面那一栏根本看不出这里少了东西**。用户的原话是
+/// 「左侧多了一部分，右侧的数据就看不出来差异在哪」。
+///
+/// 编辑框里插不进虚拟空行（正文是可编辑的真实字符串），所以改为在**行与行的边界上
+/// 画一条缺口标记**：告诉你「这里对面还有 n 行，只是本侧没有」。
+pub struct DiffGap {
+    /// 缺口落在本侧第几行**之前**（等于本侧行下标；末尾缺口 = 行数）。
+    pub before_line: usize,
+    /// 对面在这个位置多出多少行。
+    pub lines: usize,
+}
+
 /// [`code_area_diff`] 的返回：编辑框响应 + 当前搜索匹配的纵向位置。
 pub struct DiffAreaOutput {
     pub response: Response,
@@ -523,6 +538,7 @@ pub fn code_area_diff(
     text: &mut String,
     rows: usize,
     line_styles: &[DiffLineStyle],
+    gaps: &[DiffGap],
     min_inner_h: f32,
     search: Option<&SearchPaint<'_>>,
 ) -> DiffAreaOutput {
@@ -693,6 +709,61 @@ pub fn code_area_diff(
                     logical += 1;
                 }
             }
+
+            // 缺口标记：在「对面多出 n 行」的那条行边界上画一条虚线带 + 行数。
+            //
+            // 编辑框里没法插虚拟空行（正文是可编辑的真实字符串），所以标记画在行与行
+            // 之间的边界上。没有它的话，一侧被删掉几行时另一侧只是整体上移，
+            // **对面那一栏完全看不出这里少了东西**。
+            let dash = theme.muted.gamma_multiply(0.75);
+            for gap in gaps {
+                // 找到该逻辑行首个视觉行的顶边；缺口在末尾时贴到正文底边。
+                let mut y = None;
+                let mut logical = 0usize;
+                for grow in edit.galley.rows.iter() {
+                    if logical == gap.before_line {
+                        y = Some(edit.galley_pos.y + grow.rect().min.y);
+                        break;
+                    }
+                    if grow.ends_with_newline {
+                        logical += 1;
+                    }
+                }
+                let y = y.unwrap_or_else(|| {
+                    edit.galley_pos.y + edit.galley.rows.last().map_or(0.0, |r| r.rect().max.y)
+                });
+                let (x0, x1) = (inner.left() - 6.0, inner.right() + 6.0);
+                // 先放标签，再让虚线在它之前停住 —— 两者叠在一起会糊成一团。
+                let label = format!("对面还有 {} 行", gap.lines);
+                let galley = ui.painter().layout_no_wrap(
+                    label,
+                    FontId::new(10.0, egui::FontFamily::Proportional),
+                    dash,
+                );
+                let pad = 5.0;
+                let lab_w = galley.rect.width() + pad * 2.0;
+                let dash_end = (x1 - lab_w - 4.0).max(x0);
+                // 虚线：短横一段段画，视觉上区别于「改动行的实心底色」
+                let mut x = x0;
+                while x < dash_end {
+                    let seg_end = (x + 5.0).min(dash_end);
+                    ui.painter().hline(
+                        egui::Rangef::new(x, seg_end),
+                        y,
+                        Stroke::new(1.5_f32, dash),
+                    );
+                    x += 9.0;
+                }
+                // 标签垫一块与编辑框同色的底，压住底下的文字，保证读得清
+                let lab = egui::Rect::from_min_size(
+                    egui::pos2(x1 - lab_w, y - galley.rect.height() / 2.0 - 1.0),
+                    vec2(lab_w, galley.rect.height() + 2.0),
+                );
+                ui.painter().rect_filled(lab, CornerRadius::same(3), fill);
+                ui.painter()
+                    .galley(egui::pos2(lab.left() + pad, lab.top() + 1.0), galley, dash);
+            }
+
             ui.painter().set(bg_idx, egui::Shape::Vec(shapes));
 
             // 当前搜索匹配的 y：galley 内坐标换算为「相对 Frame 外沿（= 滚动内容顶部）」。
@@ -798,6 +869,10 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, add: impl FnOnce(&mut Ui) -> R) -> R 
 }
 
 /// 工具条图标按钮（32×32，可选 active/primary，带 tooltip）。
+///
+/// 尊重 `ui.is_enabled()`：套一层 `ui.add_enabled_ui(cond, ..)` 就会画成灰色且不可点。
+/// 本控件是手绘的（`painter` 直接画，不走 `Widget`），不显式处理的话 egui 的禁用
+/// 着色对它无效 —— 会出现「看着能点、点了没反应」的按钮，比如撤销栈空时的撤销键。
 pub fn tb_icon_btn(
     ui: &mut Ui,
     theme: &Theme,
@@ -806,8 +881,14 @@ pub fn tb_icon_btn(
     primary: bool,
     tip: &str,
 ) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
-    let hovered = resp.hovered();
+    let enabled = ui.is_enabled();
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), sense);
+    let hovered = enabled && resp.hovered();
     let fill = if active {
         theme.accent_soft
     } else if hovered {
@@ -818,7 +899,9 @@ pub fn tb_icon_btn(
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     }
-    let color = if active {
+    let color = if !enabled {
+        theme.faint
+    } else if active {
         theme.accent_strong
     } else if primary {
         theme.accent
@@ -943,6 +1026,7 @@ mod tests {
                         &mut text,
                         20,
                         &styles,
+                        &[],
                         380.0,
                         None,
                     );
