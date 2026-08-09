@@ -16,7 +16,7 @@
 //! 因此装完不会出现在侧栏 —— 这一点由 `market::takes_effect_in_sidebar` 决定文案，
 //! 绝不含糊其辞。
 
-use crate::market::{self, MarketItem};
+use crate::market::{self, Listing, MarketItem};
 use crate::source::Source;
 use crate::tool::{Shared, Tool, ToolMeta};
 use crate::updater::{IDLE_BEAT, PROGRESS_BEAT};
@@ -25,7 +25,7 @@ use egui::{RichText, Ui};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 enum Msg {
-    Listed(Box<Result<Vec<MarketItem>, String>>),
+    Listed(Box<Result<Listing, String>>),
     /// 安装进度（已下载, 总字节）
     Progress(u64, u64),
     /// (slug, 结果)
@@ -69,13 +69,13 @@ impl MarketTool {
         let q = self.query.clone();
         std::thread::spawn(move || {
             // 先拉列表，再问哪些有更新；两步都失败则整体失败
-            let r = market::browse(&source, &q).map(|mut items| {
+            let r = market::browse(&source, &q).map(|mut listing| {
                 if let Ok(updatable) = market::check_updates(&source) {
-                    for it in items.iter_mut() {
+                    for it in listing.items.iter_mut() {
                         it.has_update = updatable.contains(&it.slug);
                     }
                 }
-                items
+                listing
             });
             let _ = tx.send(Msg::Listed(Box::new(r)));
             ctx.request_repaint();
@@ -126,76 +126,101 @@ impl MarketTool {
         }
     }
 
+    /// 每帧一次，**一次把队列排干**（与 `updater::poll` 同一写法）。
+    ///
+    /// 排干不是洁癖：下载线程每收到一块数据就发一条 `Progress`，`net::download_to`
+    /// 的缓冲区是 64KB，实际每次 read 往往只有几 KB —— 一个接近上限（10MB）的插件
+    /// 能堆出上千条。而重绘被 [`PROGRESS_BEAT`] 节流到 2fps，若每帧只取一条，
+    /// 队列里剩多少条就要再等多少个醒点，最后那条 `Installed` 迟到几十秒：
+    /// 界面定在某个百分比不动、按钮全禁用，看着就像装挂了。
+    ///
+    /// 中间那些进度值本来也没人看得见（只有最后一条会被画出来），丢掉毫无损失。
     fn poll(&mut self, ui: &Ui, shared: &mut Shared, source: &Source) {
         let Some(rx) = &self.rx else { return };
-        match rx.try_recv() {
-            Ok(Msg::Listed(r)) => {
-                match *r {
-                    Ok(items) => {
-                        let n = items.len();
-                        let up = items.iter().filter(|i| i.has_update).count();
-                        self.status = if up > 0 {
-                            format!("共 {n} 个插件 · {up} 个可更新")
-                        } else {
-                            format!("共 {n} 个插件")
-                        };
-                        self.ok = true;
-                        self.items = items;
-                    }
-                    Err(e) => {
-                        self.status = format!("获取失败：{e}");
-                        self.ok = false;
-                    }
-                }
-                self.loading = false;
-                self.rx = None;
-            }
-            Ok(Msg::Progress(done, total)) => {
-                self.progress = (done, total.max(1));
-                ui.ctx().request_repaint_after(PROGRESS_BEAT);
-            }
-            Ok(Msg::Installed(slug, r)) => {
-                match r {
-                    Ok(()) => {
-                        self.ok = true;
-                        self.changed = true;
-                        // 本地状态就地更新，省一次往返
-                        if let Some(it) = self.items.iter_mut().find(|i| i.slug == slug) {
-                            it.installed = Some(it.version.clone());
-                            it.has_update = false;
+        loop {
+            match rx.try_recv() {
+                Ok(Msg::Listed(r)) => {
+                    match *r {
+                        Ok(listing) => {
+                            let n = listing.items.len();
+                            let up = listing.items.iter().filter(|i| i.has_update).count();
+                            self.status = format!("共 {n} 个插件");
+                            if up > 0 {
+                                self.status += &format!(" · {up} 个可更新");
+                            }
+                            // 取不全就得说出来，别让「共 N 个」看着像全部
+                            if listing.truncated {
+                                self.status += "（还有更多未列出，用搜索缩小范围）";
+                            }
+                            self.ok = true;
+                            self.items = listing.items;
                         }
-                        if market::takes_effect_in_sidebar(source) {
-                            // 让外壳在本帧渲染结束后热加载插件 —— 这里改不了 tools
-                            shared.reload_plugins = true;
-                            self.status = format!("{slug} 已安装并生效");
-                        } else {
-                            self.status =
-                                format!("{slug} 已安装（演示数据：不会真的写入插件目录）");
+                        Err(e) => {
+                            self.status = format!("获取失败：{e}");
+                            self.ok = false;
                         }
                     }
-                    Err(e) => {
-                        self.status = format!("{slug} 安装失败：{e}");
-                        self.ok = false;
-                        self.queue.clear(); // 批量更新中途失败就停下，别连着报一串错
-                    }
+                    self.loading = false;
+                    self.rx = None;
+                    return;
                 }
-                self.installing = None;
-                self.progress = (0, 0);
-                self.rx = None;
-                self.start_next_in_queue(ui, source);
-            }
-            Err(TryRecvError::Empty) => {
-                // 还没有新消息。发消息的地方都紧跟着一次 request_repaint*，
-                // 这里只是兜底，不必频繁（此前 120ms = 拉列表全程 8fps 重绘）。
-                ui.ctx().request_repaint_after(IDLE_BEAT);
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.status = "后台任务意外中断".to_owned();
-                self.ok = false;
-                self.loading = false;
-                self.installing = None;
-                self.queue.clear();
-                self.rx = None;
+                Ok(Msg::Progress(done, total)) => {
+                    // 只更状态，接着取下一条 —— 醒点统一在队列空了之后排
+                    self.progress = (done, total.max(1));
+                }
+                Ok(Msg::Installed(slug, r)) => {
+                    match r {
+                        Ok(()) => {
+                            self.ok = true;
+                            self.changed = true;
+                            // 本地状态就地更新，省一次往返
+                            if let Some(it) = self.items.iter_mut().find(|i| i.slug == slug) {
+                                it.installed = Some(it.version.clone());
+                                it.has_update = false;
+                            }
+                            if market::takes_effect_in_sidebar(source) {
+                                // 让外壳在本帧渲染结束后热加载插件 —— 这里改不了 tools
+                                shared.reload_plugins = true;
+                                self.status = format!("{slug} 已安装并生效");
+                            } else {
+                                self.status =
+                                    format!("{slug} 已安装（演示数据：不会真的写入插件目录）");
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("{slug} 安装失败：{e}");
+                            self.ok = false;
+                            self.queue.clear(); // 批量更新中途失败就停下，别连着报一串错
+                        }
+                    }
+                    self.installing = None;
+                    self.progress = (0, 0);
+                    self.rx = None;
+                    self.start_next_in_queue(ui, source);
+                    return;
+                }
+                Err(TryRecvError::Empty) => {
+                    // 队列空了。按「界面上有没有东西在变」决定下一次醒点：
+                    // 装东西的时候有个百分比在动，其余情况（比如拉列表，纯网络往返）
+                    // 界面**什么都没变**，不该为它重绘，走慢速兜底即可 ——
+                    // 结果到达时后台线程会主动叫醒我们。
+                    ui.ctx()
+                        .request_repaint_after(if self.installing.is_some() {
+                            PROGRESS_BEAT
+                        } else {
+                            IDLE_BEAT
+                        });
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.status = "后台任务意外中断".to_owned();
+                    self.ok = false;
+                    self.loading = false;
+                    self.installing = None;
+                    self.queue.clear();
+                    self.rx = None;
+                    return;
+                }
             }
         }
     }

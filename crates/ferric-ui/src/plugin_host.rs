@@ -526,13 +526,7 @@ pub fn installed() -> Vec<Installed> {
 ///
 /// 先写临时文件再 rename，避免写到一半的 wasm 被下次启动加载。
 pub fn install(slug: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    if slug.is_empty()
-        || !slug
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!("非法的插件标识：{slug}"));
-    }
+    check_slug(slug)?;
     let dir = plugins_dir().ok_or("无法定位插件目录")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
     let final_path = dir.join(format!("{slug}.wasm"));
@@ -547,8 +541,30 @@ pub fn install(slug: &str, bytes: &[u8]) -> Result<PathBuf, String> {
 
 /// 卸载：删掉 `<slug>.wasm`。
 pub fn uninstall(slug: &str) -> Result<(), String> {
+    check_slug(slug)?;
     let dir = plugins_dir().ok_or("无法定位插件目录")?;
     std::fs::remove_file(dir.join(format!("{slug}.wasm"))).map_err(|e| format!("卸载失败：{e}"))
+}
+
+/// slug 白名单：它会被直接拼进文件名，**任何进出插件目录的路径都必须先过这里**。
+///
+/// 与 [`Manifest::validate`] 的 id 规则逐字相同，两处必须一起改 —— 装的时候按市场
+/// 给的 slug 写盘，卸的时候按 manifest 读回来的 id 找文件，规则一旦分叉就会出现
+/// 「装得上、卸不掉」。
+///
+/// 之所以卸载也查：`slug` 一路来自服务端的市场列表。今天它可达的路径上恰好有
+/// 「必须与本地已装 id 精确匹配」这道闸（见 `market::browse_server` 里的对账），
+/// 所以 `../../foo` 传不进来；但那是**别处**的不变式，删文件这件事不该把自己的
+/// 安全性寄托在调用方身上 —— 闸一旦挪走，这里就成了服务端可控的任意 `.wasm` 删除。
+fn check_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("非法的插件标识：{slug}"));
+    }
+    Ok(())
 }
 
 /// 扫描插件目录并加载全部 .wasm 插件；返回 (工具, 加载警告)。
@@ -603,4 +619,58 @@ pub fn load_all() -> (Vec<PluginTool>, Vec<String>) {
         }
     }
     (tools, warns)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// slug 直接拼进文件名，所有能跳出插件目录的形状都必须被挡在外面。
+    /// 这条对 `install` 与 `uninstall` **同时**有效 —— 只挡写、不挡删，
+    /// 等于留了一个服务端可控的任意 `.wasm` 删除口子。
+    #[test]
+    fn slug_whitelist_blocks_path_escapes() {
+        for ok in ["url-codec", "jwt_decode", "abc123", "A-1_b"] {
+            assert!(check_slug(ok).is_ok(), "{ok} 应当合法");
+        }
+        for bad in [
+            "", "..", "../evil", r"..\evil", "a/b", r"a\b", "C:evil",
+            "a.wasm", // 点号会让最终文件名变成 a.wasm.wasm，同样不接受
+            "a b", "插件", "a\0b",
+        ] {
+            assert!(check_slug(bad).is_err(), "{bad:?} 必须被拒绝");
+            assert!(uninstall(bad).is_err(), "{bad:?} 必须在删文件之前就被拒绝");
+        }
+    }
+
+    /// 与 `ferric_core::plugin::Manifest::validate` 的 id 规则必须逐字一致：
+    /// 装按市场 slug、卸按 manifest id，两边分叉就会「装得上、卸不掉」。
+    #[test]
+    fn slug_rule_matches_manifest_id_rule() {
+        let manifest_ok = |id: &str| {
+            serde_json::from_value::<Manifest>(serde_json::json!({
+                "api_version": ferric_core::plugin::API_VERSION,
+                "id": id, "name": "x"
+            }))
+            .expect("manifest 应能反序列化")
+            .validate()
+            .is_ok()
+        };
+        for id in [
+            "url-codec",
+            "jwt_decode",
+            "abc123",
+            "",
+            "..",
+            "a/b",
+            "a.wasm",
+            "插件",
+        ] {
+            assert_eq!(
+                manifest_ok(id),
+                check_slug(id).is_ok(),
+                "id {id:?} 在 manifest 与插件目录两处的判定不一致"
+            );
+        }
+    }
 }

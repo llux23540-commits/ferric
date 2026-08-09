@@ -37,6 +37,23 @@ use sha2::{Digest, Sha256};
 const CHECK_MAX: usize = 200;
 /// 单个 wasm 大小上限，与服务端 `PLUGIN_MAX_BYTES` 对齐。
 const PLUGIN_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// 市场列表一页取多少条（与服务端 `/plugins` 的 `size` 上限对齐）。
+const PAGE_SIZE: usize = 100;
+/// 最多翻几页。到不了这个数就该用搜索缩小范围了 —— 这个上限防的是
+/// 「服务端一直说还有下一页」，不是给正常目录设的天花板。
+const MAX_PAGES: usize = 5;
+
+/// 一次市场列表的结果。
+///
+/// 带 `truncated` 是因为**取不全必须说出来**：以前这里写死 `page=1&size=100`，
+/// 服务端超过 100 个插件时后面的直接消失，界面上还理直气壮写着「共 100 个插件」——
+/// 用户没有任何线索知道自己看到的是残缺的一份。
+#[derive(Debug, Clone, Default)]
+pub struct Listing {
+    pub items: Vec<MarketItem>,
+    /// 翻满本地页数上限仍未到底，后面还有没取到的
+    pub truncated: bool,
+}
 
 /// 市场里的一条插件。
 #[derive(Debug, Clone)]
@@ -59,15 +76,18 @@ pub struct MarketItem {
 
 // ============================ 数据源分发 ============================
 //
-// 下面三个 `pub fn` 只做一件事：按数据源选实现。真实分支（`*_server`）的函数体
-// 与接入演示数据之前**一字未改** —— 那条路上的每一处校验都还在原地，
-// 演示分支是完全独立的另一条实现（见 `mock` 模块头）。
+// 下面三个 `pub fn` 只做一件事：按数据源选实现。真实分支（`*_server`）上的
+// 每一处校验都在它自己的函数体里，演示分支是完全独立的另一条实现
+// （见 `mock` 模块头）—— 两条路不共用任何校验代码，演示也就无从削弱它。
 
 /// 拉市场列表（真服务端或演示数据）。
-pub fn browse(source: &Source, query: &str) -> Result<Vec<MarketItem>, String> {
+pub fn browse(source: &Source, query: &str) -> Result<Listing, String> {
     match source {
         Source::Server(p) => browse_server(p, query),
-        Source::Mock => Ok(crate::mock::browse(query)),
+        Source::Mock => Ok(Listing {
+            items: crate::mock::browse(query),
+            truncated: false, // 演示目录就那几条，永远取得全
+        }),
     }
 }
 
@@ -123,48 +143,73 @@ pub fn takes_effect_in_sidebar(source: &Source) -> bool {
 // ============================ 真服务端实现 ============================
 
 /// 拉市场列表，并与本地已装插件对账。
-fn browse_server(profile: &ServerProfile, query: &str) -> Result<Vec<MarketItem>, String> {
+///
+/// 逐页取到底（不满一页即到底），而不是只取第一页 —— 见 [`Listing`]。
+/// 两个停下来的理由要分清楚：**不满一页**是正常到底；**翻满 [`MAX_PAGES`]**
+/// 是我们主动停手，那时 `truncated` 必须置位，让界面照实说。
+fn browse_server(profile: &ServerProfile, query: &str) -> Result<Listing, String> {
     // 只要与本宿主 api_version 完全相同的插件 —— 宿主侧是严格相等校验，
     // 装了别的版本也加载不了，不如根本不展示。
     let api_version = ferric_core::plugin::API_VERSION;
-    let path = format!(
-        "/plugins?query={}&api_version={api_version}&page=1&size=100",
-        urlencode(query)
-    );
-    let v = net::call(profile, "GET", &path, None).map_err(|e| e.to_string())?;
-    let list = v
-        .get("list")
-        .and_then(|x| x.as_array())
-        .ok_or("响应缺少 list")?;
-
+    let q = urlencode(query);
+    // 每调一次都要把插件目录里的 wasm 全部加载一遍，翻页期间只做一次
     let installed = plugin_host::installed();
-    let mut out = Vec::new();
-    for it in list {
-        let s = |k: &str| it.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned();
-        let n = |k: &str| it.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
-        let slug = s("slug");
-        if slug.is_empty() {
-            continue;
+    let mut out: Vec<MarketItem> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut truncated = false;
+
+    for page in 1..=MAX_PAGES {
+        let path =
+            format!("/plugins?query={q}&api_version={api_version}&page={page}&size={PAGE_SIZE}");
+        let v = net::call(profile, "GET", &path, None).map_err(|e| e.to_string())?;
+        let list = v
+            .get("list")
+            .and_then(|x| x.as_array())
+            .ok_or("响应缺少 list")?;
+        let page_len = list.len();
+        let before = out.len();
+
+        for it in list {
+            let s = |k: &str| it.get(k).and_then(|x| x.as_str()).unwrap_or("").to_owned();
+            let n = |k: &str| it.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+            let slug = s("slug");
+            if slug.is_empty() || !seen.insert(slug.clone()) {
+                continue; // 空 slug、以及跨页重复的条目都跳过
+            }
+            let local = installed
+                .iter()
+                .find(|i| i.slug == slug)
+                .map(|i| i.version.clone());
+            out.push(MarketItem {
+                has_update: false, // 由 check_updates 填，本地不猜版本大小
+                installed: local,
+                version: s("version"),
+                name: s("name"),
+                desc: s("desc"),
+                api_version: n("api_version"),
+                size: n("size"),
+                sha256: s("sha256"),
+                signature: s("signature"),
+                downloads: n("downloads"),
+                slug,
+            });
         }
-        let local = installed
-            .iter()
-            .find(|i| i.slug == slug)
-            .map(|i| i.version.clone());
-        out.push(MarketItem {
-            has_update: false, // 由 check_updates 填，本地不猜版本大小
-            installed: local,
-            version: s("version"),
-            name: s("name"),
-            desc: s("desc"),
-            api_version: n("api_version"),
-            size: n("size"),
-            sha256: s("sha256"),
-            signature: s("signature"),
-            downloads: n("downloads"),
-            slug,
-        });
+
+        if page_len < PAGE_SIZE {
+            break; // 不满一页 = 到底了
+        }
+        if out.len() == before {
+            // 满满一页却一条新的都没有 —— 服务端没在认 page 参数，再翻还是这一批
+            break;
+        }
+        if page == MAX_PAGES {
+            truncated = true;
+        }
     }
-    Ok(out)
+    Ok(Listing {
+        items: out,
+        truncated,
+    })
 }
 
 /// 问服务端：本地这些插件有没有新版。
@@ -317,6 +362,148 @@ mod tests {
         assert_eq!(urlencode("中"), "%E4%B8%AD");
     }
 
+    /// 起一个只会答 `/plugins` 的假服务端，用来验分页。
+    ///
+    /// `total` 条插件、每页 [`PAGE_SIZE`] 条；`honor_page=false` 表示服务端
+    /// **根本没实现 page 参数**（问哪页都回第一页）—— 那种服务端下客户端必须
+    /// 自己停下来，否则就是死循环刷同一批数据。
+    ///
+    /// 返回 (base_url, 公钥 hex, 收到的请求数)。
+    fn paged_server(
+        total: usize,
+        honor_page: bool,
+    ) -> (
+        String,
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use libsm::sm2::encrypt::DecryptCtx;
+        use libsm::sm2::signature::SigCtx;
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let ctx = SigCtx::new();
+        let (pk, sk) = ctx.new_keypair().unwrap();
+        let pk_hex = hex::encode(ctx.serialize_pubkey(&pk, false).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits2 = hits.clone();
+
+        std::thread::spawn(move || {
+            // 多留一个：客户端多问一次也接得住，正好能断言它**没有**多问
+            for stream in listener.incoming().take(MAX_PAGES + 2) {
+                let Ok(mut s) = stream else { continue };
+                hits2.fetch_add(1, Ordering::SeqCst);
+                let mut reader = BufReader::new(s.try_clone().unwrap());
+                let mut req_line = String::new();
+                let _ = reader.read_line(&mut req_line);
+                let mut key_hdr = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("x-enc-key:") {
+                        key_hdr = v.trim().to_owned();
+                    }
+                }
+                let page: usize = req_line
+                    .split("page=")
+                    .nth(1)
+                    .and_then(|r| r.split(['&', ' ']).next())
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(1);
+                let page = if honor_page { page } else { 1 };
+
+                let start = (page - 1) * PAGE_SIZE;
+                let list: Vec<serde_json::Value> = (start..total.min(start + PAGE_SIZE))
+                    .map(|i| {
+                        serde_json::json!({
+                            "slug": format!("p{i:04}"), "name": format!("插件 {i}"),
+                            "desc": "", "version": "1.0.0",
+                            "api_version": ferric_core::plugin::API_VERSION,
+                            "size": 1024, "sha256": "aa".repeat(32),
+                            "signature": "3045", "downloads": 0
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "list": list }).to_string();
+
+                let ct = hex::decode(&key_hdr).unwrap();
+                let session = DecryptCtx::new(ct.len() - 97, sk.clone())
+                    .decrypt(&ct)
+                    .unwrap();
+                let mut iv = [0u8; 16];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut iv);
+                let out = libsm::sm4::Cipher::new(&session, libsm::sm4::Mode::Gcm)
+                    .unwrap()
+                    .encrypt(&[], body.as_bytes(), &iv)
+                    .unwrap();
+                let (d, t) = out.split_at(out.len() - 16);
+                let env = serde_json::json!({"d": hex::encode(d), "t": hex::encode(t)}).to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Enc: {alg}\r\nX-Enc-Iv: {iv}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{env}",
+                    alg = net::ALG,
+                    iv = hex::encode(iv),
+                    len = env.len(),
+                );
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        (format!("http://{addr}"), pk_hex, hits)
+    }
+
+    fn profile_of(url: String, pubkey: String) -> ServerProfile {
+        ServerProfile {
+            base_url: url,
+            pubkey,
+        }
+    }
+
+    /// 超过一页的目录必须**全部取到**：以前写死 `page=1`，第 101 条起直接消失，
+    /// 界面上还写着「共 100 个插件」，用户没有任何线索知道自己看的是残缺的。
+    #[test]
+    fn browse_walks_every_page_until_a_short_one() {
+        let (url, pk, hits) = paged_server(PAGE_SIZE * 2 + 50, true);
+        let r = browse_server(&profile_of(url, pk), "").expect("拉列表失败");
+        assert_eq!(r.items.len(), PAGE_SIZE * 2 + 50, "没取全");
+        assert!(!r.truncated, "取到底了就不该说还有更多");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "不满一页就该停，不该再多问一次"
+        );
+        // 顺带确认没有把跨页条目搞乱
+        assert_eq!(r.items[0].slug, "p0000");
+        assert_eq!(r.items[PAGE_SIZE].slug, format!("p{:04}", PAGE_SIZE));
+    }
+
+    /// 翻满上限还没到底时**必须置位 `truncated`** —— 悄悄截断比少几条更糟。
+    #[test]
+    fn browse_admits_when_it_stops_early() {
+        let (url, pk, _) = paged_server(PAGE_SIZE * MAX_PAGES + 10, true);
+        let r = browse_server(&profile_of(url, pk), "").expect("拉列表失败");
+        assert_eq!(r.items.len(), PAGE_SIZE * MAX_PAGES);
+        assert!(r.truncated, "主动停手却没告诉界面");
+    }
+
+    /// 服务端不认 page 参数时必须自己停下来，不能一直刷同一批。
+    #[test]
+    fn browse_stops_when_the_server_ignores_paging() {
+        let (url, pk, hits) = paged_server(PAGE_SIZE, false);
+        let r = browse_server(&profile_of(url, pk), "").expect("拉列表失败");
+        assert_eq!(r.items.len(), PAGE_SIZE, "重复条目必须被去重");
+        assert!(!r.truncated);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "问到第二页发现全是老面孔就该停，不该翻满上限"
+        );
+    }
+
     /// 造一条元数据齐全的市场条目（签名字段留给各用例自己填）。
     fn item(sha: &str, size: i64, signature: &str) -> MarketItem {
         MarketItem {
@@ -419,9 +606,18 @@ mod e2e {
         // 从干净状态开始，免得上一轮的残留干扰断言
         let _ = plugin_host::uninstall("url-codec");
 
-        let items = browse_server(&profile, "").expect("拉市场列表失败");
-        eprintln!("市场共 {} 个插件", items.len());
-        let it = items
+        let listing = browse_server(&profile, "").expect("拉市场列表失败");
+        eprintln!(
+            "市场共 {} 个插件{}",
+            listing.items.len(),
+            if listing.truncated {
+                "（翻页到上限仍未取完）"
+            } else {
+                ""
+            }
+        );
+        let it = listing
+            .items
             .iter()
             .find(|i| i.slug == "url-codec")
             .expect("市场里应有 url-codec");

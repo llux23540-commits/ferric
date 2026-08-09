@@ -481,43 +481,40 @@ fn download_server(
     ));
 
     let total = info.size as u64;
-    {
-        // create_new：已存在的文件或符号链接直接失败，不跟随
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file)
-            .map_err(|e| format!("创建临时文件失败：{e}"))?;
-        let mut hasher = Sha256::new();
-        let mut done: u64 = 0;
-        let mut last_report = std::time::Instant::now();
-        net::download_to(profile, path, total, &mut |chunk| {
-            hasher.update(chunk);
-            out.write_all(chunk)?;
-            done += chunk.len() as u64;
-            // 进度节流，别把 channel 塞爆
-            if last_report.elapsed() >= std::time::Duration::from_millis(120) {
-                on_progress(done, total);
-                last_report = std::time::Instant::now();
-            }
-            Ok(())
-        })
-        .map_err(|e: NetErr| e.to_string())?;
-        out.flush()
-            .and_then(|_| out.sync_all())
-            .map_err(|e| format!("落盘失败：{e}"))?;
-        on_progress(done, total);
-    }
+
+    // 任何一条失败路径都要把这个私有目录带走。半截安装包留在盘上本身就是个
+    // 可被替换的靶子 —— 原先只有「校验 / 验签不通过」会清，**网络中断那条直接
+    // 返回**，几十 MB 的残包要一直躺到下次启动 `cleanup_stale` 才被收走。
+    let fail = |dir: &Path, msg: String| -> String {
+        let _ = std::fs::remove_dir_all(dir);
+        msg
+    };
+
+    let done = match stream_to_file(profile, path, &file, total, on_progress) {
+        Ok(d) => d,
+        Err(e) => return Err(fail(&dir, e)),
+    };
+    on_progress(done, total);
 
     // **从磁盘重新读一遍算哈希** —— 要校验的必须是「将要被执行的那串字节」，
     // 而不是内存里的缓冲区。顺带能抓住写入期间的竞态与磁盘损坏。
-    let mut f = open_locked(&file)?;
+    let mut f = match open_locked(&file) {
+        Ok(f) => f,
+        Err(e) => return Err(fail(&dir, e)),
+    };
     let mut hasher = Sha256::new();
     let mut head = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut size: u64 = 0;
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("回读失败：{e}"))?;
+        let n = match f.read(&mut buf) {
+            Ok(n) => n,
+            // 先关句柄再删目录，否则 Windows 上删不掉（同上）
+            Err(e) => {
+                drop(f);
+                return Err(fail(&dir, format!("回读失败：{e}")));
+            }
+        };
         if n == 0 {
             break;
         }
@@ -528,11 +525,12 @@ fn download_server(
         size += n as u64;
     }
     let got = hex::encode(hasher.finalize());
+    // 读完就关。下面每一条失败路径都要 `remove_dir_all`，而在 Windows 上，
+    // 我们自己这个不许 DELETE 共享的句柄会把删除挡回来 —— 句柄不放，
+    // 「失败即清理」就是句空话。往后的校验都只看已经读进内存的 got/size/head，
+    // 不再碰这个文件，所以关掉不损失任何东西。
+    drop(f);
 
-    let fail = |dir: &Path, msg: String| -> String {
-        let _ = std::fs::remove_dir_all(dir);
-        msg
-    };
     if size != total {
         return Err(fail(
             &dir,
@@ -568,12 +566,58 @@ fn download_server(
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700));
     }
-    drop(f);
     Ok(file)
 }
 
-/// 以拒绝写共享的方式打开（Windows）—— 这是关闭「校验完到执行前被替换」这个
-/// TOCTOU 窗口的唯一有效手段，其余做法只是缩短窗口。
+/// 边下边写，返回落盘字节数。
+///
+/// 单独一个函数（而不是调用处的一个块）是为了让文件句柄在返回时**必然析构**：
+/// 调用方在失败路径上紧接着要 `remove_dir_all` 整个暂存目录，而 Windows 上
+/// 目录里还有打开的句柄时删不掉 —— 那样「失败即清理」就成了静默失效。
+///
+/// 这里**刻意不做**流式哈希：要校验的必须是「将要被执行的那串字节」，
+/// 由调用方从磁盘重新读一遍算。原先这里挂着一个从不 finalize 的 Sha256，
+/// 等于把几十 MB 白算了一遍。
+fn stream_to_file(
+    profile: &ServerProfile,
+    path: &str,
+    file: &Path,
+    total: u64,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<u64, String> {
+    // create_new：已存在的文件或符号链接直接失败，不跟随
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)
+        .map_err(|e| format!("创建临时文件失败：{e}"))?;
+    let mut done: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    net::download_to(profile, path, total, &mut |chunk| {
+        out.write_all(chunk)?;
+        done += chunk.len() as u64;
+        // 进度节流，别把 channel 塞爆
+        if last_report.elapsed() >= std::time::Duration::from_millis(120) {
+            on_progress(done, total);
+            last_report = std::time::Instant::now();
+        }
+        Ok(())
+    })
+    .map_err(|e: NetErr| e.to_string())?;
+    out.flush()
+        .and_then(|_| out.sync_all())
+        .map_err(|e| format!("落盘失败：{e}"))?;
+    Ok(done)
+}
+
+/// 以拒绝写共享的方式打开（Windows）：回读校验期间没有第二个进程能往里写，
+/// 「读到的字节」与「算出的哈希」因此必然是同一份。
+///
+/// ⚠️ 它**只覆盖回读这一段**。句柄一放，「已就绪 → 用户点安装」之间那个更长的
+/// 窗口就没人守了 —— 这里不硬扛，是因为守它要把句柄一路攥到 `launch`，而
+/// Windows 加载可执行映像时要求文件允许 DELETE 共享，攥着句柄很可能直接让
+/// 安装程序起不来。真正兜住那一段的是**离线签名 + 私有随机目录**：
+/// 目录名不可预测，攻击者连该往哪写都不知道。
 fn open_locked(path: &Path) -> Result<std::fs::File, String> {
     #[cfg(windows)]
     {
@@ -751,6 +795,26 @@ mod tests {
             assert!(["windows", "macos", "linux"].contains(&p));
             assert!(["x86_64", "aarch64"].contains(&a));
         }
+    }
+
+    /// 暂存目录必须**每次都是新的随机名**，且启动清理能把残包连目录一起带走。
+    ///
+    /// 可预测的路径等于邀请符号链接攻击；而下载中断后留在盘上的半截安装包
+    /// 本身就是个可被替换的靶子 —— 两件事都靠这一对函数兜住。
+    #[test]
+    fn fresh_update_dir_is_unpredictable_and_cleanable() {
+        let Ok(a) = fresh_update_dir() else {
+            eprintln!("跳过：定位不到缓存目录");
+            return;
+        };
+        let b = fresh_update_dir().expect("第二次也该建得出来");
+        assert_ne!(a, b, "两次必须落在不同目录");
+        assert!(a.is_dir() && b.is_dir());
+
+        std::fs::write(a.join("half-downloaded.exe"), b"MZ").expect("写残包");
+        cleanup_stale();
+        assert!(!a.exists(), "启动清理必须把残包连目录一起带走");
+        assert!(!b.exists());
     }
 
     #[test]
