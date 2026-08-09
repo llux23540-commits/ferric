@@ -211,7 +211,10 @@ fn btn(ui: &mut Ui, theme: &Theme, icon: Option<char>, text: &str, v: Variant) -
 
 /// 图标按钮（正方形，muted → hover 变 fg + border 底）。
 pub fn icon_btn(ui: &mut Ui, theme: &Theme, ch: char, size: f32) -> Response {
-    let side = 38.0;
+    // 方块跟着字号走，别写死 38：侧栏底部那排按图标 18px 算出来是 30，
+    // 比原来的 38 少占一圈，底部整体轻了一档；而 24px 图标处（对比工具的关闭）
+    // 算出来仍是 40，与原尺寸基本一致，不会改动那边的观感。
+    let side = (size * 1.65).max(26.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
     if resp.hovered() {
         ui.painter()

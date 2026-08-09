@@ -181,7 +181,13 @@ impl Tool for TimestampTool {
         let now_ms = if self.running {
             let v = timestamp::now(Precision::Millis);
             if awake && !self.idle {
-                let wait = 1000 - (v % 1000) + 5;
+                // 别申请**比一个定时器 tick 还短**的延迟。Windows 的定时器粒度约
+                // 15.6ms：请求 6ms 不会在 6ms 后醒，而是下一个 tick 才醒 —— 那时
+                // 秒边界往往还没到，于是又算出一个更小的 wait 再武装，就这么自旋
+                // 到跨过边界为止。实测每秒因此画 12–19 帧（设计意图是 1 帧），
+                // 每一帧都是一次整窗软件光栅化。下限取 20ms：至多多醒一次，
+                // 且那一次必定落在边界之后。
+                let wait = (1000 - (v % 1000) + 5).max(20);
                 ui.ctx()
                     .request_repaint_after(Duration::from_millis(wait as u64));
             }

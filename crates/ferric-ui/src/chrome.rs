@@ -8,7 +8,16 @@ use egui::{
     ViewportCommand,
 };
 
-pub const TITLE_BAR_HEIGHT: f32 = 46.0;
+/// 标题栏高度。
+///
+/// 从 46 收到 36：这条栏里只有左端一个应用名和右端三个窗口按钮，中间整段是死区，
+/// 高度越大死区越显眼。36 仍然容得下 24px 的按钮块并留出上下呼吸，
+/// 同时把内容区往上让了 10px。
+pub const TITLE_BAR_HEIGHT: f32 = 36.0;
+
+/// 窗口按钮的视觉块尺寸。**刻意比标题栏矮**：整条撑满的矩形（原先 44×46）
+/// 悬停时是一大块生硬的方色带，而缩成带圆角的小块之后，悬停反馈看着像个按钮。
+const WIN_BTN: (f32, f32) = (28.0, 24.0);
 
 const CLOSE_HOVER: Color32 = Color32::from_rgb(0xe5, 0x48, 0x4d);
 
@@ -66,12 +75,13 @@ fn toggle_maximize(ctx: &egui::Context) {
 }
 
 fn win_btn(ui: &mut Ui, theme: &Theme, glyph: char, danger: bool) -> egui::Response {
-    let size = vec2(44.0, TITLE_BAR_HEIGHT);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(WIN_BTN.0, WIN_BTN.1), Sense::click());
     let hovered = resp.hovered();
     if hovered {
         let fill = if danger { CLOSE_HOVER } else { theme.border };
-        ui.painter().rect_filled(rect, 0.0, fill);
+        // 圆角与侧栏导航项、图标按钮同一族（7~9），别在这条栏里另起一套直角
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(7), fill);
     }
     let color = if danger && hovered {
         Color32::WHITE
@@ -84,7 +94,7 @@ fn win_btn(ui: &mut Ui, theme: &Theme, glyph: char, danger: bool) -> egui::Respo
         rect.center(),
         Align2::CENTER_CENTER,
         glyph,
-        FontId::new(14.0, icons::family()),
+        FontId::new(12.0, icons::family()),
         color,
     );
     resp
@@ -110,19 +120,22 @@ pub fn title_bar_content(ui: &mut Ui, theme: &Theme) {
         toggle_maximize(&ctx);
     }
 
-    // 应用名（Plus Jakarta Sans SemiBold）
+    // 应用名（Plus Jakarta Sans SemiBold）。字号压到 12 且用更淡的 muted：
+    // 这里是窗口标识，不是内容标题 —— 它越安静，中间那段空白越不像「缺了点什么」。
     ui.painter().text(
-        rect.left_center() + vec2(16.0, 0.0),
+        rect.left_center() + vec2(14.0, 0.0),
         Align2::LEFT_CENTER,
         "Ferric",
-        FontId::new(13.0, FontFamily::Name(UI_SEMIBOLD.into())),
-        theme.fg_soft,
+        FontId::new(12.0, FontFamily::Name(UI_SEMIBOLD.into())),
+        theme.muted,
     );
 
-    // 右侧窗口控制按钮
+    // 右侧窗口控制按钮：成组、贴右边留 6px，彼此 2px —— 三块等距铺开时
+    // 看着像三个孤立的方块，收拢成一组才像窗口控件。
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.spacing_mut().item_spacing.x = 1.0;
+            ui.add_space(8.0);
             if win_btn(ui, theme, icons::X, true).clicked() {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }

@@ -157,6 +157,34 @@ fn settings_window_chrome(root_ui: &mut egui::Ui, theme: &Theme, open: &mut bool
         });
 }
 
+/// 设置窗左侧的分类。
+///
+/// 设置从「一长列纵向堆叠」改成「左分类 + 右内容」，与主界面同一套结构：
+/// 六个区块挤在一列里时，改个字号要先滚过渲染后端和更新设置，找东西全靠翻；
+/// 分好类之后每屏只呈现一类，标签与控件也能并排放下，不必再挤成两行。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Appearance,
+    Font,
+    Renderer,
+    Update,
+    Data,
+    About,
+}
+
+impl SettingsTab {
+    /// 分类栏的顺序与图标。放在一处，免得导航和内容分发两边各写一份而走散。
+    const ALL: [(SettingsTab, char, &'static str); 6] = [
+        (SettingsTab::Appearance, icons::SUN, "外观"),
+        (SettingsTab::Font, icons::TYPE_ICON, "字体"),
+        (SettingsTab::Renderer, icons::SQUARE, "渲染"),
+        (SettingsTab::Update, icons::REFRESH_CW, "更新"),
+        (SettingsTab::Data, icons::DATABASE, "数据"),
+        (SettingsTab::About, icons::INFO, "关于"),
+    ];
+}
+
 pub struct FerricApp {
     tools: Vec<Box<dyn Tool>>,
     active: usize,
@@ -204,6 +232,10 @@ pub struct FerricApp {
     last_moved_at: Option<std::time::Instant>,
     /// 当前表面是否处于「拖动期免等垂直同步」模式（避免每帧重复重配表面）。
     fast_present: bool,
+    /// 上一帧开始的时刻，仅用于软渲染下的帧率上限（见 [`FerricApp::throttle_soft_render`]）。
+    last_frame_at: Option<std::time::Instant>,
+    /// 设置窗当前选中的分类（不持久化：每次打开都从「外观」进）。
+    settings_tab: SettingsTab,
     /// 本次运行实际拿到的图形适配器描述（「后端 · 显卡名」），设置页展示。
     /// None = 非 wgpu 渲染路径（理论上不会发生，防御性处理）。
     gpu_desc: Option<String>,
@@ -429,6 +461,8 @@ impl FerricApp {
             last_outer_pos: None,
             last_moved_at: None,
             fast_present: false,
+            last_frame_at: None,
+            settings_tab: SettingsTab::default(),
             gpu_desc,
             gpu_software,
             slow_render_retry: None,
@@ -560,13 +594,71 @@ impl FerricApp {
     /// feathering 存在 [`egui::Options`] 里而非 `Style`，主题重铺（[`Theme::apply`]）
     /// 不会碰它，严格说设一次就够；仍放在这里，是让软渲染的三项适配同进同出、
     /// 切深浅色重铺样式时也不漏项。
+    /// 还要把 `tooltip_delay` 清零 —— 这一条是**滚动卡顿的真凶**，且原因不在本仓库。
+    ///
+    /// egui 的 `containers/tooltip.rs` 里有这么一段：滚动后的 `tooltip_delay`（默认
+    /// 0.5s）内不弹提示，并且**每帧**按「还差多久」申请一次重绘：
+    /// `request_repaint_after_secs(tooltip_delay - time_since_last_scroll)`。
+    /// 差值趋近 0 时，申请的延迟就小于一个定时器 tick（Windows 约 15.6ms），
+    /// 于是立刻醒 → 算出更小的值 → 再醒，**自旋到延迟走完为止**。
+    /// 实测：光标停在带提示的控件上滚一下，帧率飙到 **1500+ fps**，
+    /// 40 格滚轮吃掉 **3.4 个核**（4 核机器），关窗还要 10 秒才排空。
+    ///
+    /// 置 0 后该分支（`time_since_last_scroll < tooltip_delay`）永不成立，自旋消失；
+    /// 代价只是滚动后提示不再压 0.5s 才出现。有 GPU 时这点浪费看不出来，
+    /// 靠 CPU 画整窗的机器上它是压垮性的，所以只在 `gpu_software` 路径上关。
     fn apply_soft_render_compat(ctx: &egui::Context) {
         ctx.all_styles_mut(|s| {
             s.visuals.window_shadow = egui::epaint::Shadow::NONE;
             s.visuals.popup_shadow = egui::epaint::Shadow::NONE;
             s.animation_time = 0.0;
+            s.interaction.tooltip_delay = 0.0;
         });
         ctx.options_mut(|o| o.tessellation_options.feathering = false);
+    }
+
+    /// 软渲染下给帧率封顶（约 30fps）。**只在 `gpu_software` 时生效。**
+    ///
+    /// 为什么需要：egui 只要输入事件队列非空就要求「立即重绘」
+    /// （`InputState::wants_repaint_after` 里 `!events.is_empty() → Duration::ZERO`），
+    /// 而滚轮一拨就是一连串事件。实测滚动期间应用跑到 **500–1500 fps** ——
+    /// 可这台机器靠 CPU 光栅化，实际只显示得出约 25–30fps。**多出来的 20–60 倍帧
+    /// 一帧也看不见**，却照样要排版、三角化、提交，把 CPU 和提交队列全占满：
+    /// 手停下来之后画面还要追好几秒，关窗时 wgpu 等最后一次提交要 10s 以上直至超时。
+    ///
+    /// 这里的 sleep 是**有意的背压**：让事件循环慢下来，帧率降到显示得出的量级。
+    /// 代价是单帧输入延迟最多 +30ms —— 远小于它消掉的那几秒追帧。
+    /// 有 GPU 时整个函数是空操作，一帧也不会被压。
+    ///
+    /// 拖动窗口时**同样要封顶**（曾经试过豁免，见 [`Self::present_hygiene`]）：
+    /// 实测豁免后拖动期间冲到 1193 fps，而屏幕只显示得出约 30fps ——
+    /// 多出来的帧全堆在提交队列里，于是**显示出来的那一帧是很多帧以前渲染的**，
+    /// 对应的是旧窗口位置。拖影正是这么来的，放开帧率只会让它更重。
+    /// # 移动窗口时必须整个跳过
+    ///
+    /// 这里的节流是 `thread::sleep`，而它睡在 **UI 线程**上 —— 消息泵也停在那儿。
+    /// 拖动窗口走的是系统的模态移动循环，跑在同一个线程上：每帧睡 30ms，
+    /// 窗框就得等 30ms 才能挪一步，看着就是「跟不上手 / 拖影」。
+    ///
+    /// 实测（同样 90 步程序化移动，`SetWindowPos` 会同步等目标线程的消息泵）：
+    /// 上限 30ms → 移动耗时 2829ms；上限 100ms → **8924ms**，整整慢 3 倍。
+    /// 压得越狠，窗口移动本身越卡 —— 与省 CPU 的初衷正好相反。
+    ///
+    /// 跳过后并不会回到之前 1193fps 的洪水：那个洪水的来源是
+    /// [`Self::present_hygiene`] 里「移动期间每帧 `request_repaint`」，已经去掉了。
+    /// 现在移动期间的帧只由真实输入事件驱动，数量本来就不多。
+    fn throttle_soft_render(&mut self) {
+        if !self.gpu_software || self.fast_present {
+            return;
+        }
+        const MIN_FRAME: std::time::Duration = std::time::Duration::from_millis(30);
+        if let Some(prev) = self.last_frame_at {
+            let dt = prev.elapsed();
+            if dt < MIN_FRAME {
+                std::thread::sleep(MIN_FRAME - dt);
+            }
+        }
+        self.last_frame_at = Some(std::time::Instant::now());
     }
 
     /// 全局界面缩放。
@@ -636,8 +728,8 @@ impl FerricApp {
             .frame(Frame::NONE.inner_margin(Margin {
                 left: 2,
                 right: 2,
-                top: 10,
-                bottom: 4,
+                top: 6,
+                bottom: 2,
             }))
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -646,15 +738,15 @@ impl FerricApp {
                     ui.max_rect().top(),
                     Stroke::new(1.0_f32, theme.border),
                 );
-                ui.add_space(10.0);
-                // 品牌一行
+                ui.add_space(7.0);
+                // 品牌一行（logo + 名称 + 版本同排，见 `brand`）
                 ui.horizontal(|ui| {
                     self.brand(ui);
                 });
-                ui.add_space(10.0);
-                // 图标一行（主题 / 关于 / 设置），紧凑左对齐，避免与品牌重叠
+                ui.add_space(5.0);
+                // 图标一行（主题 / 关于 / 设置 / 语言），紧凑左对齐
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     let tmoon = if self.dark { icons::SUN } else { icons::MOON };
                     let resp = widgets::icon_btn(ui, &theme, tmoon, 18.0)
                         .on_hover_text("切换深浅色（设置中可改回跟随系统）");
@@ -683,8 +775,11 @@ impl FerricApp {
                         self.settings_raise = self.settings_open;
                         self.settings_open = true;
                     }
-                    // 语言切换（显示当前语言，点击切换 中/EN）
-                    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+                    // 语言切换（显示当前语言，点击切换 中/EN）。
+                    // 尺寸与 `widgets::icon_btn(.., 18.0)` 算出来的方块保持一致，
+                    // 否则这一排四个按钮会有一个明显更大。
+                    let side = 18.0_f32 * 1.65;
+                    let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::click());
                     if resp.hovered() {
                         ui.painter()
                             .rect_filled(rect, CornerRadius::same(9), theme.border);
@@ -750,35 +845,41 @@ impl FerricApp {
         m.name.to_lowercase().contains(filter) || m.keywords.iter().any(|k| k.contains(filter))
     }
 
+    /// 侧栏底部的品牌行：logo + 名称 + 版本，**排成一行**。
+    ///
+    /// 原先是 34px 的大方块配上「Ferric / v0.2.14 · rust」两行堆叠，连着下面那排
+    /// 图标按钮，侧栏底部占掉一百多像素 —— 视觉重量全压在左下角，而这块信息
+    /// 用户一天看不了一次。压成一行后底部从 ~106px 收到 ~72px。
+    ///
+    /// 版本后面那个「· rust」也去掉了：用什么语言写的是作者的自我介绍，不是用户
+    /// 需要的信息；真要查版本，ℹ 按钮给的是带 build 号的完整串。
     fn brand(&self, ui: &mut egui::Ui) {
         let theme = self.shared.theme;
         // 渐变方块 logo（用 accent 填色近似渐变）
-        let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(9), theme.accent);
+            .rect_filled(rect, CornerRadius::same(7), theme.accent);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             icons::BOX,
-            FontId::new(18.0, icons::family()),
+            FontId::new(13.0, icons::family()),
             Color32::WHITE,
         );
-        ui.add_space(9.0);
-        ui.vertical(|ui| {
-            ui.add_space(1.0);
-            ui.label(
-                RichText::new("Ferric")
-                    .family(FontFamily::Name(UI_BOLD.into()))
-                    .size(16.0)
-                    .color(theme.fg),
-            );
-            ui.label(
-                RichText::new(concat!("v", env!("FERRIC_VERSION"), " · rust"))
-                    .family(FontFamily::Monospace)
-                    .size(10.0)
-                    .color(theme.faint),
-            );
-        });
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Ferric")
+                .family(FontFamily::Name(UI_BOLD.into()))
+                .size(13.0)
+                .color(theme.fg),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(concat!("v", env!("FERRIC_VERSION")))
+                .family(FontFamily::Monospace)
+                .size(10.5)
+                .color(theme.faint),
+        );
     }
 
     fn group_label(&self, ui: &mut egui::Ui, group: &str) {
@@ -1144,12 +1245,19 @@ impl FerricApp {
             self.raise = SettingsRaise::default();
             return;
         }
-        // ARM 虚拟机 / WARP / llvmpipe 这类软件渲染环境下，多视口（第二个系统
-        // 窗口）意味着第二条 wgpu surface —— 软件适配器经常建第二条就失败或渲染
-        // 空白，表现就是「设置窗打不开 / 一片空白」。这类环境回退为应用内浮层：
-        // 同一份 settings_body，功能不缺项，只是拖不出主窗。
-        // FERRIC_EMBEDDED_SETTINGS=1 可在任何环境强制走回退（排障用）。
-        if self.gpu_software || std::env::var_os("FERRIC_EMBEDDED_SETTINGS").is_some() {
+        // 设置窗**一律**开真实系统窗口 —— 与主界面同一层级，能拖到屏幕任何位置。
+        //
+        // 这里曾经按 `gpu_software` 一刀切回退成应用内浮层，理由是「软件适配器
+        // 建第二条 wgpu surface 常常失败或渲染空白」。**这个判断过于宽泛**：
+        // 在 ARM 虚拟机 + WARP（DX12 · Microsoft Basic Render Driver，货真价实的
+        // 软件光栅化）上实测，第二个视口建得出来、内容完整渲染、进程稳定 ——
+        // 却因为这条规则永远拿不到独立窗口。「软件渲染」不等于「开不了第二条 surface」，
+        // 前者按适配器类别判定，后者取决于具体驱动，只有试过才知道。
+        //
+        // 真遇到建不出来的环境（历史上的嫌疑是 Linux + llvmpipe），
+        // 用 `FERRIC_EMBEDDED_SETTINGS=1` 走应用内浮层回退：同一份 settings_body，
+        // 功能不缺项，只是拖不出主窗。回退路径保留、随时可用，只是不再自动生效。
+        if std::env::var_os("FERRIC_EMBEDDED_SETTINGS").is_some() {
             self.settings_embedded_ui(ctx);
             return;
         }
@@ -1174,8 +1282,10 @@ impl FerricApp {
             egui::ViewportId::from_hash_of("ferric-settings"),
             egui::ViewportBuilder::default()
                 .with_title("Ferric 设置")
-                .with_inner_size([428.0, 620.0])
-                .with_min_inner_size([380.0, 320.0])
+                // 左右布局要同时放下「分类栏 + 标签 + 控件」，428 宽时右栏只剩不到
+                // 300px，四档 seg 会挤到换行。
+                .with_inner_size([760.0, 560.0])
+                .with_min_inner_size([620.0, 360.0])
                 .with_decorations(false)
                 .with_resizable(true),
             |ui, _class| {
@@ -1195,10 +1305,9 @@ impl FerricApp {
                 draw_window_border(&ctx, theme.dark, "settings-border");
                 CentralPanel::default()
                     .frame(Frame::NONE.fill(theme.bg).inner_margin(Margin::same(18)))
+                    // 不在这里套 ScrollArea：滚动归右栏自己管，分类栏要始终可见。
                     .show(ui, |ui| {
-                        ScrollArea::vertical().show(ui, |ui| {
-                            self.settings_body(ui);
-                        });
+                        self.settings_body(ui);
                     });
             },
         );
@@ -1207,80 +1316,178 @@ impl FerricApp {
     }
 
     /// 设置窗的内容（与承载它的窗口形态无关）。
+    ///
+    /// **左分类 + 右内容**，与主界面「侧栏 + 内容区」同一套结构与观感
+    /// （见 [`SettingsTab`] 说明为什么不再是一长列）。
+    ///
+    /// 纵向滚动放在**右栏内部**：分类栏必须始终可见，否则滚到底就找不到路回去了。
+    /// 承载它的两种窗口（独立视口 / 应用内浮层）因此都不再自己套 `ScrollArea`。
     fn settings_body(&mut self, ui: &mut egui::Ui) {
         let theme = self.shared.theme;
-        {
-            let ui = &mut *ui;
-            {
-                // 外观
-                ui.horizontal(|ui| {
-                    widgets::field_label(ui, &theme, "外观");
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let sel = match self.mode {
-                            ThemeMode::System => 0,
-                            ThemeMode::Light => 1,
-                            ThemeMode::Dark => 2,
-                        };
-                        if let Some(n) =
-                            widgets::seg(ui, &theme, &["跟随系统", "亮色", "暗色"], sel)
-                        {
-                            let want = match n {
-                                1 => ThemeMode::Light,
-                                2 => ThemeMode::Dark,
-                                _ => ThemeMode::System,
-                            };
-                            if want != self.mode {
-                                self.set_mode(ui.ctx(), want);
-                            }
-                        }
+        const NAV_W: f32 = 132.0;
+
+        ui.horizontal_top(|ui| {
+            // ---------- 左：分类 ----------
+            ui.allocate_ui_with_layout(
+                vec2(NAV_W, ui.available_height()),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(NAV_W);
+                    for (tab, icon, name) in SettingsTab::ALL {
+                        self.settings_nav_row(ui, tab, icon, name);
+                    }
+                },
+            );
+
+            // 竖分隔线：与主界面侧栏/内容区之间那条同款，1px 不透明
+            ui.add_space(10.0);
+            let sep = ui.available_rect_before_wrap();
+            ui.painter().vline(
+                sep.left(),
+                sep.y_range(),
+                Stroke::new(1.0_f32, theme.border),
+            );
+            ui.add_space(16.0);
+
+            // ---------- 右：内容 ----------
+            ui.vertical(|ui| {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.settings_tab {
+                        SettingsTab::Appearance => self.settings_appearance_ui(ui),
+                        SettingsTab::Font => self.font_settings_ui(ui),
+                        SettingsTab::Renderer => self.renderer_settings_ui(ui),
+                        SettingsTab::Update => self.update_settings_ui(ui),
+                        SettingsTab::Data => self.settings_data_ui(ui),
+                        SettingsTab::About => self.settings_about_ui(ui),
                     });
-                });
-                ui.add_space(4.0);
-                ui.separator();
-                self.font_settings_ui(ui);
-                ui.separator();
-                // 侧边栏宽度
-                ui.horizontal(|ui| {
-                    widgets::field_label(ui, &theme, "侧边栏宽度");
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::ghost_button(ui, &theme, "恢复默认").clicked() {
-                            self.rail_width = RAIL_DEFAULT;
-                        }
-                    });
-                });
-                ui.separator();
-                // 本地数据
-                ui.horizontal(|ui| {
-                    widgets::field_label(ui, &theme, "本地数据");
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::ghost_button(ui, &theme, "清除收藏与工具草稿").clicked()
-                        {
-                            self.favorites.clear();
-                            // 草稿在 save() 时由工具状态重建，重置工具即清除草稿。
-                            self.tools = views::registry();
-                            self.shared.toast("已清除收藏与全部工具草稿");
-                        }
-                    });
-                });
-                ui.separator();
-                self.renderer_settings_ui(ui);
-                ui.separator();
-                self.update_settings_ui(ui);
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(concat!(
-                        "Ferric v",
-                        env!("FERRIC_VERSION"),
-                        // 接入自动更新后，「不上传」不再成立：检查更新会把本机版本号
-                        // 发给更新服务器。文案要如实，不能留一句已经不真的宣称。
-                        " · 工具数据仅存于本机；仅检查更新时联网"
-                    ))
-                    .family(FontFamily::Monospace)
-                    .size(11.0)
-                    .color(theme.faint),
-                );
-            }
+            });
+        });
+    }
+
+    /// 分类栏的一行。刻意与主侧栏的 [`Self::nav_item`] 用同一套视觉
+    /// （选中填 `accent_soft`、悬停填 `border`、图标 + 文字左对齐），
+    /// 这样两处导航看着是同一个东西，而不是「设置里另有一套控件」。
+    fn settings_nav_row(&mut self, ui: &mut egui::Ui, tab: SettingsTab, icon: char, name: &str) {
+        let theme = self.shared.theme;
+        let selected = self.settings_tab == tab;
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+        let fill = if selected {
+            theme.accent_soft
+        } else if resp.hovered() {
+            theme.border
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, CornerRadius::same(9), fill);
         }
+        ui.painter().text(
+            rect.left_center() + vec2(11.0, 0.0),
+            Align2::LEFT_CENTER,
+            icon,
+            FontId::new(16.0, icons::family()),
+            if selected { theme.accent } else { theme.muted },
+        );
+        ui.painter().text(
+            rect.left_center() + vec2(34.0, 0.0),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::new(
+                13.0,
+                if selected {
+                    FontFamily::Name(UI_SEMIBOLD.into())
+                } else {
+                    FontFamily::Proportional
+                },
+            ),
+            if selected {
+                theme.accent_strong
+            } else {
+                theme.fg_soft
+            },
+        );
+        ui.add_space(2.0);
+        if resp.clicked() {
+            self.settings_tab = tab;
+        }
+    }
+
+    /// 「外观」分类：主题、界面缩放、侧边栏宽度 —— 都是影响整个外壳长相的项。
+    fn settings_appearance_ui(&mut self, ui: &mut egui::Ui) {
+        let theme = self.shared.theme;
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "主题");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let sel = match self.mode {
+                    ThemeMode::System => 0,
+                    ThemeMode::Light => 1,
+                    ThemeMode::Dark => 2,
+                };
+                if let Some(n) = widgets::seg(ui, &theme, &["跟随系统", "亮色", "暗色"], sel)
+                {
+                    let want = match n {
+                        1 => ThemeMode::Light,
+                        2 => ThemeMode::Dark,
+                        _ => ThemeMode::System,
+                    };
+                    if want != self.mode {
+                        self.set_mode(ui.ctx(), want);
+                    }
+                }
+            });
+        });
+        ui.separator();
+        self.ui_scale_settings_ui(ui);
+        ui.separator();
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "侧边栏宽度");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::ghost_button(ui, &theme, "恢复默认").clicked() {
+                    self.rail_width = RAIL_DEFAULT;
+                }
+            });
+        });
+    }
+
+    /// 「数据」分类：本机存了什么、怎么清掉。
+    fn settings_data_ui(&mut self, ui: &mut egui::Ui) {
+        let theme = self.shared.theme;
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "本地数据");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::ghost_button(ui, &theme, "清除收藏与工具草稿").clicked() {
+                    self.favorites.clear();
+                    // 草稿在 save() 时由工具状态重建，重置工具即清除草稿。
+                    self.tools = views::registry();
+                    self.shared.toast("已清除收藏与全部工具草稿");
+                }
+            });
+        });
+    }
+
+    /// 「关于」分类：版本与隐私说明。
+    fn settings_about_ui(&mut self, ui: &mut egui::Ui) {
+        let theme = self.shared.theme;
+        ui.horizontal(|ui| {
+            widgets::field_label(ui, &theme, "版本");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(concat!("v", env!("FERRIC_VERSION")))
+                        .family(FontFamily::Monospace)
+                        .size(12.0)
+                        .color(theme.fg),
+                );
+            });
+        });
+        ui.separator();
+        ui.label(
+            // 接入自动更新后，「不上传」不再成立：检查更新会把本机版本号
+            // 发给更新服务器。文案要如实，不能留一句已经不真的宣称。
+            RichText::new("工具数据仅存于本机；仅检查更新时联网")
+                .size(11.5)
+                .color(theme.faint),
+        );
     }
 
     /// 设置窗的**应用内回退形态**：软件渲染环境专用（见 [`Self::settings_ui`]）。
@@ -1300,39 +1507,44 @@ impl FerricApp {
                 .color(theme.fg_soft)
                 .family(FontFamily::Name(crate::fonts::UI_SEMIBOLD.into())),
         )
-        .id(egui::Id::new("ferric-settings-embedded"))
+        // id 带布局版本号：`egui::Window` 会把用户调过的尺寸记在 egui memory 里，
+        // 改了 default_size 也顶不过那份旧记录（老用户会拿到 432 宽的窄浮层，
+        // 左右布局直接被挤坏）。换 id = 丢掉旧几何、按新默认值重新摆一次。
+        .id(egui::Id::new("ferric-settings-embedded-v2"))
         .open(&mut keep_open)
         .collapsible(false)
         .resizable(true)
-        .default_size([432.0, 560.0])
-        .default_pos(ctx.content_rect().center() - egui::vec2(216.0, 280.0))
+        // 与独立视口那条路同宽：同一份左右布局，不该因为承载形态不同而挤成两副样子。
+        // 主窗放不下就按主窗收窄（浮层不能比它的宿主还宽）。
+        .default_size([
+            760.0_f32.min(ctx.content_rect().width() - 48.0).max(560.0),
+            560.0,
+        ])
+        .default_pos(ctx.content_rect().center() - egui::vec2(380.0, 280.0))
+        .min_width(520.0)
         .frame(
             Frame::window(&ctx.global_style())
                 .fill(theme.bg)
                 .inner_margin(Margin::same(18)),
         )
         .show(ctx, |ui| {
-            // 高度封顶到主窗内，内容超出走滚动，不让浮层顶出屏幕。
+            // 高度封顶到主窗内，不让浮层顶出屏幕。滚动由右栏内部负责（见 settings_body）。
             let max_h = (ctx.content_rect().height() - 140.0).max(240.0);
-            ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                self.settings_body(ui);
-            });
+            ui.set_max_height(max_h);
+            self.settings_body(ui);
         });
         if !keep_open {
             self.settings_open = false;
         }
     }
 
-    /// 设置弹窗里的「字体」区块：全局界面字号 + 代码编辑区排版。
+    /// 「外观」里的界面缩放。
     ///
-    /// 两类字号刻意分开：界面字号影响整个外壳（侧栏、按钮、说明文字），而 JSON 这类
-    /// 编辑区常常要单独调大来核对密钥、或单独调小来纵览长文档，把它们绑在一起反而难用。
-    /// 代码这三项与 JSON 工具条上的字体菜单是**同一份配置**，从哪边改都一样生效。
-    fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::widgets::code_editor::FontCfg;
+    /// 与代码字号刻意分开、也分在不同分类里：界面缩放影响整个外壳（侧栏、按钮、
+    /// 说明文字），而 JSON 这类编辑区常常要单独调大来核对密钥、或单独调小来纵览
+    /// 长文档，把它们绑在一起反而难用。
+    fn ui_scale_settings_ui(&mut self, ui: &mut egui::Ui) {
         let theme = self.shared.theme;
-
-        // —— 界面字号
         ui.horizontal(|ui| {
             widgets::field_label(ui, &theme, "界面缩放");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1351,6 +1563,14 @@ impl FerricApp {
                 }
             });
         });
+    }
+
+    /// 「字体」分类：代码编辑区的排版。
+    ///
+    /// 这三项与 JSON 工具条上的字体菜单是**同一份配置**，从哪边改都一样生效。
+    fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::widgets::code_editor::FontCfg;
+        let theme = self.shared.theme;
 
         // —— 代码字号
         let font = &mut self.shared.code_font;
@@ -1971,21 +2191,25 @@ impl FerricApp {
         let moving = self
             .last_moved_at
             .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(300));
-        if moving != self.fast_present {
-            self.fast_present = moving;
-            frame.set_wgpu_surface_config(if moving {
-                eframe::egui_wgpu::SurfaceConfig {
-                    present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
-                    desired_maximum_frame_latency: Some(1),
-                }
-            } else {
-                eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY
-            });
-        }
-        if moving {
-            // 移动期间保持出帧：位置一变就有新画面可 present，残影窗口最短。
-            ctx.request_repaint();
-        }
+        self.fast_present = moving;
+
+        // 移动期间**什么都不做**：不重绘、不换呈现模式。
+        //
+        // 这里原先是「切 AutoNoVsync + 每帧 request_repaint」，想法是「一直出新帧，
+        // 残影窗口最短」。在有 GPU 的机器上那没问题，但靠 CPU 光栅化时它是反效果：
+        // 实测拖动期间应用冲到 **1193 fps**，而这台机器只显示得出约 30fps ——
+        // 多出的帧全积在提交队列里，**屏幕上那一帧是很多帧以前渲染的**，
+        // 对应的正是旧的窗口位置。越努力出帧，画面反而落后窗框越多。
+        //
+        // 关键在于：**拖动时窗口内容压根没变**。界面是相对客户区绘制的，位置由
+        // 系统改，DWM 直接把已合成好的那一面搬到新位置即可 —— 一帧不画，
+        // 就一帧都不会错位，也不会有 ALLOW_TEARING 撕出来的半截画面。
+        // 有内容真变了（悬停、动画）时 egui 照常自己请求重绘，走正常节流即可。
+        //
+        // 保留 `fast_present` 只为让 [`Self::throttle_soft_render`] 能看到「在移动」，
+        // 不再据此换表面配置：换配置本身要重建交换链，拖动中途做这件事只会添乱。
+
+        let _ = frame;
     }
 }
 
@@ -2025,6 +2249,7 @@ impl eframe::App for FerricApp {
     }
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.throttle_soft_render();
         let t_frame_start = std::time::Instant::now();
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
@@ -2510,22 +2735,36 @@ mod dialog_tests {
         );
     }
 
-    /// 软件渲染（WARP / llvmpipe，即 ARM 虚拟机与无驱动环境）必须有**浮层回退**：
-    /// 第二个系统视口意味着第二条 wgpu surface，软件适配器经常建第二条就失败或
-    /// 渲染空白 —— 用户看到的就是「设置打不开 / 空白窗」。回退用 egui::Window，
-    /// 不新建 surface，主窗能画出来它就一定能画出来。
+    /// 浮层回退必须**存在且可用**，但**不得按渲染后端自动生效**。
+    ///
+    /// 曾经是「`gpu_software` 就回退」，理由是软件适配器建不出第二条 wgpu surface。
+    /// 实测推翻了这条规则：ARM 虚拟机 + WARP 上第二个视口建得出、画得全、跑得稳，
+    /// 用户却永远拿不到与主界面同级的设置窗。所以判据改为**只有显式要求才回退**
+    /// （`FERRIC_EMBEDDED_SETTINGS=1`），默认一律真实系统窗口。
+    /// 这条测试守的就是「别再退回按环境类别一刀切」。
     #[test]
-    fn software_render_falls_back_to_embedded_settings() {
+    fn embedded_settings_is_opt_in_not_automatic() {
         let src = include_str!("app.rs");
-        // 入口必须按 gpu_software 分流
         let gate = src
             .split("fn settings_ui(")
             .nth(1)
             .expect("settings_ui 不见了");
         let gate = &gate[..gate.find("fn settings_body(").unwrap_or(gate.len())];
         assert!(
-            gate.contains("gpu_software") && gate.contains("settings_embedded_ui"),
-            "settings_ui 没有按软件渲染分流到浮层回退"
+            gate.contains("FERRIC_EMBEDDED_SETTINGS") && gate.contains("settings_embedded_ui"),
+            "浮层回退的入口不见了 —— 它得留着，给真正建不出第二条 surface 的环境用"
+        );
+        // 只看代码，不看注释：这段注释里正要解释「为什么不再按 gpu_software 分流」，
+        // 连注释一起扫会把这条说明本身判成违规。
+        let code: String = gate
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("gpu_software"),
+            "设置窗又按渲染后端一刀切了：软件渲染 ≠ 开不了第二条 surface，\
+             实测 WARP 上完全正常，这样判会让整类环境永远拿不到独立窗口"
         );
         // 回退形态必须真的存在，且用应用内 Window（不开新 surface）、
         // 复用同一份 settings_body（功能不缺项）
