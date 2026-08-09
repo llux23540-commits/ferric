@@ -2897,13 +2897,54 @@ mod dialog_tests {
 
 #[cfg(test)]
 mod perf_tests {
+    use std::time::{Duration, Instant};
+
+    /// 跑 `frames` 帧，返回**最快一帧**的耗时。
+    ///
+    /// 取最快而非最坏：共享 CI runner 上一次调度抖动就能把最坏值推到秒级，
+    /// 而最快一帧最贴近代码本身的开销；真有数量级劣化时连它也会被抬起来。
+    fn fastest_frame(
+        ctx: &egui::Context,
+        screen: egui::Rect,
+        mut body: impl FnMut(&mut egui::Ui),
+    ) -> Duration {
+        let mut best = Duration::MAX;
+        for i in 0..12 {
+            let t0 = Instant::now();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(i as f64 * 0.05),
+                    ..Default::default()
+                },
+                &mut body,
+            );
+            if i >= 4 {
+                // 前几帧是预热：字体装载、布局缓存
+                best = best.min(t0.elapsed());
+            }
+        }
+        best
+    }
+
     /// 设置窗**内容本身**的构建耗时要足够低。
     ///
-    /// 「窗口切换卡」实测下来是 debug 构建 + 这台机器无 GPU（软件光栅化）导致的：
+    /// 「窗口切换卡」实测下来是 debug 构建 + 无 GPU（软件光栅化）导致的：
     /// release 下整帧 3.0ms、debug 下 18ms，而其中我们自己的 UI 代码只占 3.5ms(debug)
     /// / 0.17ms(release)，其余是多开一个窗口的渲染开销。
-    ///
     /// 这条守住的是「别让设置面板本身变重」—— 渲染开销改不了，UI 代码的开销能守住。
+    ///
+    /// # 为什么是**相对**基准，不是绝对毫秒数
+    ///
+    /// 这条曾两次在 macOS CI 上假失败：先是用「最坏一帧」被调度抖动打死，改成
+    /// 「最快一帧 < 16ms」后又炸了一次。根子在于**绝对毫秒数在共享 runner 上
+    /// 本质就是 flaky 的** —— 同一份代码，机器忙不忙决定成败，与「面板有没有变重」
+    /// 毫无关系。
+    ///
+    /// 改为在同一轮里量一个**参照工作量**（同样的窗口外壳 + 一个标签），用它吸收
+    /// runner 的快慢，再断言真实面板不超过它的若干倍。runner 慢一倍，两个数一起
+    /// 慢一倍，比值不动；而面板真变重时比值立刻变大。
+    /// 仍留一个绝对下限兜底：参照本身可能快到接近计时精度，比值会失真。
     #[test]
     fn settings_body_is_cheap_to_build() {
         let ctx = egui::Context::default();
@@ -2912,44 +2953,38 @@ mod perf_tests {
         theme.apply(&ctx);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(428.0, 620.0));
 
-        // 先跑几帧预热（字体装载、布局缓存）
-        let mut best = std::time::Duration::MAX;
-        for i in 0..12 {
-            let t0 = std::time::Instant::now();
-            let _ = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(screen),
-                    time: Some(i as f64 * 0.05),
-                    ..Default::default()
-                },
-                |ui| {
-                    // 与设置窗同样的构成：标题栏 + 边框 + 一屏控件
-                    let mut open = true;
-                    super::settings_window_chrome(ui, &theme, &mut open);
-                    super::draw_window_border(ui.ctx(), false, "perf-border");
-                    egui::CentralPanel::default().show(ui, |ui| {
-                        for _ in 0..8 {
-                            ui.horizontal(|ui| {
-                                crate::widgets::field_label(ui, &theme, "示例项");
-                                let _ = crate::widgets::seg(ui, &theme, &["甲", "乙", "丙"], 1);
-                            });
-                            ui.separator();
-                        }
+        // 参照：同样的窗口外壳，内容只有一个标签
+        let reference = fastest_frame(&ctx, screen, |ui| {
+            let mut open = true;
+            super::settings_window_chrome(ui, &theme, &mut open);
+            super::draw_window_border(ui.ctx(), false, "perf-ref-border");
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.label("参照");
+            });
+        });
+
+        // 实测目标：与设置窗同样的构成（标题栏 + 边框 + 一屏控件）
+        let actual = fastest_frame(&ctx, screen, |ui| {
+            let mut open = true;
+            super::settings_window_chrome(ui, &theme, &mut open);
+            super::draw_window_border(ui.ctx(), false, "perf-border");
+            egui::CentralPanel::default().show(ui, |ui| {
+                for _ in 0..8 {
+                    ui.horizontal(|ui| {
+                        crate::widgets::field_label(ui, &theme, "示例项");
+                        let _ = crate::widgets::seg(ui, &theme, &["甲", "乙", "丙"], 1);
                     });
-                },
-            );
-            if i >= 4 {
-                best = best.min(t0.elapsed());
-            }
-        }
-        // 用**最快一帧**而非最坏一帧：共享 CI runner（尤其 macOS）上偶发的调度抖动
-        // 会把最坏值推到秒级，导致这条 flaky（实测 macOS 上因此假失败）；而最快一帧
-        // 最贴近代码本身的开销，真有数量级劣化时连它也会被抬起来。守的是「别让设置
-        // 面板本身变重」——min 足够，且不受一次性噪声干扰。
+                    ui.separator();
+                }
+            });
+        });
+
+        // 8 倍 + 16ms 下限：本机 debug 实测比值在 2~3 倍，留足机器差异的余量，
+        // 但挡得住「一屏控件突然贵一个数量级」这种真回归。
+        let budget = (reference * 8).max(Duration::from_millis(16));
         assert!(
-            best.as_millis() < 16,
-            "设置窗内容构建太慢：最快 {:?}（debug 构建实测约 3-4ms）",
-            best
+            actual < budget,
+            "设置窗内容构建太慢：{actual:?}，预算 {budget:?}（参照一帧 {reference:?}）"
         );
     }
 }
