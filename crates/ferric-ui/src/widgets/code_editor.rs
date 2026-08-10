@@ -1,4 +1,4 @@
-﻿//! 自研代码编辑器：可自由编辑 + 语法高亮 + **代码折叠**（单视图共存）。
+//! 自研代码编辑器：可自由编辑 + 语法高亮 + **代码折叠**（单视图共存）。
 //!
 //! 设计：`text: String` 为唯一真相。每帧由源文本构建一份「可见文本」（被折叠的
 //! 括号区间替换成占位 `⋯`）以及「可见↔源」字符段映射。galley / 光标 / 选区都作用在
@@ -3424,7 +3424,7 @@ mod layout_cache_tests {
         width: f32,
         font: FontCfg,
         dark: bool,
-    ) -> usize {
+    ) -> Option<std::sync::Arc<Layout>> {
         let theme = if dark {
             crate::theme::Theme::dark()
         } else {
@@ -3446,11 +3446,22 @@ mod layout_cache_tests {
                 code_editor(ui, &theme, "cache-probe", text, 300.0, wrap, font);
             },
         );
-        ctx.data(|d| {
-            d.get_temp::<std::sync::Arc<Layout>>(lay_id.expect("没跑到闭包里"))
-                .map(|l| std::sync::Arc::as_ptr(&l) as usize)
-        })
-        .unwrap_or(0)
+        // ⚠️ 返回 `Arc` 本身，而不是 `Arc::as_ptr` 算出来的地址。
+        //
+        // 曾经返回 usize 地址来比对「是不是同一份排版」，那是个**会偶发误判**的做法：
+        // 调用方拿到 usize 之后 Arc 就被丢了，下一帧缓存换新、旧分配被释放，
+        // 分配器完全可能把同一个地址再发给新的 Layout —— 于是「明明重排了」被读成
+        // 「复用了旧排版」，测试随机翻红（同一份代码，这次挂在「字重」下次挂在「行距」）。
+        // 只要把两份 Arc 都攥在手里，地址就不可能重合，比较才是可靠的。
+        ctx.data(|d| d.get_temp::<std::sync::Arc<Layout>>(lay_id.expect("没跑到闭包里")))
+    }
+
+    /// 是不是同一份排版（同一次布局计算的结果）。
+    fn same(a: &Option<std::sync::Arc<Layout>>, b: &Option<std::sync::Arc<Layout>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
     fn sample() -> String {
@@ -3464,11 +3475,14 @@ mod layout_cache_tests {
         let mut t = sample();
         let f = FontCfg::default();
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
-        assert_ne!(a, 0, "缓存没被存进去，后面的比较都没有意义");
+        assert!(a.is_some(), "缓存没被存进去，后面的比较都没有意义");
         let b = frame(&ctx, &mut t, true, 600.0, f, true);
-        assert_eq!(a, b, "文本、字体、宽度都没动，却重排了一遍");
+        assert!(same(&a, &b), "文本、字体、宽度都没动，却重排了一遍");
         let c = frame(&ctx, &mut t, true, 600.0, f, true);
-        assert_eq!(b, c, "缓存只命中了一帧就掉了 —— 判据里有每帧都在变的东西");
+        assert!(
+            same(&b, &c),
+            "缓存只命中了一帧就掉了 —— 判据里有每帧都在变的东西"
+        );
     }
 
     /// 文本变了必须重排（否则编辑完屏幕上还是旧内容）。
@@ -3480,7 +3494,7 @@ mod layout_cache_tests {
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
         t.push_str("\n// 新增\n");
         let b = frame(&ctx, &mut t, true, 600.0, f, true);
-        assert_ne!(a, b, "文本改了却复用了旧排版");
+        assert!(!same(&a, &b), "文本改了却复用了旧排版");
     }
 
     /// 换行时改视口宽度必须重排；**不换行时不必** ——
@@ -3493,11 +3507,14 @@ mod layout_cache_tests {
 
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
         let b = frame(&ctx, &mut t, true, 420.0, f, true);
-        assert_ne!(a, b, "换行状态下改了宽度却没重排 —— 断行位置会是错的");
+        assert!(
+            !same(&a, &b),
+            "换行状态下改了宽度却没重排 —— 断行位置会是错的"
+        );
 
         let c = frame(&ctx, &mut t, false, 600.0, f, true);
         let d = frame(&ctx, &mut t, false, 420.0, f, true);
-        assert_eq!(c, d, "不换行时宽度不参与排版，不该因为拖窗口就重排");
+        assert!(same(&c, &d), "不换行时宽度不参与排版，不该因为拖窗口就重排");
     }
 
     /// 换行开关本身也要能翻脸。
@@ -3508,7 +3525,7 @@ mod layout_cache_tests {
         let f = FontCfg::default();
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
         let b = frame(&ctx, &mut t, false, 600.0, f, true);
-        assert_ne!(a, b, "开关了自动换行却复用了旧排版");
+        assert!(!same(&a, &b), "开关了自动换行却复用了旧排版");
     }
 
     /// 字号 / 行距 / 字重任一项变了都要重排。
@@ -3539,7 +3556,7 @@ mod layout_cache_tests {
             ),
         ] {
             let b = frame(&ctx, &mut t, true, 600.0, f, true);
-            assert_ne!(a, b, "{name}变了却复用了旧排版");
+            assert!(!same(&a, &b), "{name}变了却复用了旧排版");
         }
     }
 
@@ -3551,7 +3568,10 @@ mod layout_cache_tests {
         let f = FontCfg::default();
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
         let b = frame(&ctx, &mut t, true, 600.0, f, false);
-        assert_ne!(a, b, "切了深浅色却复用旧 galley —— 颜色会停在上一个主题");
+        assert!(
+            !same(&a, &b),
+            "切了深浅色却复用旧 galley —— 颜色会停在上一个主题"
+        );
     }
 
     /// **界面缩放必须让缓存失效**，这是最容易漏、后果最严重的一项：
@@ -3565,6 +3585,6 @@ mod layout_cache_tests {
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
         ctx.set_zoom_factor(1.4);
         let b = frame(&ctx, &mut t, true, 600.0, f, true);
-        assert_ne!(a, b, "改了界面缩放却复用旧 galley —— 字形会错位");
+        assert!(!same(&a, &b), "改了界面缩放却复用旧 galley —— 字形会错位");
     }
 }
