@@ -34,7 +34,7 @@ pub fn my_build() -> i64 {
 }
 
 /// 本机平台/架构，取值域与服务端 `PLATFORMS`/`ARCHES` 白名单一致。
-fn platform_arch() -> Result<(&'static str, &'static str), String> {
+pub(crate) fn platform_arch() -> Result<(&'static str, &'static str), String> {
     let os = match std::env::consts::OS {
         "windows" => "windows",
         "macos" => "macos",
@@ -329,6 +329,7 @@ impl Updater {
 fn check_blocking(source: &Source) -> Result<Option<ReleaseInfo>, String> {
     match source {
         Source::Server(p) => check_server(p),
+        Source::Github(g) => crate::github::check(g),
         Source::Mock => {
             let info = crate::mock::latest_release();
             Ok((info.build > my_build()).then_some(info))
@@ -347,6 +348,7 @@ fn download_blocking(
 ) -> Result<PathBuf, String> {
     match source {
         Source::Server(p) => download_server(p, info, on_progress),
+        Source::Github(g) => crate::github::download(g, info, on_progress),
         Source::Mock => Ok(crate::mock::download_release(info, on_progress)),
     }
 }
@@ -409,7 +411,7 @@ fn check_server(profile: &ServerProfile) -> Result<Option<ReleaseInfo>, String> 
 
 /// 每个平台允许的安装包扩展名。**不从明文 `Content-Disposition` 取扩展名** ——
 /// 那个头中间人可改写，而扩展名决定了我们怎么执行这个文件。
-fn ext_allowed(platform: &str, ext: &str) -> bool {
+pub(crate) fn ext_allowed(platform: &str, ext: &str) -> bool {
     let allow: &[&str] = match platform {
         "windows" => &[".exe", ".msi"],
         "macos" => &[".dmg", ".pkg"],
@@ -496,11 +498,38 @@ fn download_server(
     };
     on_progress(done, total);
 
+    verify_downloaded(&dir, &file, info, platform, arch, verify_pk)?;
+    Ok(file)
+}
+
+/// 落盘之后的三重校验：大小 + sha256 → 魔数 → 离线签名。
+///
+/// **每一条来源都必须走这一个函数**（服务端、GitHub 发布页……）。校验代码一旦被抄成
+/// 两份，两份就会各自演化，而「哪一份漏了签名那一步」是没人会主动去查的。
+///
+/// 期望值（`info`）必须来自**可信信道**：自建服务端是加密信道里的清单，
+/// GitHub 是验过签的 manifest。绝不能用下载响应头里的值 —— 那个能改内容的人也能改。
+///
+/// 任何一条不过都把整个暂存目录带走：半截安装包留在盘上本身就是个可被替换的靶子。
+pub(crate) fn verify_downloaded(
+    dir: &Path,
+    file: &Path,
+    info: &ReleaseInfo,
+    platform: &str,
+    arch: &str,
+    verify_pk: &str,
+) -> Result<(), String> {
+    let fail = |dir: &Path, msg: String| -> String {
+        let _ = std::fs::remove_dir_all(dir);
+        msg
+    };
+    let total = info.size as u64;
+
     // **从磁盘重新读一遍算哈希** —— 要校验的必须是「将要被执行的那串字节」，
     // 而不是内存里的缓冲区。顺带能抓住写入期间的竞态与磁盘损坏。
-    let mut f = match open_locked(&file) {
+    let mut f = match open_locked(file) {
         Ok(f) => f,
-        Err(e) => return Err(fail(&dir, e)),
+        Err(e) => return Err(fail(dir, e)),
     };
     let mut hasher = Sha256::new();
     let mut head = Vec::new();
@@ -512,7 +541,7 @@ fn download_server(
             // 先关句柄再删目录，否则 Windows 上删不掉（同上）
             Err(e) => {
                 drop(f);
-                return Err(fail(&dir, format!("回读失败：{e}")));
+                return Err(fail(dir, format!("回读失败：{e}")));
             }
         };
         if n == 0 {
@@ -533,18 +562,18 @@ fn download_server(
 
     if size != total {
         return Err(fail(
-            &dir,
+            dir,
             format!("大小不符：期望 {total} 字节，实际 {size}"),
         ));
     }
     if !got.eq_ignore_ascii_case(&info.sha256) {
         return Err(fail(
-            &dir,
-            "内容校验失败：sha256 与服务端在加密信道中声明的不一致".into(),
+            dir,
+            "内容校验失败：sha256 与清单中声明的不一致".into(),
         ));
     }
     if !magic_ok(&info.ext, &head) {
-        return Err(fail(&dir, format!("文件格式与 {} 不符，已拒绝", info.ext)));
+        return Err(fail(dir, format!("文件格式与 {} 不符，已拒绝", info.ext)));
     }
 
     // 最后一道也是最重要的一道：离线签名。服务器被拿下也签不出这个。
@@ -557,16 +586,16 @@ fn download_server(
         info.size,
     );
     if let Err(e) = release::verify(verify_pk, &info.signature, &payload) {
-        return Err(fail(&dir, e));
+        return Err(fail(dir, e));
     }
 
     // 三重校验都过了才给可执行位（unix）
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700));
     }
-    Ok(file)
+    Ok(())
 }
 
 /// 边下边写，返回落盘字节数。
@@ -641,7 +670,7 @@ fn updates_root() -> Option<PathBuf> {
     Some(pd.cache_dir().join("updates"))
 }
 
-fn fresh_update_dir() -> Result<PathBuf, String> {
+pub(crate) fn fresh_update_dir() -> Result<PathBuf, String> {
     use rand::RngCore;
     let root = updates_root().ok_or("无法定位缓存目录")?;
     std::fs::create_dir_all(&root).map_err(|e| format!("创建缓存目录失败：{e}"))?;

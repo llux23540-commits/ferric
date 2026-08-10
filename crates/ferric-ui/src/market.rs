@@ -80,10 +80,16 @@ pub struct MarketItem {
 // 每一处校验都在它自己的函数体里，演示分支是完全独立的另一条实现
 // （见 `mock` 模块头）—— 两条路不共用任何校验代码，演示也就无从削弱它。
 
+/// GitHub 发布页只承载应用更新，没有插件市场。**如实说明而不是静默返回空列表** ——
+/// 空列表会被用户读成「市场是空的」，然后去怀疑自己的网络。
+const NO_MARKET: &str =
+    "当前数据源是 GitHub 发布页，它只提供应用更新；插件市场需要切换到服务器数据源";
+
 /// 拉市场列表（真服务端或演示数据）。
 pub fn browse(source: &Source, query: &str) -> Result<Listing, String> {
     match source {
         Source::Server(p) => browse_server(p, query),
+        Source::Github(_) => Err(NO_MARKET.to_owned()),
         Source::Mock => Ok(Listing {
             items: crate::mock::browse(query),
             truncated: false, // 演示目录就那几条，永远取得全
@@ -95,6 +101,9 @@ pub fn browse(source: &Source, query: &str) -> Result<Listing, String> {
 pub fn check_updates(source: &Source) -> Result<Vec<String>, String> {
     match source {
         Source::Server(p) => check_updates_server(p),
+        // 没有市场就无从查新；返回空表而不是报错 —— 这条是后台静默调用的，
+        // 报错只会变成一条用户看不懂又无法处理的提示
+        Source::Github(_) => Ok(Vec::new()),
         Source::Mock => Ok(crate::mock::check_updates()),
     }
 }
@@ -107,6 +116,7 @@ pub fn install(
 ) -> Result<(), String> {
     match source {
         Source::Server(p) => install_server(p, it, on_progress),
+        Source::Github(_) => Err(NO_MARKET.to_owned()),
         Source::Mock => {
             crate::mock::install(&it.slug, &it.version, it.size, on_progress);
             Ok(())
@@ -117,7 +127,9 @@ pub fn install(
 /// 卸载。真实源删插件目录里的文件，演示源只改演示存档。
 pub fn uninstall(source: &Source, slug: &str) -> Result<(), String> {
     match source {
-        Source::Server(_) => plugin_host::uninstall(slug),
+        // 卸载动的是本地插件目录，与数据源无关 —— 即便当前源没有市场，
+        // 已经装在盘上的插件也必须卸得掉
+        Source::Server(_) | Source::Github(_) => plugin_host::uninstall(slug),
         Source::Mock => {
             crate::mock::uninstall(slug);
             Ok(())
@@ -352,6 +364,43 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub 发布页只有应用更新，没有插件市场。
+    ///
+    /// 这里要的不是「静默返回空列表」—— 空列表会被读成「市场里没东西」，用户会去
+    /// 怀疑自己的网络。浏览与安装都必须**明确报错并说清怎么办**；只有后台静默调用的
+    /// 查新可以安静地返回空表。全程不联网，所以这条测试是确定性的。
+    #[test]
+    fn github_source_reports_that_it_has_no_market() {
+        let s = Source::Github(crate::github::GithubSource {
+            repo: "owner/repo".into(),
+        });
+
+        let err = browse(&s, "").expect_err("浏览必须报错，而不是给一个空列表");
+        assert!(err.contains("服务器"), "错误信息要告诉用户切到哪里：{err}");
+
+        let item = MarketItem {
+            slug: "demo".into(),
+            name: "demo".into(),
+            desc: String::new(),
+            version: "1.0.0".into(),
+            api_version: 1,
+            size: 1,
+            sha256: "aa".repeat(32),
+            signature: "30".into(),
+            downloads: 0,
+            installed: None,
+            has_update: false,
+        };
+        assert!(install(&s, &item, &mut |_, _| {}).is_err(), "安装必须报错");
+
+        // 查新是后台静默调用的，报错只会变成用户看不懂也处理不了的提示
+        assert_eq!(check_updates(&s).unwrap(), Vec::<String>::new());
+
+        // 但**卸载必须照常可用**：插件已经在盘上了，源没有市场不该把它锁死
+        // （这里只断言它走的不是「无市场」那条错误路径，实际删文件由 plugin_host 负责）
+        let _ = uninstall(&s, "definitely-not-installed");
+    }
 
     #[test]
     fn urlencode_escapes_query_metachars() {

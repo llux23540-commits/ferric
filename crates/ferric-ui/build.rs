@@ -106,6 +106,10 @@ fn bake_update_pins() {
         "FERRIC_SERVER_URL",
         "FERRIC_SERVER_PUBKEY",
         "FERRIC_RELEASE_PUBKEY",
+        // 默认的 GitHub 更新源（`owner/repo`）。它**不是**第四把钥匙 ——
+        // 从 GitHub 下来的包同样要过 `FERRIC_RELEASE_PUBKEY` 那一关，
+        // 这里烘的只是「默认去哪儿看有没有新版」。
+        "FERRIC_GITHUB_REPO",
     ] {
         // 没有这一行，改了环境变量重新编译不会重跑 build.rs，
         // 二进制里会静默保留上一次的值——属于「发布了才发现」的坑。

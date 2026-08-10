@@ -54,9 +54,20 @@ struct Persist {
     /// 自动检查更新并在后台下载。默认开 —— 更新只有及时装上才有意义。
     #[serde(default = "default_true")]
     auto_update: bool,
-    /// 是否使用演示数据：`None` = 自动（没烘入服务器时才用），`Some` = 用户显式选择。
+    /// 旧字段：是否使用演示数据（`None` 自动 / `false` 服务器 / `true` 演示）。
+    /// 已被 `source_pref` 取代，保留是为了**双向兼容** —— 读旧文件时迁移，
+    /// 写回时也顺手填上，装回旧版本的用户不至于把设置丢光。
     #[serde(default)]
     mock_source: Option<bool>,
+    /// 数据源选择（自动 / 服务器 / GitHub / 演示）。旧文件里没有 → 从 `mock_source` 迁移。
+    #[serde(default)]
+    source_pref: Option<crate::source::SourcePref>,
+    /// 自定义 GitHub 更新源（`owner/repo`）。None = 用编译期烘入的那个。
+    ///
+    /// ⚠️ 与自定义服务器同样的道理：这个 ron 文件当前用户可写，所以一旦不是内置
+    /// 仓库，自动下载与自动安装都会被禁用（降级为仅提示）。
+    #[serde(default)]
+    github_repo: Option<String>,
     /// 上次成功检查更新的 Unix 时间戳（秒）。跨启动节流用 ——
     /// 只放在内存里的话，开十次应用就查十次。
     #[serde(default)]
@@ -86,6 +97,8 @@ impl Default for Persist {
             code_font: Default::default(),
             auto_update: true,
             mock_source: None,
+            source_pref: None,
+            github_repo: None,
             last_update_check: None,
         }
     }
@@ -199,6 +212,9 @@ pub struct FerricApp {
     server_override: Option<crate::net::ServerProfile>,
     /// 设置页里正在编辑的服务器草稿（未点「应用」前不生效）
     server_draft: Option<(String, String)>,
+    /// 「核对指纹」输入框。**故意不持久化** —— 它是一次性的核对动作，
+    /// 存下来只会让下次打开设置页时显示一个早已过期的「一致」。
+    fingerprint_input: String,
     updater: crate::updater::Updater,
     shared: Shared,
     /// 调试自拍的帧计数（仅在 `FERRIC_SCREENSHOT` 下有意义，见 `debug_screenshot`）。
@@ -217,8 +233,12 @@ pub struct FerricApp {
     launch_cfg: crate::launch::LaunchCfg,
     /// 自动检查更新并后台下载。
     auto_update: bool,
-    /// 演示数据开关：None = 自动。
-    mock_source: Option<bool>,
+    /// 数据源选择（自动 / 服务器 / GitHub / 演示）。
+    source_pref: crate::source::SourcePref,
+    /// 自定义 GitHub 更新源；None 表示用编译期烘入的那个。
+    github_override: Option<crate::github::GithubSource>,
+    /// 设置页里正在编辑的 GitHub 仓库草稿（未点「应用」前不生效）。
+    github_draft: Option<String>,
     /// 上次成功检查更新的 Unix 时间戳（秒）。
     last_update_check: Option<i64>,
     /// 内置工具的数量。插件工具一律追加在它们之后，热加载时按这个位置截断 ——
@@ -444,6 +464,7 @@ impl FerricApp {
             settings_open: false,
             server_override: persist.server,
             server_draft: None,
+            fingerprint_input: String::new(),
             updater: crate::updater::Updater::default(),
             shared,
             shot_frames: 0,
@@ -454,7 +475,14 @@ impl FerricApp {
             frames: 0,
             launch_cfg: crate::launch::load(),
             auto_update: persist.auto_update,
-            mock_source: persist.mock_source,
+            // 新字段缺失（旧配置文件）就从旧的 mock_source 迁移过来
+            source_pref: persist
+                .source_pref
+                .unwrap_or_else(|| crate::source::SourcePref::from_legacy(persist.mock_source)),
+            github_override: persist
+                .github_repo
+                .map(|repo| crate::github::GithubSource { repo }),
+            github_draft: None,
             last_update_check: persist.last_update_check,
             builtin_tools,
             was_focused: true,
@@ -471,9 +499,20 @@ impl FerricApp {
         }
     }
 
-    /// 当前生效的数据源（真服务端 or 演示数据）。
+    /// 当前生效的数据源（自建服务端 / GitHub 发布页 / 演示数据）。
     fn source(&self) -> Option<crate::source::Source> {
-        crate::source::Source::resolve(self.mock_source, self.server_profile())
+        crate::source::Source::resolve(
+            self.source_pref,
+            self.server_profile(),
+            self.github_source(),
+        )
+    }
+
+    /// 当前生效的 GitHub 源：用户设的优先，否则用编译期烘入的。
+    fn github_source(&self) -> Option<crate::github::GithubSource> {
+        self.github_override
+            .clone()
+            .or_else(crate::github::GithubSource::builtin)
     }
 
     /// 距上次成功检查更新是否已经够久（跨启动节流）。
@@ -536,7 +575,7 @@ impl FerricApp {
             .or_else(crate::net::ServerProfile::builtin)
     }
 
-    // 「是不是内置服务器」现在问数据源本身（`Source::is_builtin_server`）——
+    // 「是不是内置服务器」现在问数据源本身（`Source::is_builtin`）——
     // 演示数据也要参与这个判断，而它根本没有 ServerProfile。
 
     fn set_mode(&mut self, ctx: &egui::Context, mode: ThemeMode) {
@@ -1758,26 +1797,31 @@ impl FerricApp {
         ui.horizontal(|ui| {
             widgets::field_label(ui, &theme, "数据源");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                const CHOICES: [(Option<bool>, &str); 3] = [
-                    (None, "自动"),
-                    (Some(false), "服务器"),
-                    (Some(true), "演示"),
+                use crate::source::SourcePref as P;
+                const CHOICES: [(P, &str); 4] = [
+                    (P::Auto, "自动"),
+                    (P::Server, "服务器"),
+                    (P::Github, "GitHub"),
+                    (P::Mock, "演示"),
                 ];
                 let names: Vec<&str> = CHOICES.iter().rev().map(|(_, n)| *n).collect();
                 let nat = CHOICES
                     .iter()
-                    .position(|(v, _)| *v == self.mock_source)
+                    .position(|(v, _)| *v == self.source_pref)
                     .unwrap_or(0);
                 if let Some(n) = widgets::seg(ui, &theme, &names, CHOICES.len() - 1 - nat) {
                     let want = CHOICES[CHOICES.len() - 1 - n].0;
-                    if want != self.mock_source {
-                        self.mock_source = want;
+                    if want != self.source_pref {
+                        self.source_pref = want;
                         // 换了源，之前那次检查的结论就作废了
                         self.updater.phase = Phase::Idle;
                         self.shared.toast(match self.source() {
-                            Some(s) if s.is_mock() => "已切换到演示数据（不联网）",
-                            Some(_) => "已切换到更新服务器",
-                            None => "本构建未配置服务器，且演示数据已关闭",
+                            Some(s) if s.is_mock() => "已切换到演示数据（不联网）".to_owned(),
+                            Some(crate::source::Source::Github(g)) => {
+                                format!("已切换到 {}（只有更新，没有插件市场）", g.label())
+                            }
+                            Some(_) => "已切换到更新服务器".to_owned(),
+                            None => "本构建没有烘入这个来源".to_owned(),
                         });
                     }
                 }
@@ -1792,7 +1836,7 @@ impl FerricApp {
             );
             return;
         };
-        let builtin = source.is_builtin_server();
+        let builtin = source.is_builtin();
 
         ui.horizontal(|ui| {
             widgets::field_label(ui, &theme, "软件更新");
@@ -1841,11 +1885,72 @@ impl FerricApp {
                         .size(10.5)
                         .color(theme.faint),
                 );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("公钥指纹 {}", profile.fingerprint()))
+                            .family(FontFamily::Monospace)
+                            .size(10.5)
+                            .color(if builtin { theme.faint } else { theme.danger }),
+                    );
+                    // 指纹要能复制出去比对。肉眼比 16 个十六进制字符正是攻击者
+                    // 指望的那一步 —— 相近的串很容易被看成一样。
+                    if widgets::ghost_button(ui, &theme, "复制").clicked() {
+                        ui.ctx().copy_text(profile.fingerprint());
+                        self.shared.toast("指纹已复制");
+                    }
+                });
+
+                // 核对：把「肉眼比对」换成机器比对。
+                // 期望值从后台「服务器身份」页或运维那里拿，粘进来即可，
+                // 大小写 / 空格 / 换行都容忍，但**位本身一位都不能差**。
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("核对指纹").size(10.5).color(theme.faint));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.fingerprint_input)
+                            .hint_text("粘贴后台显示的指纹")
+                            .desired_width(160.0),
+                    );
+                    let typed = self.fingerprint_input.trim();
+                    if !typed.is_empty() {
+                        let ok = profile.fingerprint_matches(typed);
+                        ui.label(
+                            RichText::new(if ok { "✓ 一致" } else { "✗ 不一致" })
+                                .size(11.0)
+                                .color(if ok { theme.ok } else { theme.danger }),
+                        );
+                    }
+                });
+                if !self.fingerprint_input.trim().is_empty()
+                    && !profile.fingerprint_matches(self.fingerprint_input.trim())
+                {
+                    ui.label(
+                        RichText::new(
+                            "指纹对不上说明你连的不是那台服务器 —— 在弄清楚之前别装任何更新",
+                        )
+                        .size(11.0)
+                        .color(theme.danger),
+                    );
+                }
+            }
+            crate::source::Source::Github(g) => {
                 ui.label(
-                    RichText::new(format!("公钥指纹 {}", profile.fingerprint()))
+                    RichText::new(format!("GitHub  {}", g.repo))
                         .family(FontFamily::Monospace)
                         .size(10.5)
                         .color(if builtin { theme.faint } else { theme.danger }),
+                );
+                // GitHub 这条路没有传输公钥可核对（TLS 由 GitHub 提供），
+                // 但**执行授权仍然只认离线签名** —— 这一点要说清楚，
+                // 否则用户会以为换了源就等于降级了安全性
+                ui.label(
+                    RichText::new("传输由 GitHub 的 TLS 保证；安装包仍须通过内置发布公钥验签")
+                        .size(11.0)
+                        .color(theme.faint),
+                );
+                ui.label(
+                    RichText::new("此来源只提供应用更新，没有插件市场")
+                        .size(11.0)
+                        .color(theme.faint),
                 );
             }
             crate::source::Source::Mock => {
@@ -1889,6 +1994,67 @@ impl FerricApp {
             }
         }
 
+        // 自定义 GitHub 更新源。只有一个 `owner/repo`，没有公钥要配 ——
+        // 传输交给 GitHub 的 TLS，执行授权仍旧只认内置的发布验签公钥，
+        // 所以改这里**不会**放宽任何执行门槛，最坏结果是「下下来的包验不过签」。
+        // 「恢复默认」要把草稿一起清掉，但草稿是从 `self.github_draft` 借出来的，
+        // 不能在借用还活着的时候赋值。用一个标志把清理挪到闭包之后。
+        let mut clear_github_draft = false;
+        ui.collapsing(
+            RichText::new("GitHub 更新源").size(11.5).color(theme.faint),
+            |ui| {
+                let draft = self.github_draft.get_or_insert_with(|| {
+                    self.github_override
+                        .as_ref()
+                        .map(|g| g.repo.clone())
+                        .or_else(|| crate::github::GithubSource::builtin().map(|g| g.repo))
+                        .unwrap_or_default()
+                });
+                ui.label(
+                    RichText::new("仓库（owner/repo）")
+                        .size(10.5)
+                        .color(theme.faint),
+                );
+                ui.add(egui::TextEdit::singleline(draft).desired_width(f32::INFINITY));
+                ui.label(
+                    RichText::new("发布页里必须有 manifest.json 附件（含各平台的 sha256 与签名）")
+                        .size(10.5)
+                        .color(theme.faint),
+                );
+                ui.horizontal(|ui| {
+                    if widgets::ghost_button(ui, &theme, "应用").clicked() {
+                        let candidate = crate::github::GithubSource {
+                            repo: draft.trim().to_owned(),
+                        };
+                        match candidate.validate() {
+                            Ok(()) => {
+                                let is_builtin = candidate.is_builtin();
+                                self.github_override = (!is_builtin).then_some(candidate);
+                                self.updater.phase = Phase::Idle;
+                                self.shared.toast(if is_builtin {
+                                    "与内置仓库一致，已按内置处理"
+                                } else {
+                                    "已切换 GitHub 更新源；自动安装已禁用，仅提示新版本"
+                                });
+                            }
+                            Err(e) => self.shared.toast(format!("仓库无效：{e}")),
+                        }
+                    }
+                    if self.github_override.is_some()
+                        && widgets::ghost_button(ui, &theme, "恢复默认仓库").clicked()
+                    {
+                        self.github_override = None;
+                        clear_github_draft = true;
+                        self.updater.phase = Phase::Idle;
+                        self.shared.toast("已恢复内置 GitHub 仓库");
+                    }
+                });
+            },
+        );
+        if clear_github_draft {
+            self.github_draft = None;
+        }
+
         // 自定义更新服务器。地址与公钥**一起改**，禁止只改其一 ——
         // 「只把地址指向我的服务器」是最省事的一种攻击，数据结构上就不让它成立。
         ui.collapsing(
@@ -1916,6 +2082,27 @@ impl FerricApp {
                         .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 );
+
+                // 边粘边算指纹：**换服务器之前**才是核对指纹最该发生的时刻。
+                // 等点完「应用」再看，那时信任已经交出去了。
+                let candidate_key: String = key.split_whitespace().collect();
+                if !candidate_key.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "这把公钥的指纹 {}",
+                            crate::net::fingerprint_of(&candidate_key)
+                        ))
+                        .family(FontFamily::Monospace)
+                        .size(10.5)
+                        .color(theme.muted),
+                    );
+                    ui.label(
+                        RichText::new("请与对方公布的指纹逐位核对后再应用")
+                            .size(10.5)
+                            .color(theme.faint),
+                    );
+                }
+
                 ui.horizontal(|ui| {
                     if widgets::ghost_button(ui, &theme, "应用").clicked() {
                         let candidate = crate::net::ServerProfile {
@@ -2242,7 +2429,11 @@ impl eframe::App for FerricApp {
             ui_scale: self.ui_scale,
             code_font: self.shared.code_font,
             auto_update: self.auto_update,
-            mock_source: self.mock_source,
+            // 两个字段一起写：新版本读 source_pref，旧版本读 mock_source。
+            // 只写新的，用户装回旧版本时设置就没了
+            mock_source: self.source_pref.to_legacy(),
+            source_pref: Some(self.source_pref),
+            github_repo: self.github_override.as_ref().map(|g| g.repo.clone()),
             last_update_check: self.last_update_check,
         };
         eframe::set_value(storage, eframe::APP_KEY, &persist);

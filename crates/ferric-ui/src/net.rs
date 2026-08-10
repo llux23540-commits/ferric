@@ -109,20 +109,45 @@ impl ServerProfile {
 
     /// 公钥指纹，给人核对用（SHA-256 前 8 字节，四字一组）。
     pub fn fingerprint(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let d = Sha256::digest(self.pubkey.as_bytes());
-        hex::encode(&d[..8])
-            .as_bytes()
-            .chunks(4)
-            .map(|c| String::from_utf8_lossy(c).to_uppercase())
-            .collect::<Vec<_>>()
-            .join(" ")
+        fingerprint_of(&self.pubkey)
+    }
+
+    /// 用户输入的指纹是否与本服务器一致。
+    ///
+    /// 核对指纹的场景就是「从网页上抄一串到客户端里」，中间必然掺进空格、大小写、
+    /// 甚至换行，所以比较前要**先归一化**。反过来，归一化只能去掉这些噪声，
+    /// 绝不能做「前缀匹配」「忽略若干位」之类的宽松处理 —— 指纹的全部价值就在于
+    /// 逐位相同，放宽一位就等于把攻击者要碰撞的位数减少一位。
+    pub fn fingerprint_matches(&self, input: &str) -> bool {
+        let norm = |s: &str| -> String {
+            s.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_uppercase())
+                .collect()
+        };
+        let expected = norm(&self.fingerprint());
+        let got = norm(input);
+        !got.is_empty() && got == expected
     }
 
     /// 是不是编译期烘入的那个。不是的话，自动安装会被禁用（见 `updater`）。
     pub fn is_builtin(&self) -> bool {
         Self::builtin().is_some_and(|b| &b == self)
     }
+}
+
+/// 由公钥算指纹。**算的是 hex 字符串本身的 SHA-256**，不是解码后的字节 ——
+/// 服务端 `crypto.rs` 与后台页面用的是同一套算法，改这里必须同步改那边，
+/// 否则运维照着后台念的指纹和用户在客户端里看到的对不上。
+pub fn fingerprint_of(pubkey_hex: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(pubkey_hex.as_bytes());
+    hex::encode(&d[..8])
+        .as_bytes()
+        .chunks(4)
+        .map(|c| String::from_utf8_lossy(c).to_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 一次请求的会话密钥。**每个请求都新生成，禁止缓存复用** ——
@@ -445,5 +470,55 @@ mod tests {
             pubkey: format!("04{}", "cd".repeat(64)),
         };
         assert_ne!(f, other.fingerprint());
+        // 独立函数与方法必须给出同一个结果（后台页面用的是同一套算法）
+        assert_eq!(f, fingerprint_of(&p.pubkey));
+    }
+
+    /// 跨进程契约：同一把公钥，客户端与服务端必须算出**同一串**指纹。
+    ///
+    /// 这条一旦红了，「核对指纹」这个功能就整个失去意义 —— 运维照着后台念的和
+    /// 用户在客户端里看到的对不上，用户只会学会「忽略这个提示」。
+    /// 服务端 `ferric-server/server/src/crypto.rs` 里钉了**同一组向量**，
+    /// 改算法必须两边同时改、两边测试都过。
+    #[test]
+    fn fingerprint_vector_matches_the_server() {
+        const PUBKEY: &str = "04f15746ccaa2aec206b598fe47d7e7430e97b862d16817ed142f69b94c07912c38a8cfbffd19610a157483fff24c45d0af23eca41d13ab9343ea06af172899313";
+        assert_eq!(fingerprint_of(PUBKEY), "2729 CD5E E522 D9FB");
+    }
+
+    /// 核对指纹：抄写过程中的噪声要容忍，**位本身一位都不能差**。
+    #[test]
+    fn fingerprint_matching_tolerates_transcription_noise_only() {
+        let p = ServerProfile {
+            base_url: "http://a".into(),
+            pubkey: format!("04{}", "ab".repeat(64)),
+        };
+        let f = p.fingerprint(); // 形如 "2729 CD5E E522 D9FB"
+
+        // 抄写噪声：大小写、空格、换行、制表符、连字符
+        assert!(p.fingerprint_matches(&f));
+        assert!(p.fingerprint_matches(&f.to_lowercase()));
+        assert!(p.fingerprint_matches(&f.replace(' ', "")));
+        assert!(p.fingerprint_matches(&f.replace(' ', "-")));
+        assert!(p.fingerprint_matches(&format!("  {f}\n")));
+        assert!(p.fingerprint_matches(&f.replace(' ', "\t")));
+
+        // 差一位就必须判不一致 —— 放宽一位等于把攻击者要碰撞的位数少一位
+        let mut wrong: Vec<char> = f.replace(' ', "").chars().collect();
+        wrong[0] = if wrong[0] == 'A' { 'B' } else { 'A' };
+        assert!(!p.fingerprint_matches(&wrong.iter().collect::<String>()));
+
+        // 截断、前缀、空串都不算一致
+        assert!(!p.fingerprint_matches(&f[..9]));
+        assert!(!p.fingerprint_matches(""));
+        assert!(!p.fingerprint_matches("   "));
+        assert!(!p.fingerprint_matches(&format!("{f}00")));
+
+        // 别的服务器的指纹当然也不算
+        let other = ServerProfile {
+            base_url: "http://a".into(),
+            pubkey: format!("04{}", "cd".repeat(64)),
+        };
+        assert!(!p.fingerprint_matches(&other.fingerprint()));
     }
 }

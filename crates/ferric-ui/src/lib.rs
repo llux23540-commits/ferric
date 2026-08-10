@@ -6,6 +6,7 @@
 mod app;
 mod chrome;
 mod fonts;
+mod github;
 mod icons;
 pub mod launch;
 mod market;
