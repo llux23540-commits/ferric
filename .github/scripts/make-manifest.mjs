@@ -30,8 +30,21 @@ import { join } from 'node:path';
 import pkg from 'sm-crypto-v2';
 
 const { sm2 } = pkg;
-const [dir, version, buildStr, minSupportedStr = '0'] = process.argv.slice(2);
+const [dir, version, buildStr, minSupportedArg] = process.argv.slice(2);
 const key = process.env.FERRIC_RELEASE_KEY?.trim();
+
+/**
+ * 最低支持构建号的默认值。
+ *
+ * **默认不强制**（0）：强制更新会把用户挡在门外，是个应当显式作出的决定，
+ * 不该因为某次发版忘了填就悄悄生效，更不该因为忘了清就一直生效。
+ * 要强制时在仓库 Variables 里设 `FERRIC_MIN_SUPPORTED_BUILD`，或传第四个参数。
+ *
+ * ⚠️ 这个值只管**GitHub 这条更新源**。客户端一旦切到自建服务端，用的就是服务端
+ * 每个版本自己的 `min_supported_build`（后台可改，改完立刻生效，不必重新发版）——
+ * 两条源各自携带各自的策略，客户端只按当前源本地重算 force，不会互相覆盖。
+ */
+const DEFAULT_MIN_SUPPORTED_BUILD = 0;
 
 if (!dir || !version || !buildStr) {
   console.error('用法：node make-manifest.mjs <产物目录> <版本号> <构建号> [最低支持构建号]');
@@ -42,15 +55,37 @@ if (!key) {
   process.exit(2);
 }
 const build = Number.parseInt(buildStr, 10);
-const minSupported = Number.parseInt(minSupportedStr, 10) || 0;
 if (!Number.isInteger(build) || build <= 0) {
   console.error(`构建号须为正整数，收到「${buildStr}」—— 客户端靠它比新旧`);
   process.exit(2);
 }
+
+// 优先级：命令行 > 环境变量 > 默认值。空串一律当作「没设」——
+// GitHub 的 vars 未定义时展开成空串，那种情况必须落到默认值而不是 NaN。
+const rawMin = [minSupportedArg, process.env.FERRIC_MIN_SUPPORTED_BUILD]
+  .map(v => v?.trim())
+  .find(v => v);
+let minSupported = DEFAULT_MIN_SUPPORTED_BUILD;
+if (rawMin !== undefined) {
+  minSupported = Number.parseInt(rawMin, 10);
+  // 写错了就停下，而不是静默退回 0：把「本该强制」悄悄变成「不强制」，
+  // 是那种要等到出事才会有人发现的错
+  if (!Number.isInteger(minSupported) || minSupported < 0) {
+    console.error(`最低支持构建号须为非负整数，收到「${rawMin}」`);
+    process.exit(2);
+  }
+}
 if (minSupported > build) {
-  console.error('最低支持构建号不能大于本次构建号，那会把用户困在一个不存在的版本上');
+  console.error(
+    `最低支持构建号 ${minSupported} 不能大于本次构建号 ${build}，那会把用户困在一个不存在的版本上`
+  );
   process.exit(2);
 }
+console.error(
+  minSupported > 0
+    ? `⚠ 本次为强制更新：低于构建号 ${minSupported} 的客户端会看到强制提示`
+    : '本次不强制更新（min_supported_build = 0）'
+);
 
 /** 从产物文件名里认出平台与架构。命名规则见 release.yml 的 Collect artifacts 步。 */
 const TARGETS = [
