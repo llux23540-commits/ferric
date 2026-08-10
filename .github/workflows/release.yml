@@ -140,11 +140,40 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # 发布私钥只注入这一个 job（6 个构建 job 一概拿不到），并挂在 release 环境上 ——
+    # 在仓库设置里给这个环境加「必需审批」，就能让每次签名都要人点一下。
+    environment: release
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # 构建号 = git 提交数，必须与 ferric-ui/build.rs 烘进二进制的值**完全一致**，
+          # 否则客户端会把 manifest 判成「不是这一版」。浅克隆会算错。
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 生成并签名 manifest.json
+        env:
+          # 私钥走环境变量，绝不进命令行 —— 命令行会出现在进程列表与部分日志里
+          FERRIC_RELEASE_KEY: ${{ secrets.FERRIC_RELEASE_KEY }}
+        run: |
+          if [ -z "$FERRIC_RELEASE_KEY" ]; then
+            echo "::error::未配置 secrets.FERRIC_RELEASE_KEY —— 没有签名的发布，客户端会拒绝安装"
+            exit 1
+          fi
+          # 版本钉死不用 ^：这是跨实现的签名依赖，升级它必须重新验一遍与 libsm 的互通
+          npm install --no-save --no-audit --no-fund sm-crypto-v2@1.15.1
+          build=$(git rev-list --count HEAD)
+          echo "::notice::构建号 $build（与二进制里烘入的须一致）"
+          node .github/scripts/make-manifest.mjs dist "${GITHUB_REF_NAME#v}" "$build"
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

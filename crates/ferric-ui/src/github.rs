@@ -454,6 +454,33 @@ mod tests {
         )
     }
 
+    /// **跨实现固定向量**：这份 manifest 的签名是发版流水线用的那套 JS
+    /// （`sm-crypto-v2@1.15.1`，`.github/scripts/make-manifest.mjs`）签出来的，
+    /// 这里用 Rust 的 libsm 验它。
+    ///
+    /// 两边是完全不同的实现，历史上在三处分道扬镳过：C1C2C3 顺序、`04` 前缀、
+    /// SM3+ZA 那一步（漏了 `hash:true` 就验不过）。这条钉住的是「客户端确实认得
+    /// 流水线签出来的东西」。
+    ///
+    /// ⚠️ 它**测不到**「sm-crypto-v2 升级后行为变了」—— 向量是静态的。
+    /// 所以工作流里把版本钉死了；真要升级，必须重新跑一遍 JS 签 → libsm 验。
+    #[test]
+    fn accepts_a_signature_produced_by_the_release_pipeline() {
+        const PUBKEY: &str = "0446d1086f6e5c938447f05280db707c279a7b459c38f19e4d9a30ad2dadf9f28af45fc1dc5b377736b57e97e7e0563ccca24c97f440e1d137e5941d84d2eb43c9";
+        const SIG: &str = "3046022100ffcfca5d3de3b766372fcc947e092f9c2014568e60b5b2f36b5e35093a3cf2c5022100f9a0486eb078b5c16c407a69cf6ebdf3149d602fa83db5599f3836019e05eae1";
+        let body = format!(
+            r#"{{"version":"0.2.17","build":74,"notes":"","min_supported_build":0,
+                 "artifacts":[{{"platform":"windows","arch":"aarch64","ext":".exe",
+                   "file":"ferric-v0.2.17-windows-aarch64-setup.exe",
+                   "sha256":"{SHA}","size":1234,"signature":"{SIG}"}}]}}"#
+        );
+        let info = parse_manifest(&body, "windows", "aarch64", 1, PUBKEY)
+            .expect("JS 签的签名 libsm 必须验得过")
+            .expect("build 74 > 1，应报告有更新");
+        assert_eq!(info.version, "0.2.17");
+        assert_eq!(info.build, 74);
+    }
+
     #[test]
     fn valid_manifest_yields_an_update() {
         let (pk, sk) = keypair();
