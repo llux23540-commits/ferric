@@ -93,7 +93,30 @@ impl JsonTool {
     /// 切换缩进并**立即**按新缩进重排（内容为合法 JSON 时）。
     fn set_indent(&mut self, indent: Indent) {
         self.indent = indent;
-        if let Ok(out) = json::format(&self.input, indent, self.sort) {
+        self.reflow("已按新缩进格式化");
+    }
+
+    /// 切换键名排序并**立即**重排。
+    ///
+    /// 这里曾经只翻标志位、不重排：图标亮了，正文纹丝不动，要再点一次「格式化」
+    /// 才生效 —— 用户看到的就是「排序没有效果」。缩进那个开关一直是「切了就重排」，
+    /// 两个并排的开关行为不一致，更让人以为是坏的。
+    fn set_sort(&mut self, sort: bool) {
+        self.sort = sort;
+        self.reflow(if sort {
+            "已按键名 A→Z 排序"
+        } else {
+            "已恢复原始键序"
+        });
+    }
+
+    /// 按当前 缩进 + 排序 重排正文；内容不是合法 JSON 就什么都不做。
+    ///
+    /// ⚠️ 关掉排序时输出与当前正文**一模一样**（排序不可逆：原始键序已经丢了），
+    /// 于是 `out != self.input` 不成立、不进撤销栈也不改正文 —— 这是正确的，
+    /// 但状态条仍要如实说一声，否则又变成「点了没反应」。
+    fn reflow(&mut self, done: &str) {
+        if let Ok(out) = json::format(&self.input, self.indent, self.sort) {
             if out != self.input {
                 self.undo.push(self.input.clone());
                 self.redo.clear();
@@ -101,7 +124,7 @@ impl JsonTool {
                 self.sync_baseline();
             }
             self.ok = true;
-            self.status = "已按新缩进格式化".to_owned();
+            self.status = done.to_owned();
         }
     }
 
@@ -382,7 +405,7 @@ impl JsonTool {
             )
             .clicked()
             {
-                self.sort = !self.sort;
+                self.set_sort(!self.sort);
             }
             if widgets::tb_icon_btn(
                 ui,
@@ -735,6 +758,40 @@ mod tests {
         assert_ne!(tool.input, "{}", "重做没能把编辑恢复回来");
     }
 
+    /// **点工具条上那颗撤销按钮**（不是直接调 `undo()`）必须真的撤销。
+    ///
+    /// 上一条测的是 `undo()` 的行为，这条走的是用户的真实路径：按钮 → 状态 → 正文。
+    /// 中间还隔着一层容易出错的东西 —— 栈空时按钮是 `add_enabled_ui` 包着的、
+    /// 点了不该有反应；而手动编辑要到**下一帧**开头才入栈（工具条比 `ui()` 先跑），
+    /// 所以「敲完立刻点」这一帧按钮还是灰的。这条把时序一并钉住。
+    ///
+    /// 按钮坐标：工具条按钮 32 宽、间距 3，撤销前面有 5 颗按钮加一条 11 宽的分隔线
+    /// → 5*35 + 11 + 3 + 16 = 205。
+    #[test]
+    fn clicking_the_undo_button_reverts_the_text() {
+        const UNDO_BTN: Pos2 = Pos2::new(205.0, 16.0);
+        let mut tool = JsonTool {
+            input: "{}".to_owned(),
+            baseline: "{}".to_owned(),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+
+        let mut frames = click_frames(pos2(120.0, 140.0)); // 点进编辑区
+        frames.push(vec![Event::Text("a".to_owned())]);
+        frames.push(vec![Event::Text("b".to_owned())]);
+        frames.push(vec![]); // 这一帧开头才把手动编辑记进栈
+        frames.extend(click_frames(UNDO_BTN)); // 再点撤销按钮
+        frames.push(vec![]);
+        drive_tool(&mut tool, screen, frames);
+
+        assert_eq!(
+            tool.input, "{}",
+            "点了撤销按钮但正文没回到编辑前：{:?}",
+            tool.input
+        );
+    }
+
     /// 连续打字必须合并成**一个**撤销点：一个字符一步的话，
     /// 撤销一句话要按几十次，等于没有撤销。
     #[test]
@@ -757,6 +814,66 @@ mod tests {
             1,
             "一串连打应当只记一个撤销点，实际记了 {} 个",
             tool.undo.len()
+        );
+    }
+
+    /// 用户报的问题：**点「键名排序」没有效果。**
+    ///
+    /// 根因不在核心（`json::format(.., sort=true)` 一直是对的），而在按钮**只翻了
+    /// 标志位、没有重排**：图标亮了、正文纹丝不动，要再点一次「格式化」才生效。
+    /// 而隔壁的缩进开关一直是「切了就重排」，两个并排的开关行为不一致。
+    #[test]
+    fn toggling_sort_reorders_immediately() {
+        let mut tool = JsonTool {
+            input: "{\n  \"b\": 1,\n  \"a\": 2\n}".to_owned(),
+            ..Default::default()
+        };
+        tool.sync_baseline();
+
+        tool.set_sort(true);
+        let a = tool.input.find("\"a\"").expect("排序后 a 还在");
+        let b = tool.input.find("\"b\"").expect("排序后 b 还在");
+        assert!(a < b, "切了排序但正文没重排：{:?}", tool.input);
+        assert!(!tool.undo.is_empty(), "重排改动了正文，就该能撤销回去");
+
+        // 嵌套对象也要排（sort_value_keys 是递归的，这条守住上层没绕过它）
+        let mut nested = JsonTool {
+            input: "{\"z\":{\"n\":1,\"m\":2}}".to_owned(),
+            ..Default::default()
+        };
+        nested.sync_baseline();
+        nested.set_sort(true);
+        let m = nested.input.find("\"m\"").expect("m 还在");
+        let n = nested.input.find("\"n\"").expect("n 还在");
+        assert!(m < n, "嵌套层没被排序：{:?}", nested.input);
+    }
+
+    /// 排序按钮必须走 `set_sort`（切了就重排），不能只翻标志位。
+    ///
+    /// 上一条测的是 `set_sort` 的行为，这条守的是**按钮确实接到了它** ——
+    /// 原来的 bug 正是「行为函数没问题、按钮没调它」：写成 `self.sort = !self.sort`
+    /// 就又回到「图标亮了、正文不动」。缩进按钮同理。
+    #[test]
+    fn the_sort_button_reflows_instead_of_only_flipping_the_flag() {
+        let src = include_str!("json.rs");
+        let bar = src
+            .split("fn toolbar_row(")
+            .nth(1)
+            .expect("toolbar_row 不见了");
+        let bar = &bar[..bar.find("\n    fn ").unwrap_or(bar.len())];
+        // 只看代码，不看注释：这条注释本身就在解释那个反面写法。
+        let code: String = bar
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("self.set_sort("),
+            "排序按钮没走 set_sort —— 会退回「只翻标志位、正文不重排」"
+        );
+        assert!(
+            !code.contains("self.sort = "),
+            "排序按钮又在直接赋值标志位了：那样点了不会重排，用户看到的就是「没有效果」"
         );
     }
 
