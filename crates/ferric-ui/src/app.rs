@@ -3093,8 +3093,8 @@ mod dialog_tests {
 
 #[cfg(test)]
 mod perf_tests {
-    use std::time::{Duration, Instant};
     use crate::RunUiExt;
+    use std::time::{Duration, Instant};
 
     /// 跑 `frames` 帧，返回**最快一帧**的耗时。
     ///
