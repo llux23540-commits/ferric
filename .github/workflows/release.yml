@@ -81,7 +81,13 @@ jobs:
         with:
           # 失败的运行也保存缓存，避免下次全量重编译
           cache-on-failure: true
-      - run: cargo build --release -p ferric-app
+      - name: 构建（烘入验签公钥与 GitHub 更新源）
+        # 最小变量：验签公钥从 Variables 读（公钥可公开，放 Variables 而非 secret），
+        # GitHub 更新源直接硬编码为本仓库 —— 客户端「验签」与「去哪看更新」两样齐了。
+        env:
+          FERRIC_RELEASE_PUBKEY: ${{ vars.FERRIC_RELEASE_PUBKEY }}
+          FERRIC_GITHUB_REPO: llux23540-commits/ferric
+        run: cargo build --release -p ferric-app
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install cargo-packager
