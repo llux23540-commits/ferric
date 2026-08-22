@@ -987,6 +987,10 @@ impl FerricApp {
         ui.add_space(2.0);
         if resp.clicked() {
             self.active = idx;
+            // 切换工具后立即请求重绘：与 present_hygiene 的「焦点上升沿立即重绘」
+            // 同理 —— DX12 flip-model 下交换链里还留着上一帧，切换瞬间旧内容多
+            // 停留一帧就是「切一下闪一下」。显式请求把新内容压到下一帧就上屏。
+            ui.ctx().request_repaint();
         }
     }
 
@@ -2657,6 +2661,7 @@ fn perf_probe(ctx: &egui::Context, t0: std::time::Instant) {
 #[cfg(test)]
 mod dialog_tests {
     use super::{Color32, SettingsRaise, Theme, RAISE_WAIT_FRAMES};
+    use crate::RunUiExt;
 
     /// 软渲染清晰度自适应的契约：剥掉**两个样式槽**（深/浅）里的全部阴影。
     /// 阴影是软件光栅化下「一片糊」的主要来源；只剥当前槽的话，
@@ -2821,7 +2826,7 @@ mod dialog_tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(428.0, 620.0));
         let mut strokes = Vec::new();
         for _ in 0..2 {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     ..Default::default()
@@ -3089,6 +3094,7 @@ mod dialog_tests {
 #[cfg(test)]
 mod perf_tests {
     use std::time::{Duration, Instant};
+    use crate::RunUiExt;
 
     /// 跑 `frames` 帧，返回**最快一帧**的耗时。
     ///
@@ -3102,7 +3108,7 @@ mod perf_tests {
         let mut best = Duration::MAX;
         for i in 0..12 {
             let t0 = Instant::now();
-            let _ = ctx.run_ui(
+            let _ = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),

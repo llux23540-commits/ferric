@@ -113,23 +113,22 @@ impl DiffTool {
             .input(|i| i.pointer.hover_pos().map(|p| p.x))
             .unwrap_or(center_x);
         for file in dropped {
-            if let Some(path) = &file.path {
-                match std::fs::read_to_string(path) {
-                    Ok(text) => {
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        if pointer_x < center_x {
-                            self.left = text;
-                            self.left_name = name;
-                        } else {
-                            self.right = text;
-                            self.right_name = name;
-                        }
+            let path = file.path();
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if pointer_x < center_x {
+                        self.left = text;
+                        self.left_name = name;
+                    } else {
+                        self.right = text;
+                        self.right_name = name;
                     }
-                    Err(e) => shared.toast(format!("读取文件失败：{e}")),
                 }
+                Err(e) => shared.toast(format!("读取文件失败：{e}")),
             }
         }
     }
@@ -733,6 +732,7 @@ impl Tool for DiffTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
 
     /// 用户报的问题：**「左侧多了一部分，右侧就看不出来差异在哪」**。
     ///
@@ -875,7 +875,7 @@ mod tests {
         let mut frame =
             |tool: &mut DiffTool, shared: &mut crate::tool::Shared, events: Vec<egui::Event>| {
                 t += 0.05;
-                let out = ctx.run_ui(
+                let out = ctx.run_ui_cleared(
                     egui::RawInput {
                         screen_rect: Some(screen),
                         time: Some(t),

@@ -1057,6 +1057,7 @@ fn code_editor_inner(
                     // 上报候选框位置：焦点期间恒定，OS 才会把输入法窗贴到光标处并开启 IME。
                     ui.ctx().output_mut(|o| {
                         o.ime = Some(egui::output::IMEOutput {
+                            purpose: egui::IMEPurpose::Normal,
                             rect,
                             cursor_rect: cr,
                             should_interrupt_composition: false,
@@ -1712,6 +1713,7 @@ fn draw_arrow(painter: &egui::Painter, hit: Rect, folded: bool, color: Color32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
 
     /// 在无窗口环境下跑一帧，拿到可用的字体系统，然后按给定宽度排版一段文本。
     ///
@@ -1728,7 +1730,8 @@ mod tests {
         job.wrap.max_width = wrap_w;
         job.wrap.break_anywhere = wrap_w.is_finite();
         let galley = ctx.fonts_mut(|f| f.layout_job(job));
-        let _ = ctx.end_pass();
+        let mut out = ctx.end_pass();
+        out.textures_delta.clear();
         galley
     }
 
@@ -1921,7 +1924,7 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = ctx.run_ui_cleared(input, |ui| {
                 code_editor(
                     ui,
                     &theme,
@@ -1947,7 +1950,7 @@ mod tests {
         let mut right = f32::NEG_INFINITY;
         // 跑两帧：第一帧建立布局，第二帧的输出才是稳定的
         for i in 0..2 {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0))),
                     time: Some(i as f64 * 0.05),
@@ -2081,7 +2084,7 @@ mod tests {
         ];
         let mut copied = String::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2180,7 +2183,7 @@ mod tests {
         ];
         let mut copied = String::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2255,7 +2258,7 @@ mod tests {
         let mut painted = false;
         for (i, events) in frames.into_iter().enumerate() {
             let last = i == 5;
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2304,7 +2307,7 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let mut copied = String::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2521,7 +2524,7 @@ mod tests {
         let mut found = false;
         for (i, events) in frames.into_iter().enumerate() {
             let last = i == 8;
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2733,7 +2736,7 @@ mod tests {
             ],
         ];
         for (i, events) in frames.into_iter().enumerate() {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2781,7 +2784,7 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let mut out_x = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2899,7 +2902,7 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
         let (mut hb, mut vb) = (false, false);
         for i in 0..3 {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -2977,7 +2980,7 @@ mod tests {
             let mut buf = text.to_owned();
             let mut wh = (0.0f32, 0.0f32);
             for i in 0..2 {
-                let out = ctx.run_ui(
+                let out = ctx.run_ui_cleared(
                     egui::RawInput {
                         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
                         time: Some(i as f64 * 0.05),
@@ -3038,7 +3041,7 @@ mod tests {
             let mut buf = text.to_owned();
             let mut wh = (0.0f32, 0.0f32);
             for i in 0..2 {
-                let out = ctx.run_ui(
+                let out = ctx.run_ui_cleared(
                     egui::RawInput {
                         screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
                         time: Some(i as f64 * 0.05),
@@ -3122,7 +3125,7 @@ mod tests {
         let mut buf = "{\n  \"a\": 1\n}".to_owned();
         let mut before = None;
         let mut after = None;
-        let _ = ctx.run_ui(
+        let _ = ctx.run_ui_cleared(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0))),
                 ..Default::default()
@@ -3164,7 +3167,7 @@ mod tests {
             let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
             let mut found = false;
             for i in 0..3 {
-                let out = ctx.run_ui(
+                let out = ctx.run_ui_cleared(
                     egui::RawInput {
                         screen_rect: Some(screen),
                         time: Some(i as f64 * 0.05),
@@ -3208,7 +3211,7 @@ mod tests {
         theme.apply(&ctx);
         let mut buf = long.clone();
         let mut floating = true;
-        let _ = ctx.run_ui(
+        let _ = ctx.run_ui_cleared(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0))),
                 ..Default::default()
@@ -3259,7 +3262,7 @@ mod tests {
         // 每帧记录 (行号文字最左 x, 正文最左 x)
         let mut samples: Vec<(f32, f32)> = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
@@ -3411,6 +3414,7 @@ mod tests {
 #[cfg(test)]
 mod layout_cache_tests {
     use super::*;
+    use crate::RunUiExt;
     use egui::{vec2, Pos2, Rect};
 
     /// 跑一帧，返回这一帧用的那份 [`Layout`] 的地址。
@@ -3434,7 +3438,7 @@ mod layout_cache_tests {
         // 编辑器的 id 由 `ui.make_persistent_id` 从所在 Ui 的 id 链推出来，
         // 外面猜不到 —— 在同一个 Ui 上照同样的规则算一遍，才拿得到同一个 id。
         let mut lay_id = None;
-        let _ = ctx.run_ui(
+        let _ = ctx.run_ui_cleared(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()

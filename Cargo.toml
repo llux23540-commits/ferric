@@ -11,7 +11,7 @@ exclude = ["plugins"]
 # 本地没有任何三段式 tag 时，UI 显示的就是这个锚点值。
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.95"
 license = "MIT"
 authors = ["Ferric"]
 
@@ -21,9 +21,9 @@ ferric-core = { path = "crates/ferric-core" }
 ferric-ui = { path = "crates/ferric-ui" }
 
 # GUI
-eframe = { version = "0.35", default-features = false, features = ["wgpu", "persistence", "wayland", "x11"] }
-egui = "0.35"
-egui_json_tree = "0.16"
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "persistence", "wayland", "x11"] }
+egui = "0.36"
+egui_json_tree = "0.17"
 
 # Serialization / data
 serde = { version = "1", features = ["derive"] }

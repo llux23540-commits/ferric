@@ -978,6 +978,7 @@ pub fn status_line(ui: &mut Ui, theme: &Theme, ok: bool, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
 
     /// 点击对比面板聚焦时，光标必须落在**点击处附近**，绝不能被折到文末 ——
     /// 折到文末会触发「滚动到光标」，视图瞬移到底部，左右同步再把另一栏也带走，
@@ -1012,7 +1013,7 @@ mod tests {
             vec![],
         ];
         for events in frames {
-            let _ = ctx.run_ui(
+            let _ = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,

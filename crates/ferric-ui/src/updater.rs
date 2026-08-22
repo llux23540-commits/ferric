@@ -755,6 +755,7 @@ fn launch_command(os: &str, ext: &str, file: &Path) -> Result<std::process::Comm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
 
     /// 扩展名白名单必须按平台严格限制 —— 它决定了我们怎么执行下载到的文件。
     #[test]
@@ -854,7 +855,7 @@ mod tests {
 
     /// 把 egui 的时间轴推到 `t`（`tick` 里读的是上一帧的 `input().time`）。
     fn frame_at(ctx: &egui::Context, t: f64) {
-        let _ = ctx.run_ui(
+        let _ = ctx.run_ui_cleared(
             egui::RawInput {
                 time: Some(t),
                 ..Default::default()

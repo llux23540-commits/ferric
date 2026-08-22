@@ -224,7 +224,7 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn from_hex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if !s.is_ascii() || s.len() % 2 != 0 {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return Err("无效 hex 密文".into());
     }
     (0..s.len())

@@ -439,6 +439,7 @@ impl Tool for TimestampTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
     use egui::{vec2, Event, Pos2, Rect};
 
     /// 重绘节奏的合同：实时时钟每秒最多唤醒一次，暂停后零调度。
@@ -457,7 +458,7 @@ mod tests {
         let mut tool = TimestampTool::default();
 
         let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64| {
-            ctx.run_ui(
+            ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
                     time: Some(t),
@@ -514,7 +515,7 @@ mod tests {
         let mut tool = TimestampTool::default();
 
         let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64, events: Vec<Event>| {
-            ctx.run_ui(
+            ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
                     time: Some(t),
@@ -526,6 +527,14 @@ mod tests {
                 },
             )
         };
+
+        // 预热几帧：egui 0.36 首帧会发 viewport 命令（光标 / IME 定位），触发
+        // request_repaint_of，把 repaint.outstanding 置 1 —— 于是下一帧的
+        // repaint_delay 是 0，与「应用有没有主动调度」无关。预热把这些初始请求
+        // 消耗掉，之后 repaint_delay 才真正反映静置停表。
+        for i in 0..3 {
+            let _ = frame(&mut tool, &mut shared, i as f64 * 0.02, vec![]);
+        }
 
         // 静置未到点：照常按秒调度
         let out = frame(&mut tool, &mut shared, IDLE_PAUSE_SECS - 1.0, vec![]);
@@ -608,7 +617,7 @@ mod tests {
         let mut shared = Shared::new(theme);
         let mut found = None;
         for i in 0..3 {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
                     time: Some(i as f64 * 0.05),
@@ -655,7 +664,7 @@ mod tests {
         let mut last = None;
         for i in 0..24usize {
             let events = frames.get(i).cloned().unwrap_or_default();
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, screen_h))),
                     time: Some(i as f64 * 0.05),
@@ -708,7 +717,7 @@ mod tests {
         let mut last = None;
         for i in 0..(30 + n) {
             let events = frames.get(i).cloned().unwrap_or_default();
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0))),
                     time: Some(i as f64 * 0.05),

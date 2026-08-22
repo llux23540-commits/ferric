@@ -167,10 +167,9 @@ impl JsonTool {
             return;
         }
         let now = std::time::Instant::now();
-        // 不用 `is_none_or`：它 Rust 1.82 才稳定，本仓库 MSRV 是 1.80。
         let new_step = self
             .last_edit_at
-            .map_or(true, |t| now.duration_since(t) > EDIT_COALESCE);
+            .is_none_or(|t| now.duration_since(t) > EDIT_COALESCE);
         if new_step {
             self.undo.push(std::mem::take(&mut self.baseline));
             self.redo.clear();
@@ -622,6 +621,7 @@ fn demo_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunUiExt;
     use egui::{pos2, vec2, Event, Pos2, Rect};
 
     /// 无窗口地驱动**完整的 JSON 工具**（工具条 + 编辑区），一帧一批事件。
@@ -641,7 +641,7 @@ mod tests {
         let mut copied = Vec::new();
         let mut statuses = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
-            let out = ctx.run_ui(
+            let out = ctx.run_ui_cleared(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     time: Some(i as f64 * 0.05),
