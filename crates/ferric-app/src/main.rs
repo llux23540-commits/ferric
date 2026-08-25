@@ -26,11 +26,19 @@ fn native_options() -> eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         // 首次在主屏居中打开（之后由 persist_window 记住用户调整）。
         centered: true,
-        // 表面配置压到「低延迟」：GUI 本身没有 GPU 工作量，把呈现队列从默认的
-        // 2 帧降到 1 帧。排队的帧越少，画面与实际状态越同步 —— 软件光栅化的机器上
-        // 排队等于让一帧陈旧内容多停留一个刷新周期，看着就是闪。
+        // 表面配置（仅 Windows）：present 用 Mailbox。DX12 上 Fifo 是 3 帧队列，
+        // 画面恒定落后、hover 高亮「闪一下」；Immediate 则撕裂。Mailbox 是单帧队列、
+        // 新帧替换旧帧，vblank 时弹出最新帧：既不撕裂也不落后。软件光栅化的机器
+        // 靠帧率封顶兜底。其余平台保持 LOW_LATENCY：它们没有 DX12 flip-model 这套问题。
         wgpu_options: eframe::WgpuConfiguration {
-            surface: eframe::SurfaceConfig::LOW_LATENCY,
+            surface: if cfg!(target_os = "windows") {
+                eframe::SurfaceConfig {
+                    present_mode: eframe::wgpu::PresentMode::Mailbox,
+                    desired_maximum_frame_latency: Some(1),
+                }
+            } else {
+                eframe::SurfaceConfig::LOW_LATENCY
+            },
             ..Default::default()
         },
         viewport: egui::ViewportBuilder::default()

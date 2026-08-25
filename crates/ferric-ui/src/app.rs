@@ -377,6 +377,12 @@ impl FerricApp {
 
         // 记下真实拿到的适配器：设置页「渲染后端」区块要展示「现在实际用的是什么」。
         // 用户切后端做 A/B 对比时，没有这行就无从确认切换是否真的生效。
+        //
+        // `FERRIC_SOFT_RENDER=1` 强制按软件渲染处理。虚拟机 / 远程桌面的虚拟 GPU
+        // 常被 wgpu 报告成 IntegratedGpu（device_type != Cpu），于是整套软渲染自适应
+        // （关阴影/动画/羽化 + 帧率封顶）一个都不生效 —— 悬停闪动、拖动拖影多半源于此。
+        // 无 GPU 环境下设这个变量，等同于明确告诉应用「别把虚拟 GPU 当真 GPU」。
+        let force_soft = std::env::var_os("FERRIC_SOFT_RENDER").is_some();
         let (gpu_desc, gpu_software) = match cc.wgpu_render_state.as_ref() {
             Some(rs) => {
                 let info = rs.adapter.get_info();
@@ -387,10 +393,10 @@ impl FerricApp {
                     eframe::wgpu::Backend::Metal => "Metal",
                     _ => "其他",
                 };
-                let sw = info.device_type == eframe::wgpu::DeviceType::Cpu;
+                let sw = info.device_type == eframe::wgpu::DeviceType::Cpu || force_soft;
                 (Some(format!("{backend} · {}", info.name)), sw)
             }
-            None => (None, false),
+            None => (None, force_soft),
         };
         // 同一行写进 startup.log：排「画面糊 / 卡」这类问题时，
         // 「实际用了哪块适配器」是第一个要回答的问题。
@@ -2346,10 +2352,9 @@ impl FerricApp {
     ///    切回来看到的内容没有差异，就谈不上闪。
     /// 2. **拖动窗口时整窗「发花」**：flip-model 的 present 与窗口移动天然不同步，
     ///    Fifo（等 vblank）让画面恒定落后窗口约一帧；无边框窗口整个客户区都是内容，
-    ///    错一帧就是全屏残影。窗口位置一变就临时把表面切到 AutoNoVsync（wgpu 的
-    ///    DX12 交换链常开 ALLOW_TEARING，present 不再排队等 vblank），位置稳定
-    ///    300ms 后切回 [`eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY`]。
-    ///    代价是拖动瞬间可能有轻微撕裂，但远好于整窗残影。
+    ///    错一帧就是全屏残影。这个根子已在 `main.rs` 层面解决：Windows 上表面配置
+    ///    改用 Mailbox（单帧队列，present 不再排队等 vblank），拖动期间无需再切换。
+    ///    这里只负责「移动中不重绘」—— 内容相对客户区没变，一帧不画就一帧不会错位。
     fn present_hygiene(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !cfg!(target_os = "windows") {
             return;
