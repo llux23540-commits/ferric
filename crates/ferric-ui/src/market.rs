@@ -428,7 +428,7 @@ mod tests {
     ) {
         use libsm::sm2::encrypt::DecryptCtx;
         use libsm::sm2::signature::SigCtx;
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpListener;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -500,6 +500,16 @@ mod tests {
                 );
                 let _ = s.write_all(resp.as_bytes());
                 let _ = s.flush();
+                // 优雅关闭：先关写方向，再排空客户端剩余字节到 EOF。
+                // 不这样做的话，Windows 上 close 一个接收缓冲里还有未读数据的
+                // socket 会发 RST（os error 10054），客户端读到一半就被重置。
+                let _ = s.shutdown(std::net::Shutdown::Write);
+                let mut sink = [0u8; 512];
+                while let Ok(n) = s.read(&mut sink) {
+                    if n == 0 {
+                        break;
+                    }
+                }
             }
         });
         (format!("http://{addr}"), pk_hex, hits)
