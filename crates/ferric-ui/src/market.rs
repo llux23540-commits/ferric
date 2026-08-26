@@ -500,10 +500,9 @@ mod tests {
                 );
                 let _ = s.write_all(resp.as_bytes());
                 let _ = s.flush();
-                // 优雅关闭：先关写方向，再排空客户端剩余字节到 EOF。
-                // 不这样做的话，Windows 上 close 一个接收缓冲里还有未读数据的
-                // socket 会发 RST（os error 10054），客户端读到一半就被重置。
-                let _ = s.shutdown(std::net::Shutdown::Write);
+                // 不主动 shutdown(Write)：响应带 Content-Length，客户端读完 body 会主动
+                // 关闭连接（发 FIN），服务端读到 EOF 再退。加个读超时兜底，避免异常时永久阻塞。
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                 let mut sink = [0u8; 512];
                 while let Ok(n) = s.read(&mut sink) {
                     if n == 0 {
