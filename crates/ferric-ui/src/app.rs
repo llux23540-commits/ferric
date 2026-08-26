@@ -269,6 +269,8 @@ pub struct FerricApp {
     pending_restart: Option<crate::launch::Backend>,
     /// 用户点了「立即重启」，等本帧画完由外壳执行（见 `do_restart`）。
     want_restart: bool,
+    /// 更新就绪后自动弹出的更新框是否打开（「稍后」/ Esc / 点背景关闭）。
+    update_dialog_open: bool,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -502,6 +504,7 @@ impl FerricApp {
             slow_render_retry: None,
             pending_restart: None,
             want_restart: false,
+            update_dialog_open: false,
         }
     }
 
@@ -2261,6 +2264,151 @@ impl FerricApp {
             ctx.request_repaint_after(t.until - now);
         }
     }
+
+    /// 更新就绪后自动弹出的模态更新框。
+    ///
+    /// 只在「已下载并通过 sha256 + 签名三重校验」后打开（`Tick::ReadyToInstall` 置位
+    /// `update_dialog_open`）。框里给出版本与更新说明，主按钮是「立即安装」——点击即
+    /// 覆盖安装当前版本（拉起安装程序并退出本进程）。「稍后」只是收起框，顶栏的
+    /// 「安装 vX」按钮仍在，随时可装。
+    fn update_dialog_ui(&mut self, ctx: &egui::Context) {
+        if !self.update_dialog_open {
+            return;
+        }
+        let theme = self.shared.theme;
+        let phase = self.updater.phase.clone();
+        let source = self.source();
+        let allows_install = source.as_ref().is_some_and(|s| s.allows_install());
+
+        // 只有「就绪」才有安装动作可做；其它状态（失败 / 已是最新）不该有这框。
+        let (info, file) = match &phase {
+            crate::updater::Phase::Ready { info, file } => (info.clone(), file.clone()),
+            _ => {
+                self.update_dialog_open = false;
+                return;
+            }
+        };
+
+        enum Action {
+            Dismiss,
+            Install,
+        }
+        // 闭包里只登记意图，出来后统一改 `self`（`Modal::show` 的闭包是 FnOnce，
+        // 直接在里面改 `self` 会跟 `&mut self` 的借用打架）。
+        let mut action: Option<Action> = None;
+
+        let frame = Frame::NONE
+            .fill(theme.bg)
+            .corner_radius(CornerRadius::same(14))
+            .inner_margin(Margin::same(22))
+            .stroke(Stroke::new(1.0, theme.border_2));
+
+        let modal = egui::Modal::new(egui::Id::new("update-dialog"))
+            .backdrop_color(Color32::from_black_alpha(120))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(400.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(icons::text(icons::REFRESH_CW, 18.0, theme.accent));
+                        ui.label(
+                            RichText::new(format!("发现新版本 v{}", info.version))
+                                .size(16.0)
+                                .strong()
+                                .color(theme.fg),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "当前 v{}（构建 {}）→ v{}（构建 {}）",
+                            crate::updater::my_version(),
+                            crate::updater::my_build(),
+                            info.version,
+                            info.build,
+                        ))
+                        .size(11.0)
+                        .color(theme.muted),
+                    );
+                    if info.force {
+                        ui.label(
+                            RichText::new("强制更新：当前版本已低于声明的最低支持版本")
+                                .size(11.0)
+                                .color(theme.danger),
+                        );
+                    }
+                    if let Some(badge) = source.as_ref().and_then(|s| s.badge()) {
+                        ui.label(RichText::new(&badge).size(10.5).color(theme.faint));
+                    }
+
+                    if !info.notes.trim().is_empty() {
+                        ui.add_space(8.0);
+                        ScrollArea::vertical()
+                            .max_height(160.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(&info.notes).size(11.5).color(theme.fg_soft),
+                                );
+                            });
+                    }
+
+                    ui.add_space(12.0);
+                    let hint = if !allows_install {
+                        "该更新源不会真的执行安装（演示 / 自定义源）"
+                    } else {
+                        match std::env::consts::OS {
+                            "windows" => "点击「立即安装」将覆盖当前版本并退出 Ferric",
+                            "macos" => "点击「立即安装」将打开安装包，需手动完成",
+                            _ => "点击「立即安装」将交给系统的软件安装器",
+                        }
+                    };
+                    ui.label(RichText::new(hint).size(11.0).color(theme.muted));
+
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::ghost_button(ui, &theme, "稍后").clicked() {
+                            action = Some(Action::Dismiss);
+                        }
+                        if widgets::primary_button(ui, &theme, "立即安装")
+                            .on_hover_text(if allows_install {
+                                "覆盖安装当前版本（将退出 Ferric）"
+                            } else {
+                                "演示 / 自定义更新源不会真的安装"
+                            })
+                            .clicked()
+                        {
+                            action = Some(Action::Install);
+                        }
+                    });
+                });
+            });
+
+        // 用户明确点了「立即安装」就优先安装，别被同一帧的 Esc / 背景点击覆盖成「稍后」。
+        if action.is_none() && modal.should_close() {
+            action = Some(Action::Dismiss);
+        }
+
+        match action {
+            Some(Action::Dismiss) => self.update_dialog_open = false,
+            Some(Action::Install) => {
+                self.update_dialog_open = false;
+                if allows_install {
+                    match crate::updater::launch(&file) {
+                        Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        Err(e) => {
+                            self.updater.phase = crate::updater::Phase::Failed(e.clone());
+                            self.shared.toast(e);
+                        }
+                    }
+                } else {
+                    self.shared
+                        .toast("演示 / 自定义更新源不会真的执行安装程序");
+                }
+            }
+            None => {}
+        }
+    }
 }
 
 /// 内容区居中列的 (左右留白, 列宽)：超过阈值才居中，否则贴边 24px。
@@ -2496,10 +2644,10 @@ impl eframe::App for FerricApp {
         let tick = self
             .updater
             .tick(ctx, source.as_ref(), self.auto_update, stale);
-        if let crate::updater::Tick::ReadyToInstall { version } = tick {
-            self.shared.toast(format!(
-                "v{version} 已下载并校验通过 · 点右上角「安装」即可更新"
-            ));
+        if let crate::updater::Tick::ReadyToInstall { .. } = tick {
+            // 更新已下载并校验通过：弹更新框（见 `update_dialog_ui`），
+            // 而不是只靠顶栏那颗小按钮 —— 用户可能根本没注意到它。
+            self.update_dialog_open = true;
         }
         // 成功检查过就记下时间，供下次启动节流。
         // 比大小而不是「只记一次」：只记一次的话时间戳永远停在第一次，
@@ -2590,6 +2738,7 @@ impl eframe::App for FerricApp {
 
         self.settings_ui(ctx);
         self.toasts_ui(ctx);
+        self.update_dialog_ui(ctx);
 
         // 插件热加载放在**所有视图渲染完之后**：市场视图正是 self.tools 里的一员，
         // 在它的 ui() 里改这个向量是不可能的（元素正被借着）。
