@@ -84,8 +84,10 @@ impl Default for TimestampTool {
             ts_output: String::new(),
             date_input: "2025-07-08 12:03:05".to_owned(),
             date_output: String::new(),
-            running: true,
-            paused_ms: 0,
+            // 默认不实时刷新：只取一次初值，用户点「刷新」或开「实时刷新」才更新。
+            // 常驻挂表会以 1Hz 把整个应用重画，纯白烧 CPU。
+            running: false,
+            paused_ms: timestamp::now(Precision::Millis),
             last_input: 0.0,
             idle: false,
         }
@@ -210,7 +212,13 @@ impl Tool for TimestampTool {
                 }
                 if !self.running {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("已暂停").size(12.0).color(theme.muted));
+                    // 手动模式：显示一个「刷新」按钮，点一下取最新时间戳。
+                    if widgets::ghost_button(ui, &theme, "刷新")
+                        .on_hover_text("获取最新时间戳")
+                        .clicked()
+                    {
+                        self.paused_ms = timestamp::now(Precision::Millis);
+                    }
                 } else if self.idle {
                     // 静置停表要说清楚，否则看着就是「时钟卡死了」。
                     ui.add_space(6.0);
@@ -455,7 +463,11 @@ mod tests {
         let theme = crate::theme::Theme::light();
         theme.apply(&ctx);
         let mut shared = Shared::new(theme);
-        let mut tool = TimestampTool::default();
+        // 这条测的是「实时刷新」的节奏，先显式开启（默认已改为手动刷新）。
+        let mut tool = TimestampTool {
+            running: true,
+            ..TimestampTool::default()
+        };
 
         let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64| {
             ctx.run_ui_cleared(
@@ -512,7 +524,11 @@ mod tests {
         let theme = crate::theme::Theme::light();
         theme.apply(&ctx);
         let mut shared = Shared::new(theme);
-        let mut tool = TimestampTool::default();
+        // 这条测的是「静置停表」，先显式开启实时刷新（默认已改为手动刷新）。
+        let mut tool = TimestampTool {
+            running: true,
+            ..TimestampTool::default()
+        };
 
         let frame = |tool: &mut TimestampTool, shared: &mut Shared, t: f64, events: Vec<Event>| {
             ctx.run_ui_cleared(
