@@ -67,6 +67,8 @@ libsm = "0.6"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.10"
 hex = "0.4"
+# 文本缓冲区：Rope 数据结构（编辑器大文本增量编辑与紧凑存储）。
+ropey = "1.6"
 
 [profile.release]
 opt-level = 3

@@ -25,13 +25,13 @@
 //! 只按词断的话它照样会冲出可视区。
 
 use crate::theme::Theme;
-use egui::text::{CCursor, CharIndex};
+use egui::text::CCursor;
 use egui::text_selection::text_cursor_state::{cursor_rect, TextCursorState};
 use egui::text_selection::visuals::{paint_cursor_end, paint_text_selection};
 use egui::text_selection::CCursorRange;
 use egui::{
     pos2, vec2, Align2, Color32, Event, EventFilter, Key, Modifiers, Pos2, Rect, Response, Sense,
-    Shape, TextBuffer, Ui, Vec2,
+    Shape, Ui, Vec2,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -136,7 +136,7 @@ struct LayoutKey {
 
 impl LayoutKey {
     fn new(
-        text: &str,
+        text: &ropey::Rope,
         folded: &HashSet<usize>,
         wrap_w: f32,
         font: FontCfg,
@@ -288,7 +288,7 @@ pub fn code_editor(
     ui: &mut Ui,
     theme: &Theme,
     id_source: &str,
-    text: &mut String,
+    text: &mut ropey::Rope,
     height: f32,
     wrap: bool,
     font: FontCfg,
@@ -304,7 +304,7 @@ fn code_editor_inner(
     ui: &mut Ui,
     theme: &Theme,
     id_source: &str,
-    text: &mut String,
+    text: &mut ropey::Rope,
     height: f32,
     wrap: bool,
     font: FontCfg,
@@ -1370,8 +1370,20 @@ fn shift_folds(state: &mut EditorState, point: usize, delta: isize) {
 }
 
 /// 用 `ins` 替换当前选区（选区为空则纯插入）。返回 true 表示已改写源文本、需重建。
+// —— Rope 文本操作：按 char 下标删除/插入（ropey 的 insert/remove 本身就是 char 下标）——
+fn rope_delete_char_range(rope: &mut ropey::Rope, lo: usize, hi: usize) {
+    if lo < hi {
+        rope.remove(lo..hi);
+    }
+}
+
+fn rope_insert_text(rope: &mut ropey::Rope, ins: &str, at: usize) -> usize {
+    rope.insert(at, ins);
+    ins.chars().count()
+}
+
 fn edit_replace(
-    text: &mut String,
+    text: &mut ropey::Rope,
     segs: &[Seg],
     n: usize,
     state: &mut EditorState,
@@ -1391,9 +1403,9 @@ fn edit_replace(
     }
     let (lo, hi) = (p.min(s), p.max(s));
     if hi > lo {
-        text.delete_char_range(CharIndex(lo)..CharIndex(hi));
+        rope_delete_char_range(text, lo, hi);
     }
-    let added = text.insert_text(ins, CharIndex(lo));
+    let added = rope_insert_text(text, ins, lo);
     let delta = added as isize - (hi - lo) as isize;
     shift_folds(state, lo, delta);
     state.pending = Some(lo + added);
@@ -1401,7 +1413,7 @@ fn edit_replace(
 }
 
 fn edit_backspace(
-    text: &mut String,
+    text: &mut ropey::Rope,
     segs: &[Seg],
     n: usize,
     state: &mut EditorState,
@@ -1423,14 +1435,14 @@ fn edit_backspace(
     if p == 0 {
         return false;
     }
-    text.delete_char_range(CharIndex(p - 1)..CharIndex(p));
+    rope_delete_char_range(text, p - 1, p);
     shift_folds(state, p - 1, -1);
     state.pending = Some(p - 1);
     true
 }
 
 fn edit_delete(
-    text: &mut String,
+    text: &mut ropey::Rope,
     segs: &[Seg],
     n: usize,
     vis_len: usize,
@@ -1458,7 +1470,7 @@ fn edit_delete(
     if p >= n {
         return false;
     }
-    text.delete_char_range(CharIndex(p)..CharIndex(p + 1));
+    rope_delete_char_range(text, p, p + 1);
     shift_folds(state, p, -1);
     state.pending = Some(p);
     true
@@ -1467,7 +1479,7 @@ fn edit_delete(
 /// 处理输入法事件（组字 Preedit / 提交 Commit）。参照 egui `TextEdit`：预编辑串直接写入
 /// 源文本并被下一帧渲染，每次新 Preedit 先删除上次预编辑区间再重插；Commit 落定为正式文本。
 fn edit_ime(
-    text: &mut String,
+    text: &mut ropey::Rope,
     segs: &[Seg],
     n: usize,
     state: &mut EditorState,
@@ -1497,7 +1509,7 @@ fn edit_ime(
     // 的锚点（关键：`Preedit("")` + `Commit(text)` 常同帧到达，提交须接在清空之后的位置）；
     // ③ 全新组字 → 由当前光标映射到源。
     let start = if let Some((s, e)) = state.ime.take() {
-        text.delete_char_range(CharIndex(s)..CharIndex(e));
+        rope_delete_char_range(text, s, e);
         shift_folds(state, s, -((e - s) as isize));
         s
     } else if let Some(p) = state.pending {
@@ -1516,7 +1528,7 @@ fn edit_ime(
                 state.ime = None;
                 state.pending = Some(start);
             } else {
-                let added = text.insert_text(t, CharIndex(start));
+                let added = rope_insert_text(text, t, start);
                 shift_folds(state, start, added as isize);
                 state.ime = Some((start, start + added));
                 state.pending = Some(start + added);
@@ -1524,7 +1536,7 @@ fn edit_ime(
             true
         }
         egui::ImeEvent::Commit(t) => {
-            let added = text.insert_text(t, CharIndex(start));
+            let added = rope_insert_text(text, t, start);
             shift_folds(state, start, added as isize);
             state.pending = Some(start + added);
             true
@@ -1537,14 +1549,16 @@ fn edit_ime(
 }
 
 /// 取当前选区对应的**源文本**切片（用于复制/剪切）；跨占位则返回含隐藏内容的整段。
-fn selection_src(text: &str, segs: &[Seg], n: usize, vrange: &CCursorRange) -> Option<String> {
+fn selection_src(text: &ropey::Rope, segs: &[Seg], n: usize, vrange: &CCursorRange) -> Option<String> {
     let (p, _) = map_vis(segs, vrange.primary.index.0, n);
     let (s, _) = map_vis(segs, vrange.secondary.index.0, n);
     let (lo, hi) = (p.min(s), p.max(s));
     if hi <= lo {
         return Some(String::new());
     }
-    Some(text.chars().skip(lo).take(hi - lo).collect())
+    let b_lo = text.char_to_byte(lo);
+    let b_hi = text.char_to_byte(hi);
+    Some(text.slice(b_lo..b_hi).to_string())
 }
 
 // ============================ 搜索 / 快速选值 ============================
@@ -1897,7 +1911,7 @@ mod tests {
     ///
     /// 前三帧模拟一次真实点击以取得焦点：**按下与抬起必须分属不同帧、且时间要推进** ——
     /// 挤在同一帧、时间恒为 0 时 egui 不会判定为 click，焦点也就拿不到。
-    fn drive(text: &mut String, wrap: bool, width: f32, per_frame: Vec<Vec<Event>>) {
+    fn drive(text: &mut ropey::Rope, wrap: bool, width: f32, per_frame: Vec<Vec<Event>>) {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
@@ -1946,7 +1960,7 @@ mod tests {
     fn painted_text_right_edge(text: &str, wrap: bool, width: f32) -> f32 {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let mut right = f32::NEG_INFINITY;
         // 跑两帧：第一帧建立布局，第二帧的输出才是稳定的
         for i in 0..2 {
@@ -2005,7 +2019,7 @@ mod tests {
     /// 键入的字符必须落到点击处，而不是被换行改动坐标后落到别处。
     #[test]
     fn text_is_editable_while_wrapping() {
-        let mut text = format!("{{\n  \"v\": \"{}\"\n}}", "z".repeat(400));
+        let mut text = ropey::Rope::from_str(&format!("{{\n  \"v\": \"{}\"\n}}", "z".repeat(400)));
         let before = text.clone();
         drive(
             &mut text,
@@ -2018,7 +2032,7 @@ mod tests {
             text.chars().filter(|c| *c == 'Q').count(),
             1,
             "应当正好插入一个字符：{}",
-            &text[..text.len().min(60)]
+            text
         );
         // 点击落在折行后的某个视觉行上，Q 会插进 z 串中间 —— 这正是要的：
         // 换行后点哪儿就改哪儿。原有内容一个字符都不能丢。
@@ -2027,14 +2041,14 @@ mod tests {
             400,
             "原有内容被改坏了"
         );
-        assert!(text.starts_with("{\n  \"v\": \""));
-        assert!(text.ends_with("\"\n}"));
+        assert!(text.to_string().starts_with("{\n  \"v\": \""));
+        assert!(text.to_string().ends_with("\"\n}"));
     }
 
     /// 连续键入 + 退格：换行状态下的多次编辑必须逐次落到正确位置。
     #[test]
     fn successive_edits_land_correctly_while_wrapping() {
-        let mut text = format!("[\n  \"{}\"\n]", "w".repeat(300));
+        let mut text = ropey::Rope::from_str(&format!("[\n  \"{}\"\n]", "w".repeat(300)));
         drive(
             &mut text,
             true,
@@ -2066,7 +2080,7 @@ mod tests {
     fn drag_select_and_copy(text: &str, wrap: bool, width: f32, from: Pos2, to: Pos2) -> String {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let btn = |pos: Pos2, pressed: bool| Event::PointerButton {
             pos,
@@ -2153,7 +2167,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
-        let mut buf = text.clone();
+        let mut buf = ropey::Rope::from_str(&text);
         // 屏幕比编辑器高，底部留出「编辑器之外」的地方可点
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 460.0));
         let outside = pos2(260.0, 440.0);
@@ -2208,7 +2222,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(buf, text, "整个过程不该改动内容");
+        assert_eq!(buf.to_string(), text, "整个过程不该改动内容");
         assert!(
             !copied.is_empty(),
             "在编辑器外点过之后就再也选不中了 —— 正是用户报的现象"
@@ -2229,10 +2243,10 @@ mod tests {
             lines.push(format!("  \"key{i:02}\": \"value{i:02}\","));
         }
         lines.push("}".to_owned());
-        let mut buf = lines.join("\n");
+        let mut buf = ropey::Rope::from_str(&lines.join("\n"));
 
         let ctx = egui::Context::default();
-        // 必须把主题装上：选区底色取自 ui.visuals().selection.bg_fill，
+        // 必须把主题装上：选区底色取自 ui.visuals().selection.bg_fill,
         // 不装主题扫到的就是 egui 的默认色，等于没测
         theme.apply(&ctx);
         // 期望色**从主题读**，不要在这里复算一遍 `accent.gamma_multiply(..)`：
@@ -2303,7 +2317,7 @@ mod tests {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
         theme.apply(&ctx);
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let mut copied = String::new();
         for (i, events) in frames.into_iter().enumerate() {
@@ -2493,7 +2507,7 @@ mod tests {
     #[test]
     fn selection_stays_visible_after_losing_focus() {
         let theme = crate::theme::Theme::dark();
-        let mut buf = "{\n  \"a\": 1,\n  \"b\": 2\n}".to_owned();
+        let mut buf = ropey::Rope::from_str("{\n  \"a\": 1,\n  \"b\": 2\n}");
 
         let ctx = egui::Context::default();
         theme.apply(&ctx);
@@ -2719,7 +2733,7 @@ mod tests {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
         theme.apply(&ctx);
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 400.0));
         let frames: Vec<Vec<Event>> = vec![
             vec![Event::PointerMoved(at)],
@@ -2756,14 +2770,16 @@ mod tests {
                 },
             );
         }
-        assert!(buf.contains("你好"), "中文没能上屏：{buf:?}");
+        assert!(buf.to_string().contains("你好"), "中文没能上屏：{}", buf);
         assert!(
-            !buf.contains("nih") && !buf.contains("ni\""),
-            "预编辑的拼音残留在正文里了：{buf:?}"
+            !buf.to_string().contains("nih") && !buf.to_string().contains("ni\""),
+            "预编辑的拼音残留在正文里了：{}",
+            buf
         );
         assert!(
-            ferric_core::json::validate(&buf).is_ok(),
-            "输入后结构被破坏：{buf:?}"
+            ferric_core::json::validate(&buf.to_string()).is_ok(),
+            "输入后结构被破坏：{}",
+            buf
         );
     }
 
@@ -2780,7 +2796,7 @@ mod tests {
         let ctx = egui::Context::default();
         let theme = crate::theme::Theme::dark();
         theme.apply(&ctx);
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let mut out_x = Vec::new();
         for (i, events) in frames.into_iter().enumerate() {
@@ -2898,7 +2914,7 @@ mod tests {
         let theme = crate::theme::Theme::dark();
         let ctx = egui::Context::default();
         theme.apply(&ctx);
-        let mut buf = text.to_owned();
+        let mut buf = ropey::Rope::from_str(text);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
         let (mut hb, mut vb) = (false, false);
         for i in 0..3 {
@@ -2977,7 +2993,7 @@ mod tests {
             let theme = crate::theme::Theme::dark();
             let ctx = egui::Context::default();
             theme.apply(&ctx);
-            let mut buf = text.to_owned();
+            let mut buf = ropey::Rope::from_str(text);
             let mut wh = (0.0f32, 0.0f32);
             for i in 0..2 {
                 let out = ctx.run_ui_cleared(
@@ -3038,7 +3054,7 @@ mod tests {
             let theme = crate::theme::Theme::dark();
             let ctx = egui::Context::default();
             theme.apply(&ctx);
-            let mut buf = text.to_owned();
+            let mut buf = ropey::Rope::from_str(text);
             let mut wh = (0.0f32, 0.0f32);
             for i in 0..2 {
                 let out = ctx.run_ui_cleared(
@@ -3122,7 +3138,7 @@ mod tests {
         let theme = crate::theme::Theme::dark();
         let ctx = egui::Context::default();
         theme.apply(&ctx);
-        let mut buf = "{\n  \"a\": 1\n}".to_owned();
+        let mut buf = ropey::Rope::from_str("{\n  \"a\": 1\n}");
         let mut before = None;
         let mut after = None;
         let _ = ctx.run_ui_cleared(
@@ -3163,7 +3179,7 @@ mod tests {
         let count_bottom_bars = |wrap: bool| {
             let ctx = egui::Context::default();
             theme.apply(&ctx);
-            let mut buf = long.clone();
+            let mut buf = ropey::Rope::from_str(&long);
             let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
             let mut found = false;
             for i in 0..3 {
@@ -3209,7 +3225,7 @@ mod tests {
         // 用户根本不知道内容可以左右滚。
         let ctx = egui::Context::default();
         theme.apply(&ctx);
-        let mut buf = long.clone();
+        let mut buf = ropey::Rope::from_str(&long);
         let mut floating = true;
         let _ = ctx.run_ui_cleared(
             egui::RawInput {
@@ -3249,7 +3265,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         theme.apply(&ctx);
-        let mut buf = long.clone();
+        let mut buf = ropey::Rope::from_str(&long);
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(width, 400.0));
         let frames: Vec<Vec<Event>> = vec![
             vec![Event::PointerMoved(hover)],
@@ -3356,19 +3372,19 @@ mod tests {
         );
 
         // 3) 换行状态下继续编辑
-        let mut text = formatted.clone();
+        let mut text = ropey::Rope::from_str(&formatted);
         drive(
             &mut text,
             true,
             width,
             vec![vec![Event::Text("X".to_owned())]],
         );
-        assert_ne!(text, formatted, "格式化之后就改不动了");
+        assert_ne!(text.to_string(), formatted, "格式化之后就改不动了");
 
         // 4) 编辑发生在字符串值内部，因此结果依然是合法 JSON，可以再次格式化
-        ferric_core::json::validate(&text).expect("编辑后应仍是合法 JSON（改的是字符串值内部）");
+        ferric_core::json::validate(&text.to_string()).expect("编辑后应仍是合法 JSON（改的是字符串值内部）");
         assert!(
-            ferric_core::json::format(&text, ferric_core::json::Indent::Four, false).is_ok(),
+            ferric_core::json::format(&text.to_string(), ferric_core::json::Indent::Four, false).is_ok(),
             "改完之后应当还能再格式化一次"
         );
     }
@@ -3376,14 +3392,14 @@ mod tests {
     /// 关掉换行同样能编辑 —— 保证开关只影响排版，不影响编辑通路。
     #[test]
     fn text_is_editable_without_wrapping() {
-        let mut text = "{\n  \"a\": 1\n}".to_owned();
+        let mut text = ropey::Rope::from_str("{\n  \"a\": 1\n}");
         drive(
             &mut text,
             false,
             420.0,
             vec![vec![Event::Text("7".to_owned())]],
         );
-        assert!(text.contains('7'), "关掉换行后键入没有生效：{text}");
+        assert!(text.to_string().contains('7'), "关掉换行后键入没有生效：{}", text);
     }
 
     /// 折叠箭头改用 galley 直接定位，必须能对上目标字符所在的视觉行。
@@ -3423,7 +3439,7 @@ mod layout_cache_tests {
     /// 不会因为机器快慢而时红时绿。
     fn frame(
         ctx: &egui::Context,
-        text: &mut String,
+        text: &mut ropey::Rope,
         wrap: bool,
         width: f32,
         font: FontCfg,
@@ -3468,8 +3484,8 @@ mod layout_cache_tests {
         }
     }
 
-    fn sample() -> String {
-        "{\n  \"a\": 1,\n  \"b\": [1, 2, 3],\n  \"c\": \"文字\"\n}\n".to_owned()
+    fn sample() -> ropey::Rope {
+        ropey::Rope::from_str("{\n  \"a\": 1,\n  \"b\": [1, 2, 3],\n  \"c\": \"文字\"\n}\n")
     }
 
     /// 什么都没变 → 整份复用。这条不成立的话，这块缓存等于没做。
@@ -3496,7 +3512,7 @@ mod layout_cache_tests {
         let mut t = sample();
         let f = FontCfg::default();
         let a = frame(&ctx, &mut t, true, 600.0, f, true);
-        t.push_str("\n// 新增\n");
+        t.insert(t.len_chars(), "\n// 新增\n");
         let b = frame(&ctx, &mut t, true, 600.0, f, true);
         assert!(!same(&a, &b), "文本改了却复用了旧排版");
     }

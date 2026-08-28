@@ -22,7 +22,7 @@ fn default_wrap() -> bool {
 }
 
 pub struct JsonTool {
-    input: String,
+    input: ropey::Rope,
     indent: Indent,
     sort: bool,
     /// 自动换行。默认开 —— 格式化后的长行（长 URL、base64、压缩过的单行 JSON）
@@ -30,11 +30,14 @@ pub struct JsonTool {
     wrap: bool,
     ok: bool,
     status: String,
-    undo: Vec<String>,
-    redo: Vec<String>,
+    undo: Vec<ropey::Rope>,
+    redo: Vec<ropey::Rope>,
+    /// 开启键名排序前的那份正文：关掉排序时据此**退回原始键序**。
+    /// 只存运行时，不进草稿（重启后原始键序已不可考，退回当前正文即可）。
+    unsorted: Option<ropey::Rope>,
     /// 上一次「已记录」的正文。手动编辑靠它与 `input` 的差异发现 —— 编辑器直接
-    /// 就地改 `&mut String`，不会通知我们，只能每帧比一次。
-    baseline: String,
+    /// 就地改 `&mut Rope`，不会通知我们，只能每帧比一次。
+    baseline: ropey::Rope,
     /// 最近一次手动编辑的时刻，用于把连续打字合并成一个撤销点。
     last_edit_at: Option<std::time::Instant>,
 }
@@ -42,12 +45,17 @@ pub struct JsonTool {
 /// 连续打字多久算同一个撤销步。太小则一个字一步（撤销要按几十次），
 /// 太大则一次撤销吞掉半分钟的输入。600ms 约等于「停顿一下再继续打」。
 const EDIT_COALESCE: std::time::Duration = std::time::Duration::from_millis(600);
-/// 撤销栈上限。正文可以很大（内置演示 JSON 就有 9KB），不设限等于慢性泄漏。
+/// 撤销栈份数上限（兜底：防止大量小快照把 remove(0) 拖慢）。
+/// 正文可以很大（内置演示 JSON 就有 9KB），不设限等于慢性泄漏。
 const UNDO_MAX: usize = 50;
+/// 撤销栈的内存上限（字节）。大文件下「份数」限流会撑爆内存：一份 5MB 的快照
+/// × 50 份 ≈ 250MB。按字节限流，总占用有硬顶，代价是「能撤销的步数」随文件大小
+/// 而变 —— 文件越大步数越少，但内存不会失控。
+const UNDO_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 impl Default for JsonTool {
     fn default() -> Self {
-        let input = demo_json();
+        let input = ropey::Rope::from_str(&demo_json());
         Self {
             baseline: input.clone(),
             input,
@@ -58,18 +66,33 @@ impl Default for JsonTool {
             status: "就绪".to_owned(),
             undo: Vec::new(),
             redo: Vec::new(),
+            unsorted: None,
             last_edit_at: None,
         }
     }
 }
 
 impl JsonTool {
+    /// 压入撤销栈并做内存限流（字节 + 份数双重上限）。
+    ///
+    /// 撤销栈存的是全文快照，大文件下「份数」限流毫无意义：一份 5MB × 50 份就是
+    /// 250MB。这里从最旧的开始丢弃，直到总字节数回到上限内。push 时 O(n) 求和，
+    /// 但栈在字节限流下很短（大文件只有几步），无所谓。
+    fn push_undo(&mut self, snapshot: ropey::Rope) {
+        self.undo.push(snapshot);
+        let mut total: usize = self.undo.iter().map(|s| s.len_bytes()).sum();
+        while (total > UNDO_MAX_BYTES || self.undo.len() > UNDO_MAX) && self.undo.len() > 1 {
+            total -= self.undo[0].len_bytes();
+            self.undo.remove(0);
+        }
+    }
+
     fn run_op(&mut self, f: impl FnOnce(&str) -> Result<String, String>, done: &str) {
-        match f(&self.input) {
+        match f(&self.input.to_string()) {
             Ok(out) => {
-                self.undo.push(self.input.clone());
+                self.push_undo(self.input.clone());
                 self.redo.clear();
-                self.input = out;
+                self.input = ropey::Rope::from_str(&out);
                 self.ok = true;
                 self.status = done.to_owned();
                 self.sync_baseline();
@@ -82,9 +105,9 @@ impl JsonTool {
     }
 
     fn replace(&mut self, out: String, done: &str) {
-        self.undo.push(self.input.clone());
+        self.push_undo(self.input.clone());
         self.redo.clear();
-        self.input = out;
+        self.input = ropey::Rope::from_str(&out);
         self.ok = true;
         self.status = done.to_owned();
         self.sync_baseline();
@@ -103,11 +126,27 @@ impl JsonTool {
     /// 两个并排的开关行为不一致，更让人以为是坏的。
     fn set_sort(&mut self, sort: bool) {
         self.sort = sort;
-        self.reflow(if sort {
-            "已按键名 A→Z 排序"
+        if sort {
+            // 开启排序：先记住排序前的正文，关掉时才能原样退回。
+            self.unsorted = Some(self.input.clone());
+            self.reflow("已按键名 A→Z 排序");
         } else {
-            "已恢复原始键序"
-        });
+            // 关闭排序：恢复到开启排序前的那份正文（原始键序）。
+            match self.unsorted.take() {
+                Some(prev) => {
+                    if prev != self.input {
+                        self.push_undo(self.input.clone());
+                        self.redo.clear();
+                        self.input = prev;
+                        self.sync_baseline();
+                    }
+                    self.ok = true;
+                    self.status = "已恢复排序前的键序".to_owned();
+                }
+                // 没有快照（比如从草稿载入时 sort 已经开着）只能退回当前正文。
+                None => self.reflow("已恢复原始键序"),
+            }
+        }
     }
 
     /// 按当前 缩进 + 排序 重排正文；内容不是合法 JSON 就什么都不做。
@@ -116,11 +155,12 @@ impl JsonTool {
     /// 于是 `out != self.input` 不成立、不进撤销栈也不改正文 —— 这是正确的，
     /// 但状态条仍要如实说一声，否则又变成「点了没反应」。
     fn reflow(&mut self, done: &str) {
-        if let Ok(out) = json::format(&self.input, self.indent, self.sort) {
-            if out != self.input {
-                self.undo.push(self.input.clone());
+        let cur = self.input.to_string();
+        if let Ok(out) = json::format(&cur, self.indent, self.sort) {
+            if out != cur {
+                self.push_undo(self.input.clone());
                 self.redo.clear();
-                self.input = out;
+                self.input = ropey::Rope::from_str(&out);
                 self.sync_baseline();
             }
             self.ok = true;
@@ -138,7 +178,8 @@ impl JsonTool {
 
     fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.input, next));
+            let prev = std::mem::replace(&mut self.input, next);
+            self.push_undo(prev);
             self.status = "已重做".to_owned();
             self.sync_baseline();
         }
@@ -160,7 +201,7 @@ impl JsonTool {
     /// 敲完字再点「撤销」是**毫无反应**的 —— 栈是空的。而按钮既不置灰、状态条又
     /// 被实时校验立刻覆盖，看着就像按钮坏了。
     ///
-    /// 编辑器直接就地改 `&mut String`、不发通知，所以只能每帧比对基线。
+    /// 编辑器直接就地改 `&mut Rope`、不发通知，所以只能每帧比对基线。
     /// 按时间合并成一步：否则一个字符一个撤销点，撤销一句话要按几十次。
     fn record_manual_edit(&mut self) {
         if self.input == self.baseline {
@@ -171,11 +212,9 @@ impl JsonTool {
             .last_edit_at
             .is_none_or(|t| now.duration_since(t) > EDIT_COALESCE);
         if new_step {
-            self.undo.push(std::mem::take(&mut self.baseline));
+            let baseline = std::mem::take(&mut self.baseline);
+            self.push_undo(baseline);
             self.redo.clear();
-            if self.undo.len() > UNDO_MAX {
-                self.undo.remove(0);
-            }
         }
         self.last_edit_at = Some(now);
         self.baseline = self.input.clone();
@@ -325,7 +364,7 @@ impl JsonTool {
             if widgets::tb_icon_btn(ui, theme, icons::QUOTE, false, false, "转义为 JSON 字符串")
                 .clicked()
             {
-                let out = json::escape(&self.input);
+                let out = json::escape(&self.input.to_string());
                 self.replace(out, "已转义为 JSON 字符串");
             }
             if widgets::tb_icon_btn(ui, theme, icons::CODE, false, false, "去除转义").clicked()
@@ -431,7 +470,7 @@ impl JsonTool {
             Self::font_menu(ui, theme, shared);
             widgets::tb_sep(ui, theme);
             if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
-                let out = self.input.clone();
+                let out = self.input.to_string();
                 shared.copy(ui.ctx(), out);
             }
             if widgets::tb_icon_btn(ui, theme, icons::FILE_DOWN, false, false, "下载 .json")
@@ -442,7 +481,7 @@ impl JsonTool {
                     .add_filter("JSON", &["json"])
                     .save_file()
                 {
-                    let _ = std::fs::write(path, &self.input);
+                    let _ = std::fs::write(path, self.input.to_string());
                     shared.toast("已保存");
                 }
             }
@@ -489,11 +528,11 @@ impl Tool for JsonTool {
         self.record_manual_edit();
 
         // 实时校验语法：结果直接反映到底部状态条（顶部工具条不再放“校验”按钮）。
-        if self.input.trim().is_empty() {
+        if self.input.chars().all(|c| c.is_whitespace()) {
             self.ok = true;
             self.status = "就绪".to_owned();
         } else {
-            match json::validate(&self.input) {
+            match json::validate(&self.input.to_string()) {
                 Ok(_) => {
                     self.ok = true;
                     self.status = "JSON 有效".to_owned();
@@ -527,7 +566,7 @@ impl Tool for JsonTool {
                     ui.label(RichText::new(&self.status).size(11.5).color(color));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("{} 字符", self.input.chars().count()))
+                            RichText::new(format!("{} 字符", self.input.len_chars()))
                                 .size(11.0)
                                 .family(egui::FontFamily::Monospace)
                                 .color(theme.faint),
@@ -560,7 +599,7 @@ impl Tool for JsonTool {
 
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&JsonDraft {
-            input: self.input.clone(),
+            input: self.input.to_string(),
             indent: self.indent,
             sort: self.sort,
             wrap: self.wrap,
@@ -570,7 +609,7 @@ impl Tool for JsonTool {
 
     fn load_draft(&mut self, data: &str) {
         if let Ok(d) = serde_json::from_str::<JsonDraft>(data) {
-            self.input = d.input;
+            self.input = ropey::Rope::from_str(&d.input);
             self.indent = d.indent;
             self.sort = d.sort;
             self.wrap = d.wrap;
@@ -692,10 +731,11 @@ mod tests {
             input: (0..30)
                 .map(|i| format!("\"k{i:02}\":\"v{i:02}\""))
                 .collect::<Vec<_>>()
-                .join(","),
+                .join(",")
+                .into(),
             ..Default::default()
         };
-        tool.input = format!("{{{}}}", tool.input);
+        tool.input = ropey::Rope::from_str(&format!("{{{}}}", tool.input));
         let compact = tool.input.clone();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
 
@@ -714,7 +754,7 @@ mod tests {
         let (copied, _) = drive_tool(&mut tool, screen, frames);
 
         assert_ne!(tool.input, compact, "第一步就没点到「格式化」，用例失效");
-        assert!(tool.input.contains('\n'), "格式化后应当是多行");
+        assert!(tool.input.to_string().contains('\n'), "格式化后应当是多行");
         assert!(
             copied.iter().any(|s| !s.is_empty()),
             "格式化之后拖拽选不中任何东西 —— 用户报的问题复现了"
@@ -732,8 +772,8 @@ mod tests {
     #[test]
     fn typing_is_undoable() {
         let mut tool = JsonTool {
-            input: "{}".to_owned(),
-            baseline: "{}".to_owned(),
+            input: ropey::Rope::from_str("{}"),
+            baseline: ropey::Rope::from_str("{}"),
             ..Default::default()
         };
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
@@ -746,16 +786,16 @@ mod tests {
         frames.push(vec![]);
         drive_tool(&mut tool, screen, frames);
 
-        assert_ne!(tool.input, "{}", "字没敲进编辑器，用例失效");
+        assert_ne!(tool.input.to_string(), "{}", "字没敲进编辑器，用例失效");
         assert!(
             !tool.undo.is_empty(),
             "手动编辑没进撤销栈 —— 撤销按钮会毫无反应（用户报的就是这个）"
         );
 
         tool.undo();
-        assert_eq!(tool.input, "{}", "撤销没能回到编辑前的内容");
+        assert_eq!(tool.input.to_string(), "{}", "撤销没能回到编辑前的内容");
         tool.redo();
-        assert_ne!(tool.input, "{}", "重做没能把编辑恢复回来");
+        assert_ne!(tool.input.to_string(), "{}", "重做没能把编辑恢复回来");
     }
 
     /// **点工具条上那颗撤销按钮**（不是直接调 `undo()`）必须真的撤销。
@@ -771,8 +811,8 @@ mod tests {
     fn clicking_the_undo_button_reverts_the_text() {
         const UNDO_BTN: Pos2 = Pos2::new(205.0, 16.0);
         let mut tool = JsonTool {
-            input: "{}".to_owned(),
-            baseline: "{}".to_owned(),
+            input: ropey::Rope::from_str("{}"),
+            baseline: ropey::Rope::from_str("{}"),
             ..Default::default()
         };
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
@@ -786,7 +826,7 @@ mod tests {
         drive_tool(&mut tool, screen, frames);
 
         assert_eq!(
-            tool.input, "{}",
+            tool.input.to_string(), "{}",
             "点了撤销按钮但正文没回到编辑前：{:?}",
             tool.input
         );
@@ -797,8 +837,8 @@ mod tests {
     #[test]
     fn a_burst_of_typing_is_one_undo_step() {
         let mut tool = JsonTool {
-            input: "{}".to_owned(),
-            baseline: "{}".to_owned(),
+            input: ropey::Rope::from_str("{}"),
+            baseline: ropey::Rope::from_str("{}"),
             ..Default::default()
         };
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
@@ -825,26 +865,26 @@ mod tests {
     #[test]
     fn toggling_sort_reorders_immediately() {
         let mut tool = JsonTool {
-            input: "{\n  \"b\": 1,\n  \"a\": 2\n}".to_owned(),
+            input: ropey::Rope::from_str("{\n  \"b\": 1,\n  \"a\": 2\n}"),
             ..Default::default()
         };
         tool.sync_baseline();
 
         tool.set_sort(true);
-        let a = tool.input.find("\"a\"").expect("排序后 a 还在");
-        let b = tool.input.find("\"b\"").expect("排序后 b 还在");
+        let a = tool.input.to_string().find("\"a\"").expect("排序后 a 还在");
+        let b = tool.input.to_string().find("\"b\"").expect("排序后 b 还在");
         assert!(a < b, "切了排序但正文没重排：{:?}", tool.input);
         assert!(!tool.undo.is_empty(), "重排改动了正文，就该能撤销回去");
 
         // 嵌套对象也要排（sort_value_keys 是递归的，这条守住上层没绕过它）
         let mut nested = JsonTool {
-            input: "{\"z\":{\"n\":1,\"m\":2}}".to_owned(),
+            input: ropey::Rope::from_str("{\"z\":{\"n\":1,\"m\":2}}"),
             ..Default::default()
         };
         nested.sync_baseline();
         nested.set_sort(true);
-        let m = nested.input.find("\"m\"").expect("m 还在");
-        let n = nested.input.find("\"n\"").expect("n 还在");
+        let m = nested.input.to_string().find("\"m\"").expect("m 还在");
+        let n = nested.input.to_string().find("\"n\"").expect("n 还在");
         assert!(m < n, "嵌套层没被排序：{:?}", nested.input);
     }
 
@@ -880,7 +920,7 @@ mod tests {
     #[test]
     fn draft_roundtrip() {
         let a = JsonTool {
-            input: "{\"x\":1}".to_owned(),
+            input: ropey::Rope::from_str("{\"x\":1}"),
             indent: Indent::Tab,
             sort: true,
             wrap: false,
@@ -890,7 +930,7 @@ mod tests {
 
         let mut b = JsonTool::default();
         b.load_draft(&s);
-        assert_eq!(b.input, "{\"x\":1}");
+        assert_eq!(b.input.to_string(), "{\"x\":1}");
         assert_eq!(b.indent, Indent::Tab);
         assert!(b.sort);
         assert!(!b.wrap, "换行开关也要随草稿保存");
@@ -910,7 +950,7 @@ mod tests {
         let legacy = r#"{"input":"{\"k\":2}","indent":"Four","sort":true}"#;
         let mut t = JsonTool::default();
         t.load_draft(legacy);
-        assert_eq!(t.input, "{\"k\":2}", "老草稿的内容必须原样恢复");
+        assert_eq!(t.input.to_string(), "{\"k\":2}", "老草稿的内容必须原样恢复");
         assert_eq!(t.indent, Indent::Four);
         assert!(t.sort);
         assert!(t.wrap, "老草稿缺省按开启处理");
@@ -932,20 +972,20 @@ mod tests {
         let escaped = json::escape(&inner);
 
         let mut tool = JsonTool {
-            input: escaped.clone(),
+            input: ropey::Rope::from_str(&escaped),
             ..Default::default()
         };
 
         // ② 去除转义
         tool.run_op(json::unescape, "已去除转义");
         assert!(tool.ok, "去除转义失败：{}", tool.status);
-        assert_eq!(tool.input, inner, "去转义结果应还原成原始 JSON");
+        assert_eq!(tool.input.to_string(), inner, "去转义结果应还原成原始 JSON");
 
         // ① 格式化
         let ind = tool.indent;
         tool.run_op(|s| json::format(s, ind, false), "已格式化");
-        assert!(tool.ok && tool.input.contains('\n'), "格式化失败");
-        let formatted = tool.input.clone();
+        assert!(tool.ok && tool.input.to_string().contains('\n'), "格式化失败");
+        let formatted = tool.input.to_string();
         let longest = formatted.lines().map(|l| l.chars().count()).max().unwrap();
         assert!(longest > 300, "用例前提：格式化后有超长行");
 
@@ -971,18 +1011,18 @@ mod tests {
             copied.iter().any(|s| !s.is_empty()),
             "六件事一起做的时候选中失效了"
         );
-        assert_eq!(tool.input, formatted, "选中与折叠都不该改动内容");
+        assert_eq!(tool.input.to_string(), formatted, "选中与折叠都不该改动内容");
 
         // ③ 压缩：回到单行，且仍是合法 JSON
         tool.run_op(json::minify, "已压缩");
         assert!(tool.ok, "压缩失败：{}", tool.status);
-        assert!(!tool.input.contains('\n'), "压缩后应当只有一行");
-        assert!(json::validate(&tool.input).is_ok(), "压缩后仍须是合法 JSON");
+        assert!(!tool.input.to_string().contains('\n'), "压缩后应当只有一行");
+        assert!(json::validate(&tool.input.to_string()).is_ok(), "压缩后仍须是合法 JSON");
 
         // 再格式化一次，确认整轮下来内容没有被弄坏
         let ind = tool.indent;
         tool.run_op(|s| json::format(s, ind, false), "已格式化");
-        assert_eq!(tool.input, formatted, "一轮操作下来内容应当可以完全复原");
+        assert_eq!(tool.input.to_string(), formatted, "一轮操作下来内容应当可以完全复原");
     }
 
     /// 折叠占位要显示节点数（用户要求的「收缩显示节点数」）。
@@ -991,14 +1031,14 @@ mod tests {
     fn folding_shows_node_count_in_editor() {
         let json = "{\n  \"list\": [\n    1,\n    2,\n    3\n  ],\n  \"tail\": 9\n}";
         let mut tool = JsonTool {
-            input: json.to_owned(),
+            input: ropey::Rope::from_str(json),
             ..Default::default()
         };
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
         // 点第 2 行（"list" 那行）行号栏里的折叠箭头
         let (_, _) = drive_tool(&mut tool, screen, click_frames(pos2(295.0, 131.0)));
         // 折叠不改内容
-        assert_eq!(tool.input, json, "折叠不应改动内容");
+        assert_eq!(tool.input.to_string(), json, "折叠不应改动内容");
         // 可见文本由编辑器内部构建，这里直接验证构建结果里带了数量
         let chars: Vec<char> = json.chars().collect();
         let regions = crate::widgets::code_editor::test_support::scan(&chars);
