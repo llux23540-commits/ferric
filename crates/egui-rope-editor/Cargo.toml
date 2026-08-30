@@ -1,0 +1,12 @@
+[package]
+name = "egui-rope-editor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+authors = ["Ferric"]
+description = "A lightweight, memory-efficient code editor widget for egui: rope-backed, viewport-virtualized, incrementally updated. Handles multi-megabyte files without blowing up memory."
+
+[dependencies]
+egui = { workspace = true }
+ropey = { workspace = true }

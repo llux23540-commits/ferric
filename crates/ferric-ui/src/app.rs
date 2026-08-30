@@ -50,7 +50,7 @@ struct Persist {
     ui_scale: f32,
     /// 代码编辑区排版（字号 / 字重 / 行距）。
     #[serde(default)]
-    code_font: crate::widgets::code_editor::FontCfg,
+    code_font: crate::widgets::FontCfg,
     /// 自动检查更新并在后台下载。默认开 —— 更新只有及时装上才有意义。
     #[serde(default = "default_true")]
     auto_update: bool,
@@ -1621,7 +1621,7 @@ impl FerricApp {
     ///
     /// 这三项与 JSON 工具条上的字体菜单是**同一份配置**，从哪边改都一样生效。
     fn font_settings_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::widgets::code_editor::FontCfg;
+        use crate::widgets::FontCfg;
         let theme = self.shared.theme;
 
         // —— 代码字号

@@ -1169,6 +1169,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-rope-editor"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "ropey",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1484,6 +1492,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
+ "egui-rope-editor",
  "egui_json_tree",
  "ferric-core",
  "hex",

@@ -1,7 +1,7 @@
 //! JSON 工具视图：单栏就地编辑 + 图标工具条 + 树视图。
 
 use crate::tool::{Shared, Tool, ToolMeta};
-use crate::widgets::code_editor::FontCfg;
+use crate::widgets::FontCfg;
 use crate::{icons, widgets};
 use egui::{Frame, Margin, RichText, Sense, Stroke, Ui};
 use ferric_core::json::{self, Indent};
@@ -19,6 +19,35 @@ struct JsonDraft {
 
 fn default_wrap() -> bool {
     true
+}
+
+/// ferric 主题 → egui-rope-editor 配色。
+fn editor_colors(theme: &crate::theme::Theme) -> egui_rope_editor::Colors {
+    egui_rope_editor::Colors {
+        dark: theme.dark,
+        bg: theme.bg,
+        fg: theme.fg,
+        muted: theme.muted,
+        faint: theme.faint,
+        accent: theme.accent,
+        accent_strong: theme.accent_strong,
+        danger: theme.danger,
+        ok: theme.ok,
+        border: theme.border,
+    }
+}
+
+/// ferric 字体设置 → egui-rope-editor 字体配置。
+fn editor_font(cfg: FontCfg) -> egui_rope_editor::FontConfig {
+    egui_rope_editor::FontConfig {
+        size: cfg.size,
+        line_scale: cfg.line_scale,
+        family: if cfg.medium {
+            egui::FontFamily::Name(crate::fonts::MONO_MEDIUM.into())
+        } else {
+            egui::FontFamily::Monospace
+        },
+    }
 }
 
 pub struct JsonTool {
@@ -40,6 +69,9 @@ pub struct JsonTool {
     baseline: ropey::Rope,
     /// 最近一次手动编辑的时刻，用于把连续打字合并成一个撤销点。
     last_edit_at: Option<std::time::Instant>,
+    /// 上次实时校验时的正文快照。文本没变就跳过重新解析 ——
+    /// 5MB JSON 每帧全量解析（`Value` 树 ~67MB）是内存/CPU 的大户。
+    validated: ropey::Rope,
 }
 
 /// 连续打字多久算同一个撤销步。太小则一个字一步（撤销要按几十次），
@@ -68,6 +100,8 @@ impl Default for JsonTool {
             redo: Vec::new(),
             unsorted: None,
             last_edit_at: None,
+            // 空快照 → 首帧必然重新校验一次（demo JSON 合法，会显示「JSON 有效」）。
+            validated: ropey::Rope::new(),
         }
     }
 }
@@ -193,6 +227,33 @@ impl JsonTool {
     fn sync_baseline(&mut self) {
         self.baseline = self.input.clone();
         self.last_edit_at = None;
+    }
+
+    /// 实时校验语法，但只在正文变化时重新解析。
+    ///
+    /// 正文没变（滚动、拖选、改字体这些不动文本的操作）就直接复用上一帧的
+    /// `ok` / `status`，不再每帧 `to_string()` + 完整解析一遍 —— 大文件上
+    /// 那是每帧 ~5MB 拷贝 + ~67MB `Value` 树的分配。
+    fn revalidate_if_dirty(&mut self) {
+        if self.input == self.validated {
+            return;
+        }
+        self.validated = self.input.clone();
+        if self.input.chars().all(|c| c.is_whitespace()) {
+            self.ok = true;
+            self.status = "就绪".to_owned();
+        } else {
+            match json::validate(&self.input.to_string()) {
+                Ok(_) => {
+                    self.ok = true;
+                    self.status = "JSON 有效".to_owned();
+                }
+                Err(e) => {
+                    self.ok = false;
+                    self.status = format!("语法错误：{e}");
+                }
+            }
+        }
     }
 
     /// 把**手动编辑**也记进撤销栈。
@@ -528,21 +589,8 @@ impl Tool for JsonTool {
         self.record_manual_edit();
 
         // 实时校验语法：结果直接反映到底部状态条（顶部工具条不再放“校验”按钮）。
-        if self.input.chars().all(|c| c.is_whitespace()) {
-            self.ok = true;
-            self.status = "就绪".to_owned();
-        } else {
-            match json::validate(&self.input.to_string()) {
-                Ok(_) => {
-                    self.ok = true;
-                    self.status = "JSON 有效".to_owned();
-                }
-                Err(e) => {
-                    self.ok = false;
-                    self.status = format!("语法错误：{e}");
-                }
-            }
-        }
+        // 只在正文变化时重新解析，见 [`Self::revalidate_if_dirty`]。
+        self.revalidate_if_dirty();
 
         // 底部固定一行状态条（自带顶部分割线），其余空间 100% 交给编辑区。
         egui::Panel::bottom("json-status-bar")
@@ -583,17 +631,14 @@ impl Tool for JsonTool {
                 bottom: 10,
             }))
             .show(ui, |ui| {
-                // 单栏：自研代码编辑器（自由编辑 + 语法高亮；后续叠加折叠）。
+                // 单栏：代码编辑器（egui-rope-editor：rope + 视口虚拟化 + 增量更新）。
                 let editor_h = ui.available_height();
-                widgets::code_editor::code_editor(
-                    ui,
-                    &theme,
-                    "json-in",
-                    &mut self.input,
-                    editor_h,
-                    self.wrap,
-                    shared.code_font,
-                );
+                egui_rope_editor::CodeEditor::new("json-in")
+                    .height(editor_h)
+                    .wrap(self.wrap)
+                    .colors(editor_colors(&theme))
+                    .font(editor_font(shared.code_font))
+                    .show(ui, &mut self.input);
             });
     }
 
@@ -616,6 +661,8 @@ impl Tool for JsonTool {
             // 载入草稿不是「用户的一次编辑」，基线要跟着走，
             // 否则切回本工具的第一帧会把整份草稿记成一步撤销。
             self.sync_baseline();
+            // 校验快照也作废：草稿正文与默认 demo 不同，首帧必须重新校验。
+            self.validated = ropey::Rope::new();
         }
     }
 }
@@ -1039,11 +1086,6 @@ mod tests {
         let (_, _) = drive_tool(&mut tool, screen, click_frames(pos2(295.0, 131.0)));
         // 折叠不改内容
         assert_eq!(tool.input.to_string(), json, "折叠不应改动内容");
-        // 可见文本由编辑器内部构建，这里直接验证构建结果里带了数量
-        let chars: Vec<char> = json.chars().collect();
-        let regions = crate::widgets::code_editor::test_support::scan(&chars);
-        let arr = regions.iter().find(|r| !r.1).expect("应有数组区间");
-        assert_eq!(arr.0, 3, "数组应数出 3 个元素");
     }
 
     /// 目标场景本身：格式化产出的长行确实会超出常见可视宽度 ——

@@ -27,8 +27,14 @@ pub fn parse(input: &str) -> Result<Value, String> {
 }
 
 /// 仅校验语法。
+///
+/// 不构建 [`Value`] 树：大文件下 `Value` 的内存放大率可达十几倍（5MB JSON ≈ 67MB 树），
+/// 而校验只需要「能不能解析通」。用 [`serde::de::IgnoredAny`] 走一遍 tokenizer，
+/// 内存 O(嵌套深度)、速度也快一个数量级，错误信息仍带行列号。
 pub fn validate(input: &str) -> Result<(), String> {
-    parse(input).map(|_| ())
+    serde_json::from_str::<serde::de::IgnoredAny>(input)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 格式化 / 美化，可选缩进与键名排序。
