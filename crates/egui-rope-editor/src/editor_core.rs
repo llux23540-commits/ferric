@@ -256,6 +256,17 @@ pub fn code_editor(
     font: FontConfig,
     highlighter: &dyn Highlighter,
 ) -> Response {
+    // 清理「另一路径」的残留缓存。编辑器按文本大小在「全文 / 虚拟化」两条路径间
+    // 切换，而 egui 的临时数据要到退出才清理 —— 不主动清的话，清空一个大文件后，
+    // 几十 MB 的虚拟化布局（char 数组 + 行索引）会一直挂在内存里。每帧 remove 一次
+    // 不存在的 key 是 O(1) 的哈希表操作，开销可忽略。
+    let id = ui.make_persistent_id(id_source);
+    if text.len_chars() > VIRTUALIZE_CHARS {
+        ui.data_mut(|d| d.remove::<std::sync::Arc<Layout>>(id.with("__layout")));
+    } else {
+        ui.data_mut(|d| d.remove::<std::sync::Arc<VirtualLayout>>(id.with("__vlayout")));
+    }
+
     // 整体套一层 scope：下面要改滚动条样式与滑块配色，而 `Ui::visuals_mut` 改的是
     // 调用方那个 Ui 的样式 —— 不隔离的话会外溢到别的界面元素上（实测把侧栏的
     // 分隔线染成了深灰）。scope 里的样式改动出了这个函数就作废。
