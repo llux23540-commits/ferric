@@ -28,7 +28,7 @@ use crate::config::{Colors, FontConfig};
 use crate::highlight::Highlighter;
 use egui::text::CCursor;
 use egui::text_selection::text_cursor_state::{cursor_rect, TextCursorState};
-use egui::text_selection::visuals::{paint_cursor_end, paint_text_selection};
+use egui::text_selection::visuals::paint_cursor_end;
 use egui::text_selection::CCursorRange;
 use egui::{
     pos2, vec2, Align2, Color32, Event, EventFilter, Key, Modifiers, Pos2, Rect, Response, Sense,
@@ -892,16 +892,18 @@ fn code_editor_inner(
             // 选区**失焦后也要继续画**（只是淡一些）。此前只在有焦点时画，于是点一下
             // 工具条的「格式化 / 复制」按钮，刚选好的内容就当场消失 —— 用起来就是
             // 「格式化之后选不中了」。所有正经编辑器都保留失焦选区，这里对齐。
-            let mut galley = galley;
-            if let Some(r) = state.cursor.range(&galley) {
-                if !r.is_empty() {
-                    let mut vis = ui.visuals().clone();
-                    if !has_focus {
-                        vis.selection.bg_fill = vis.selection.bg_fill.gamma_multiply(0.5);
-                    }
-                    paint_text_selection(&mut galley, &vis, &r, None);
-                }
-            }
+            // 选区：不再 `paint_text_selection`（它会 `Arc::make_mut` 深拷贝整份 galley，
+            // 大文件下每次框选都触发全文拷贝 —— 卡顿的根源）。改为先算选区矩形、
+            // 用 painter 直接铺底色，正文 galley 始终保持缓存那份。
+            let sel_rects: Vec<Rect> = state
+                .cursor
+                .range(&galley)
+                .filter(|r| !r.is_empty())
+                .map(|r| {
+                    let [lo, hi] = r.sorted_cursors();
+                    match_rects(&galley, lo.index.0, hi.index.0, char_w)
+                })
+                .unwrap_or_default();
             let painter = ui.painter().clone();
 
             // 搜索命中底色：画在正文 galley 之下。颜色在 CPU 上预混成**不透明**色 ——
@@ -941,6 +943,18 @@ fn code_editor_inner(
                             painter.rect_filled(rr, 2.0, normal_bg);
                         }
                     }
+                }
+            }
+
+            // 选区底色：铺在正文之下（在搜索命中底色之上），不改文字颜色。
+            // 失焦后变淡，与之前的视觉行为一致。
+            if !sel_rects.is_empty() {
+                let mut bg = ui.visuals().selection.bg_fill;
+                if !has_focus {
+                    bg = bg.gamma_multiply(0.5);
+                }
+                for r in &sel_rects {
+                    painter.rect_filled(r.translate(text_origin.to_vec2()), 0.0, bg);
                 }
             }
             painter.galley(text_origin, galley.clone(), theme.fg);
@@ -1793,31 +1807,35 @@ fn code_editor_virtualized(
     // ---- 绘制 ----
     let painter = ui.painter().with_clip_rect(vp);
 
-    // 选区（逐可见行着色）
-    if let Some(r) = st.ed.cursor.char_range() {
-        if !r.is_empty() {
+    // 选区矩形（逐可见行，全局 char 坐标 → 屏幕矩形）。不修改 galleys，
+    // 与全文路径一致：框选时只铺底色，不做 make_mut。
+    let sel_rects: Vec<Rect> = st
+        .ed
+        .cursor
+        .char_range()
+        .filter(|r| !r.is_empty())
+        .map(|r| {
             let [lo, hi] = r.sorted_cursors();
             let (sel_lo, sel_hi) = (lo.index.0, hi.index.0);
-            let mut vis = ui.visuals().clone();
-            if !has_focus {
-                vis.selection.bg_fill = vis.selection.bg_fill.gamma_multiply(0.5);
-            }
+            let mut rects = Vec::new();
             for li in fb..=lb {
                 let s = rows[li].start;
                 let e = rows[li].end;
                 let lo = sel_lo.max(s);
                 let hi = sel_hi.min(e);
                 if hi > lo {
-                    paint_text_selection(
-                        &mut galleys[li - fb],
-                        &vis,
-                        &CCursorRange::two(CCursor::new(lo - s), CCursor::new(hi - s)),
-                        None,
-                    );
+                    let g = &galleys[li - fb];
+                    for r in match_rects(g, lo - s, hi - s, char_w) {
+                        rects.push(r.translate(vec2(
+                            text_origin.x,
+                            text_origin.y + (li - fb) as f32 * row_h,
+                        )));
+                    }
                 }
             }
-        }
-    }
+            rects
+        })
+        .unwrap_or_default();
 
     // 搜索命中底色（画在正文之下）
     if !match_list.is_empty() {
@@ -1861,6 +1879,17 @@ fn code_editor_virtualized(
                     }
                 }
             }
+        }
+    }
+
+    // 选区底色（在搜索底色之上、正文之下）
+    if !sel_rects.is_empty() {
+        let mut bg = ui.visuals().selection.bg_fill;
+        if !has_focus {
+            bg = bg.gamma_multiply(0.5);
+        }
+        for r in &sel_rects {
+            painter.rect_filled(*r, 0.0, bg);
         }
     }
 
