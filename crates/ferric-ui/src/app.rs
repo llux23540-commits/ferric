@@ -271,6 +271,9 @@ pub struct FerricApp {
     want_restart: bool,
     /// 更新就绪后自动弹出的更新框是否打开（「稍后」/ Esc / 点背景关闭）。
     update_dialog_open: bool,
+    /// 软渲染后端注入的持久化存储。eframe 路径为 `None`（走 `frame.storage_mut()`），
+    /// 软渲染路径由 [`FerricApp::new_soft`] 注入，[`FerricApp::save_soft`] 用它落盘。
+    soft_storage: Option<Box<dyn eframe::Storage>>,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -355,27 +358,10 @@ impl SettingsRaise {
 
 impl FerricApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let has_cjk = fonts::install_fonts(&cc.egui_ctx);
-
         let persist: Persist = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-
-        // 迁移：旧数据没有 theme_mode，一律改为跟随系统（旧版的 dark 只作首帧兜底）。
-        let mode = persist.theme_mode.unwrap_or(ThemeMode::System);
-        // 启动首帧系统主题可能尚未上报（system_theme() 为 None），
-        // 先用上次生效的深浅色兜底，进入 update() 后每帧与系统同步。
-        let dark = match mode {
-            ThemeMode::Light => false,
-            ThemeMode::Dark => true,
-            ThemeMode::System => cc
-                .egui_ctx
-                .system_theme()
-                .map_or(persist.dark, |t| t == egui::Theme::Dark),
-        };
-        let theme = Theme::from_dark(dark);
-        theme.apply(&cc.egui_ctx);
 
         // 记下真实拿到的适配器：设置页「渲染后端」区块要展示「现在实际用的是什么」。
         // 用户切后端做 A/B 对比时，没有这行就无从确认切换是否真的生效。
@@ -402,6 +388,48 @@ impl FerricApp {
             // 作兑底的，默认按软件渲染处理（关动画/阴影/羽化 + 帧率封顶）。
             None => (Some("Glow（OpenGL）".to_owned()), true),
         };
+
+        Self::build(&cc.egui_ctx, persist, gpu_desc, gpu_software)
+    }
+
+    /// 软渲染入口：不经过 eframe 的 `CreationContext` / wgpu 渲染栈，持久化存储
+    /// 由调用方（软渲染后端）直接注入。界面逻辑与 [`FerricApp::new`] 完全一致，
+    /// 只是 `gpu_software` 恒为真（纯 CPU 光栅化）。
+    pub fn new_soft(ctx: &egui::Context, storage: Option<Box<dyn eframe::Storage>>) -> Self {
+        let persist: Persist = storage
+            .as_ref()
+            .and_then(|s| eframe::get_value(s.as_ref(), eframe::APP_KEY))
+            .unwrap_or_default();
+        let gpu_desc = Some("CPU 软渲染".to_owned());
+        let mut slf = Self::build(ctx, persist, gpu_desc, true);
+        slf.soft_storage = storage;
+        slf
+    }
+
+    /// 构造 [`FerricApp`] 的公共部分：装字体、算主题、建工具与共享状态。
+    /// 两条入口（[`FerricApp::new`] / [`FerricApp::new_soft`]）汇合到这里。
+    fn build(
+        ctx: &egui::Context,
+        persist: Persist,
+        gpu_desc: Option<String>,
+        gpu_software: bool,
+    ) -> Self {
+        let has_cjk = fonts::install_fonts(ctx);
+
+        // 迁移：旧数据没有 theme_mode，一律改为跟随系统（旧版的 dark 只作首帧兜底）。
+        let mode = persist.theme_mode.unwrap_or(ThemeMode::System);
+        // 启动首帧系统主题可能尚未上报（system_theme() 为 None），
+        // 先用上次生效的深浅色兜底，进入 update() 后每帧与系统同步。
+        let dark = match mode {
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+            ThemeMode::System => ctx
+                .system_theme()
+                .map_or(persist.dark, |t| t == egui::Theme::Dark),
+        };
+        let theme = Theme::from_dark(dark);
+        theme.apply(ctx);
+
         // 同一行写进 startup.log：排「画面糊 / 卡」这类问题时，
         // 「实际用了哪块适配器」是第一个要回答的问题。
         if let Some(d) = &gpu_desc {
@@ -439,7 +467,7 @@ impl FerricApp {
         // 界面缩放在**第一帧之前**就落定。放到 update() 里意味着首帧按 100% 排完版、
         // 窗口显示出来、下一帧才跳到用户设定的比例 —— 那一跳就是开窗时的闪。
         let ui_scale = persist.ui_scale.clamp(0.8, 1.6);
-        cc.egui_ctx.set_zoom_factor(ui_scale);
+        ctx.set_zoom_factor(ui_scale);
 
         let mut shared = Shared::new(theme);
         shared.lang = persist.lang;
@@ -448,7 +476,7 @@ impl FerricApp {
         // 软渲染环境的清晰度与流畅度自适应要在首帧前生效，否则第一屏就带着灰雾
         // 阴影、且第一帧就用最慢的羽化路径把整窗光栅化一遍。
         if gpu_software {
-            Self::apply_soft_render_compat(&cc.egui_ctx);
+            Self::apply_soft_render_compat(ctx);
         }
         for w in plugin_warns {
             shared.toast(format!("插件加载失败 · {w}"));
@@ -507,6 +535,7 @@ impl FerricApp {
             pending_restart: None,
             want_restart: false,
             update_dialog_open: false,
+            soft_storage: None,
         }
     }
 
@@ -1063,6 +1092,46 @@ impl FerricApp {
         self.want_restart = true;
     }
 
+    /// 把当前应用状态序列化成可持久化的 [`Persist`]。`eframe::App::save` 与
+    /// [`FerricApp::save_soft`] 共用，避免两条渲染路径各写一份。
+    fn persist(&self) -> Persist {
+        let drafts = self
+            .tools
+            .iter()
+            .filter_map(|t| t.save_draft().map(|d| (t.meta().id.to_owned(), d)))
+            .collect();
+        Persist {
+            dark: self.dark,
+            theme_mode: Some(self.mode),
+            rail_width: self.rail_width,
+            favorites: self.favorites.iter().cloned().collect(),
+            active_id: self.tools[self.active].meta().id.to_owned(),
+            drafts,
+            lang: self.shared.lang,
+            server: self.server_override.clone(),
+            ui_scale: self.ui_scale,
+            code_font: self.shared.code_font,
+            auto_update: self.auto_update,
+            // 两个字段一起写：新版本读 source_pref，旧版本读 mock_source。
+            // 只写新的，用户装回旧版本时设置就没了
+            mock_source: self.source_pref.to_legacy(),
+            source_pref: Some(self.source_pref),
+            github_repo: self.github_override.as_ref().map(|g| g.repo.clone()),
+            last_update_check: self.last_update_check,
+        }
+    }
+
+    /// 软渲染路径的落盘：把当前状态写进 [`FerricApp::new_soft`] 注入的 storage 并 flush。
+    /// eframe 路径下 storage 为 `None`，这里是空操作（走 `eframe::App::save`）。
+    pub fn save_soft(&mut self) {
+        // 先不可变借出持久化快照，再可变借用 storage，避免两个借用交叠。
+        let persist = self.persist();
+        if let Some(storage) = self.soft_storage.as_deref_mut() {
+            eframe::set_value(storage, eframe::APP_KEY, &persist);
+            storage.flush();
+        }
+    }
+
     /// 真正执行重启：先存盘，再拉起新进程，最后关掉自己。
     ///
     /// **顺序很要紧**。新进程一起来就会去读 eframe 的状态文件；而本次会话改过的
@@ -1075,6 +1144,9 @@ impl FerricApp {
         if let Some(storage) = frame.storage_mut() {
             eframe::App::save(self, storage);
             storage.flush();
+        } else {
+            // 软渲染路径没有 eframe::Frame 的 storage，用注入的 storage 落盘。
+            self.save_soft();
         }
         match crate::launch::relaunch() {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -2571,31 +2643,7 @@ impl eframe::App for FerricApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let drafts = self
-            .tools
-            .iter()
-            .filter_map(|t| t.save_draft().map(|d| (t.meta().id.to_owned(), d)))
-            .collect();
-        let persist = Persist {
-            dark: self.dark,
-            theme_mode: Some(self.mode),
-            rail_width: self.rail_width,
-            favorites: self.favorites.iter().cloned().collect(),
-            active_id: self.tools[self.active].meta().id.to_owned(),
-            drafts,
-            lang: self.shared.lang,
-            server: self.server_override.clone(),
-            ui_scale: self.ui_scale,
-            code_font: self.shared.code_font,
-            auto_update: self.auto_update,
-            // 两个字段一起写：新版本读 source_pref，旧版本读 mock_source。
-            // 只写新的，用户装回旧版本时设置就没了
-            mock_source: self.source_pref.to_legacy(),
-            source_pref: Some(self.source_pref),
-            github_repo: self.github_override.as_ref().map(|g| g.repo.clone()),
-            last_update_check: self.last_update_check,
-        };
-        eframe::set_value(storage, eframe::APP_KEY, &persist);
+        eframe::set_value(storage, eframe::APP_KEY, &self.persist());
     }
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {

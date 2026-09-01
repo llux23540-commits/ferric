@@ -45,11 +45,21 @@ pub enum Backend {
     Vulkan,
     Gl,
     Glow,
+    /// 纯 CPU 软渲染：不创建任何 GPU 上下文，进程内存最低。
+    /// 永远能启动（不依赖驱动），代价是渲染在 CPU 上做、帧率较低。
+    Soft,
 }
 
 impl Backend {
     /// 全部可选项（设置页按这个顺序展示）。
-    pub const ALL: [Self; 5] = [Self::Auto, Self::Dx12, Self::Vulkan, Self::Gl, Self::Glow];
+    pub const ALL: [Self; 6] = [
+        Self::Auto,
+        Self::Dx12,
+        Self::Vulkan,
+        Self::Gl,
+        Self::Glow,
+        Self::Soft,
+    ];
 
     /// 传给 wgpu 的 `WGPU_BACKEND` 值；`Auto` 与 `Glow` 没有值 ——
     /// `Glow` 不走 wgpu，由入口直接选 eframe 的 glow 渲染器。
@@ -63,6 +73,8 @@ impl Backend {
             Self::Vulkan => Some("vulkan"),
             Self::Gl => Some("gl"),
             Self::Glow => None,
+            // 软渲染不走 wgpu，由入口直接走 ferric-soft-render。
+            Self::Soft => None,
         }
     }
 
@@ -82,6 +94,7 @@ impl Backend {
             Self::Vulkan => "Vulkan",
             Self::Gl => "OpenGL",
             Self::Glow => "Glow（OpenGL）",
+            Self::Soft => "软渲染（CPU）",
         }
     }
 }

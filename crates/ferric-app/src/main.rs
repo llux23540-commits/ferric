@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use ferric_soft_render as soft;
 use ferric_ui::launch;
 use ferric_ui::launch::Backend;
 use ferric_ui::{FerricApp, APP_NAME};
@@ -70,7 +71,23 @@ fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
     }
 }
 
-fn run_once(backend: Backend) -> eframe::Result<()> {
+fn run_once(backend: Backend) -> Result<(), String> {
+    if backend == Backend::Soft {
+        // 纯 CPU 软渲染：不建 wgpu / glow 上下文。窗口外观沿用 native_options 的 viewport 配置。
+        let opts = native_options(eframe::Renderer::Wgpu);
+        return soft::run_soft(
+            soft::SoftOptions {
+                viewport: opts.viewport,
+                app_id: Some(launch::APP_ID.to_owned()),
+            },
+            Box::new(|ctx: &egui::Context, storage: Option<Box<dyn eframe::Storage>>| {
+                Ok::<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>(Box::new(
+                    FerricApp::new_soft(ctx, storage),
+                ))
+            }),
+        );
+    }
+
     let renderer = match backend {
         Backend::Glow => eframe::Renderer::Glow,
         _ => eframe::Renderer::Wgpu,
@@ -80,7 +97,20 @@ fn run_once(backend: Backend) -> eframe::Result<()> {
         native_options(renderer),
         Box::new(|cc| Ok(Box::new(FerricApp::new(cc)))),
     )
+    .map_err(|e| e.to_string())
 }
+
+/// 把纯字符串的启动失败包装成 `eframe::Error`（eframe 没有 `From<String>`）。
+#[derive(Debug)]
+struct SoftRenderError(String);
+
+impl std::fmt::Display for SoftRenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SoftRenderError {}
 
 fn main() -> eframe::Result<()> {
     // 选后端 + 落下「正在尝试」标记。winit 全进程只允许一次事件循环，
@@ -92,8 +122,7 @@ fn main() -> eframe::Result<()> {
 
     match run_once(backend) {
         Ok(()) => Ok(()),
-        Err(err) => {
-            let detail = err.to_string();
+        Err(detail) => {
             launch::log(&format!("以 {} 启动失败：{detail}", backend.label()));
             // 已经出过帧的话就不是「打不开」，而是跑着跑着出的错。那种情况：
             // 既不弹「无法启动」（误导），也**不碰配置文件** —— 盘上那份已经被
@@ -105,7 +134,7 @@ fn main() -> eframe::Result<()> {
                 launch::save(&cfg);
                 launch::fatal_dialog(&detail);
             }
-            Err(err)
+            Err(eframe::Error::AppCreation(Box::new(SoftRenderError(detail))))
         }
     }
 }

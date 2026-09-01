@@ -1,0 +1,23 @@
+[package]
+name = "ferric-soft-render"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+authors = ["Ferric"]
+description = "纯 CPU 软渲染后端：把 egui 的 tessellated 图形用标量光栅化器画进内存位图，再由 softbuffer 贴到窗口，完全绕过 GPU API（wgpu / glow）。无 GPU 的虚拟机 / 远程桌面环境下，进程内存从 ~650MB 降到 ~150MB。"
+
+[dependencies]
+# 只借用 eframe 的 App trait / Frame / Storage / get_value·set_value·APP_KEY，
+# 不初始化 wgpu / glow —— 那些渲染栈正是内存大头，软渲染路径根本不创建它们。
+eframe = { workspace = true }
+egui = { workspace = true }
+# 版本必须与 eframe 0.36 所用一致（winit 0.30）。
+egui-winit = "0.36"
+winit = "0.30"
+softbuffer = "0.4"
+# 与 eframe::FileStorage 同一套 RON 格式，保证软渲染与 wgpu/glow 后端
+# 读写同一个 app.ron，切换后端不丢设置 / 草稿。
+ron = { version = "0.12", features = ["integer128"] }
+serde = { workspace = true }
+log = "0.4"

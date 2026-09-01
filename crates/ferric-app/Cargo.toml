@@ -18,6 +18,9 @@ egui = { workspace = true }
 # 否则在无 Vulkan 驱动 / GL 仅 1.1 的环境（如 QEMU 虚拟机的 WARP 软件渲染）下找不到适配器。
 # 版本必须与 eframe 0.36 所用 wgpu（30.x）一致。
 wgpu = { version = "30", default-features = false, features = ["dx12"] }
+# 软渲染后端：纯 CPU 光栅化 egui 的图形，softbuffer 把位图贴到窗口，
+# 完全绕过 GPU API —— 虚拟机 / 无 GPU 环境下进程内存从 ~650MB 降到 ~150MB。
+ferric-soft-render = { workspace = true }
 
 [build-dependencies]
 # 把 icon.ico 嵌进 Windows exe 的 PE 资源（见 build.rs）。

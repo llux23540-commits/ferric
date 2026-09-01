@@ -1,6 +1,6 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/ferric-core", "crates/ferric-ui", "crates/ferric-app", "crates/egui-rope-editor"]
+members = ["crates/ferric-core", "crates/ferric-ui", "crates/ferric-app", "crates/egui-rope-editor", "crates/ferric-soft-render"]
 # plugins/ 下是独立编译到 wasm32 的插件示例，不属于主工作区
 exclude = ["plugins"]
 
@@ -20,6 +20,7 @@ authors = ["Ferric"]
 ferric-core = { path = "crates/ferric-core" }
 ferric-ui = { path = "crates/ferric-ui" }
 egui-rope-editor = { path = "crates/egui-rope-editor" }
+ferric-soft-render = { path = "crates/ferric-soft-render" }
 
 # GUI
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow", "persistence", "wayland", "x11"] }
