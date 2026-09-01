@@ -12,18 +12,19 @@
 
 use eframe::egui;
 use ferric_ui::launch;
+use ferric_ui::launch::Backend;
 use ferric_ui::{FerricApp, APP_NAME};
 
-fn native_options() -> eframe::NativeOptions {
+fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
     // 窗口/任务栏图标（Windows 标题栏+任务栏、X11）。Wayland 不走这里 ——
     // 合成器按 app_id 找 .desktop 文件拿图标，见下面的 with_app_id。
     // macOS Dock 用的是 bundle 里的 icns（cargo-packager 打包时带入）。
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/128x128@2x.png"))
         .expect("内嵌图标是构建期资源，坏了只能是资源本身被改坏");
     eframe::NativeOptions {
-        // wgpu 后端。具体用 DX12 / Vulkan / GL 由 launch::plan 通过 WGPU_BACKEND
-        // 决定（egui-wgpu 的默认适配器设置读的就是这个环境变量）。
-        renderer: eframe::Renderer::Wgpu,
+        // 渲染器由 launch::begin 选出的后端决定：`Glow` 走 OpenGL（glow）渲染器，
+        // 其余走 wgpu（具体 DX12 / Vulkan / GL 由 WGPU_BACKEND 环境变量决定）。
+        renderer,
         // 首次在主屏居中打开（之后由 persist_window 记住用户调整）。
         centered: true,
         // 表面配置（仅 Windows）：present 用 Mailbox。DX12 上 Fifo 是 3 帧队列，
@@ -69,10 +70,14 @@ fn native_options() -> eframe::NativeOptions {
     }
 }
 
-fn run_once() -> eframe::Result<()> {
+fn run_once(backend: Backend) -> eframe::Result<()> {
+    let renderer = match backend {
+        Backend::Glow => eframe::Renderer::Glow,
+        _ => eframe::Renderer::Wgpu,
+    };
     eframe::run_native(
         APP_NAME,
-        native_options(),
+        native_options(renderer),
         Box::new(|cc| Ok(Box::new(FerricApp::new(cc)))),
     )
 }
@@ -85,7 +90,7 @@ fn main() -> eframe::Result<()> {
     let backend = launch::begin(&mut cfg);
     launch::log(&format!("启动：渲染后端 = {}", backend.label()));
 
-    match run_once() {
+    match run_once(backend) {
         Ok(()) => Ok(()),
         Err(err) => {
             let detail = err.to_string();

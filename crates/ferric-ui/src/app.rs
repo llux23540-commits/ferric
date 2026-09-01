@@ -398,7 +398,9 @@ impl FerricApp {
                 let sw = info.device_type == eframe::wgpu::DeviceType::Cpu || force_soft;
                 (Some(format!("{backend} · {}", info.name)), sw)
             }
-            None => (None, force_soft),
+            // glow 渲染器没有 wgpu 的适配器信息。它主要是给虚拟机 / 无 GPU 环境
+            // 作兑底的，默认按软件渲染处理（关动画/阴影/羽化 + 帧率封顶）。
+            None => (Some("Glow（OpenGL）".to_owned()), true),
         };
         // 同一行写进 startup.log：排「画面糊 / 卡」这类问题时，
         // 「实际用了哪块适配器」是第一个要回答的问题。

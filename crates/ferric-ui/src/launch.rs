@@ -33,6 +33,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const APP_ID: &str = "ferric";
 
 /// 渲染后端选择。`Auto` = 交给 wgpu 自己挑（默认）。
+///
+/// `Glow` 是独立于 wgpu 的 OpenGL 渲染器（eframe::Renderer::Glow）——
+/// 虚拟机 / 无 GPU 环境里它走系统的 OpenGL 软件实现，native 内存比 wgpu 回退
+/// 到 WARP 小得多，作为这类环境的兑底。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Backend {
     #[default]
@@ -40,13 +44,15 @@ pub enum Backend {
     Dx12,
     Vulkan,
     Gl,
+    Glow,
 }
 
 impl Backend {
     /// 全部可选项（设置页按这个顺序展示）。
-    pub const ALL: [Self; 4] = [Self::Auto, Self::Dx12, Self::Vulkan, Self::Gl];
+    pub const ALL: [Self; 5] = [Self::Auto, Self::Dx12, Self::Vulkan, Self::Gl, Self::Glow];
 
-    /// 传给 wgpu 的 `WGPU_BACKEND` 值；`Auto` 没有值（= 不设这个环境变量）。
+    /// 传给 wgpu 的 `WGPU_BACKEND` 值；`Auto` 与 `Glow` 没有值 ——
+    /// `Glow` 不走 wgpu，由入口直接选 eframe 的 glow 渲染器。
     ///
     /// 名字必须是 wgpu 认的那几个（见 `wgpu::Backends::from_comma_list`），
     /// 写错了 wgpu 只会 warn 一句然后当成空集合 —— 那等于一个后端都不许用。
@@ -56,6 +62,7 @@ impl Backend {
             Self::Dx12 => Some("dx12"),
             Self::Vulkan => Some("vulkan"),
             Self::Gl => Some("gl"),
+            Self::Glow => None,
         }
     }
 
@@ -74,6 +81,7 @@ impl Backend {
             Self::Dx12 => "DX12",
             Self::Vulkan => "Vulkan",
             Self::Gl => "OpenGL",
+            Self::Glow => "Glow（OpenGL）",
         }
     }
 }
