@@ -100,7 +100,10 @@ struct SoftApp {
 impl ApplicationHandler<UserEvent> for SoftApp {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
         // 建窗：复用 egui_winit 对 ViewportBuilder 的完整解析（尺寸 / 标题 / 图标 / 边框）。
-        let ctx = self.egui_ctx.as_ref().expect("事件循环启动前已建好 egui 上下文");
+        let ctx = self
+            .egui_ctx
+            .as_ref()
+            .expect("事件循环启动前已建好 egui 上下文");
         let window = match egui_winit::create_window(ctx, elwt, &self.viewport) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -323,7 +326,9 @@ impl SoftApp {
 }
 
 /// egui 的缩放方向 → winit 的缩放方向（两侧枚举定义一致，只是命名空间不同）。
-fn to_winit_resize(dir: &egui::viewport::ResizeDirection) -> Option<winit::window::ResizeDirection> {
+fn to_winit_resize(
+    dir: &egui::viewport::ResizeDirection,
+) -> Option<winit::window::ResizeDirection> {
     use egui::viewport::ResizeDirection as E;
     use winit::window::ResizeDirection as W;
     Some(match dir {

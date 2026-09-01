@@ -80,11 +80,13 @@ fn run_once(backend: Backend) -> Result<(), String> {
                 viewport: opts.viewport,
                 app_id: Some(launch::APP_ID.to_owned()),
             },
-            Box::new(|ctx: &egui::Context, storage: Option<Box<dyn eframe::Storage>>| {
-                Ok::<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>(Box::new(
-                    FerricApp::new_soft(ctx, storage),
-                ))
-            }),
+            Box::new(
+                |ctx: &egui::Context, storage: Option<Box<dyn eframe::Storage>>| {
+                    Ok::<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>(Box::new(
+                        FerricApp::new_soft(ctx, storage),
+                    ))
+                },
+            ),
         );
     }
 
@@ -134,7 +136,9 @@ fn main() -> eframe::Result<()> {
                 launch::save(&cfg);
                 launch::fatal_dialog(&detail);
             }
-            Err(eframe::Error::AppCreation(Box::new(SoftRenderError(detail))))
+            Err(eframe::Error::AppCreation(Box::new(SoftRenderError(
+                detail,
+            ))))
         }
     }
 }

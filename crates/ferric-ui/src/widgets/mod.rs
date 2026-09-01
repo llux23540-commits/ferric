@@ -10,7 +10,6 @@ use egui::{
 pub mod font;
 pub use font::FontCfg;
 
-
 /// 区块小标题（fg_soft）。
 pub fn field_label(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(RichText::new(text).size(12.5).color(theme.fg_soft));

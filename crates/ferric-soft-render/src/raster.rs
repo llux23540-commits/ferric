@@ -152,36 +152,10 @@ fn rasterize_tri(
     };
     let inv_area = 1.0 / area;
 
-    let min_x = a
-        .pos
-        .x
-        .min(b.pos.x)
-        .min(c.pos.x)
-        .max(clip.min.x)
-        .floor() as i32;
-    let max_x = (a
-        .pos
-        .x
-        .max(b.pos.x)
-        .max(c.pos.x)
-        .min(clip.max.x)
-        .ceil() as i32)
-        .max(min_x);
-    let min_y = a
-        .pos
-        .y
-        .min(b.pos.y)
-        .min(c.pos.y)
-        .max(clip.min.y)
-        .floor() as i32;
-    let max_y = (a
-        .pos
-        .y
-        .max(b.pos.y)
-        .max(c.pos.y)
-        .min(clip.max.y)
-        .ceil() as i32)
-        .max(min_y);
+    let min_x = a.pos.x.min(b.pos.x).min(c.pos.x).max(clip.min.x).floor() as i32;
+    let max_x = (a.pos.x.max(b.pos.x).max(c.pos.x).min(clip.max.x).ceil() as i32).max(min_x);
+    let min_y = a.pos.y.min(b.pos.y).min(c.pos.y).max(clip.min.y).floor() as i32;
+    let max_y = (a.pos.y.max(b.pos.y).max(c.pos.y).min(clip.max.y).ceil() as i32).max(min_y);
 
     let min_x = min_x.max(0);
     let min_y = min_y.max(0);

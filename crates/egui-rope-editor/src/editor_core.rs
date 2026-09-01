@@ -511,8 +511,7 @@ fn code_editor_inner(
                     let (vis_chars, segs) = build_visible(&chars, n, &regions, &state.folded);
                     let vis: String = vis_chars.iter().collect();
 
-                    let mut job =
-                        highlighter.highlight(&vis, &font_id, theme, Some(row_h));
+                    let mut job = highlighter.highlight(&vis, &font_id, theme, Some(row_h));
                     job.wrap.max_width = if wrap {
                         // 末尾留一个字符宽：行尾光标要有地方画，否则它会贴在边界上被裁掉
                         (view_w - gutter_width(src_nl.len(), char_w) - char_w - 12.0)
@@ -1149,7 +1148,9 @@ fn row_of(rows: &[VRow], v: usize) -> usize {
 #[allow(clippy::needless_range_loop)] // `i` 是断行点位置（0..=vis_len 含末尾），不是纯索引
 fn build_rows(vis_chars: &[char], wrap_cols: usize) -> Vec<VRow> {
     let vis_len = vis_chars.len();
-    let est = (vis_len / wrap_cols.max(1)).saturating_add(vis_len / 8).max(1);
+    let est = (vis_len / wrap_cols.max(1))
+        .saturating_add(vis_len / 8)
+        .max(1);
     let mut rows = Vec::with_capacity(est);
     let mut cur = 0usize;
     let mut first = true;
@@ -1402,7 +1403,10 @@ fn code_editor_virtualized(
                 } else if st.search.total == 0 {
                     ("无匹配".to_owned(), theme.danger)
                 } else {
-                    (format!("{}/{}", st.search.cur + 1, st.search.total), theme.muted)
+                    (
+                        format!("{}/{}", st.search.cur + 1, st.search.total),
+                        theme.muted,
+                    )
                 };
                 ui.allocate_ui_with_layout(
                     vec2(72.0, 24.0),
@@ -1469,12 +1473,7 @@ fn code_editor_virtualized(
             std::sync::Arc::new(apply_edit(&old, e, text, wrap_cols, key, &st.ed.folded))
         }
         (Some(old), None) if old.key == key => old,
-        _ => std::sync::Arc::new(build_virtual_layout(
-            text,
-            wrap_cols,
-            key,
-            &st.ed.folded,
-        )),
+        _ => std::sync::Arc::new(build_virtual_layout(text, wrap_cols, key, &st.ed.folded)),
     };
     // 剪除失效的折叠锚点（编辑删掉某个开括号后，旧锚点不再对应任何区间）。
     let region_brs: HashSet<usize> = layout.regions.iter().map(|r| r.br).collect();
@@ -1580,8 +1579,7 @@ fn code_editor_virtualized(
     }
 
     // ---- 焦点闩锁 ----
-    let pressed_on_me =
-        resp.clicked() || resp.dragged() || resp.is_pointer_button_down_on();
+    let pressed_on_me = resp.clicked() || resp.dragged() || resp.is_pointer_button_down_on();
     let pressed_elsewhere = ui.input(|i| i.pointer.any_pressed()) && !resp.contains_pointer();
     if pressed_on_me && !gutter_click {
         st.ed.want_focus = true;
@@ -1607,10 +1605,7 @@ fn code_editor_virtualized(
                 let off = (rel / row_h).floor().max(0.0) as usize;
                 let li = (fb + off).min(lb);
                 let g = &galleys[li - fb];
-                let local = ptr - pos2(
-                    text_origin.x,
-                    text_origin.y + (li - fb) as f32 * row_h,
-                );
+                let local = ptr - pos2(text_origin.x, text_origin.y + (li - fb) as f32 * row_h);
                 let ci = g.cursor_from_pos(local).index.0;
                 let gv = rows[li].start + ci;
                 if resp.double_clicked() {
@@ -1721,10 +1716,7 @@ fn code_editor_virtualized(
                     if modifiers.command {
                         match key {
                             Key::A => {
-                                vrange = CCursorRange::two(
-                                    CCursor::new(0),
-                                    CCursor::new(vis_len),
-                                );
+                                vrange = CCursorRange::two(CCursor::new(0), CCursor::new(vis_len));
                                 continue 'ev;
                             }
                             Key::Home => {
@@ -1797,8 +1789,7 @@ fn code_editor_virtualized(
             if let Some(rg) = st.ed.cursor.char_range() {
                 if !rg.is_empty() {
                     let [lo, hi] = rg.sorted_cursors();
-                    st.search.query =
-                        vis_chars[lo.index.0..hi.index.0].iter().collect::<String>();
+                    st.search.query = vis_chars[lo.index.0..hi.index.0].iter().collect::<String>();
                     st.search.select_all = true;
                     st.search.cur = 0;
                 }
@@ -1972,11 +1963,13 @@ fn code_editor_virtualized(
         ui.painter()
             .rect_filled(track, 3.0, theme.faint.gamma_multiply(0.35));
         ui.painter().rect_filled(thumb, 3.0, theme.muted);
-        if ui.interact(track, id.with("__vsb"), Sense::drag()).dragged() {
+        if ui
+            .interact(track, id.with("__vsb"), Sense::drag())
+            .dragged()
+        {
             if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
-                st.scroll.y =
-                    ((p.y - vp.top() - thumb_h / 2.0) / (vp_h - thumb_h) * max_sy)
-                        .clamp(0.0, max_sy);
+                st.scroll.y = ((p.y - vp.top() - thumb_h / 2.0) / (vp_h - thumb_h) * max_sy)
+                    .clamp(0.0, max_sy);
             }
         }
     }
@@ -2517,7 +2510,12 @@ fn edit_ime(
 }
 
 /// 取当前选区对应的**源文本**切片（用于复制/剪切）；跨占位则返回含隐藏内容的整段。
-fn selection_src(text: &ropey::Rope, segs: &[Seg], n: usize, vrange: &CCursorRange) -> Option<String> {
+fn selection_src(
+    text: &ropey::Rope,
+    segs: &[Seg],
+    n: usize,
+    vrange: &CCursorRange,
+) -> Option<String> {
     let (p, _) = map_vis(segs, vrange.primary.index.0, n);
     let (s, _) = map_vis(segs, vrange.secondary.index.0, n);
     let (lo, hi) = (p.min(s), p.max(s));
@@ -2761,7 +2759,9 @@ mod tests {
     /// 折叠区间扫描：忽略字符串内的括号，数出直接子节点数。
     #[test]
     fn scans_regions_ignoring_strings() {
-        let chars: Vec<char> = "{\n  \"a\": \"{}\",\n  \"b\": [\n    1,\n    2\n  ]\n}".chars().collect();
+        let chars: Vec<char> = "{\n  \"a\": \"{}\",\n  \"b\": [\n    1,\n    2\n  ]\n}"
+            .chars()
+            .collect();
         let regions = scan_regions(&chars);
         assert_eq!(regions.len(), 2, "应有对象和数组两个区间");
         let obj = regions.iter().find(|r| r.obj).expect("对象区间");
@@ -2770,4 +2770,3 @@ mod tests {
         assert_eq!(arr.count, 2, "数组数 2 个元素");
     }
 }
-

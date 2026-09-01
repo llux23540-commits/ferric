@@ -2476,8 +2476,7 @@ impl FerricApp {
                         }
                     }
                 } else {
-                    self.shared
-                        .toast("演示 / 自定义更新源不会真的执行安装程序");
+                    self.shared.toast("演示 / 自定义更新源不会真的执行安装程序");
                 }
             }
             None => {}

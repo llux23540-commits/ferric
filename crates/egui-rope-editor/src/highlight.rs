@@ -8,14 +8,26 @@ use egui::{Color32, FontId};
 ///
 /// `line_height` 为 `Some` 时按给定行高排版；`None` 用字体自带行高。
 pub trait Highlighter {
-    fn highlight(&self, text: &str, font_id: &FontId, colors: &Colors, line_height: Option<f32>) -> LayoutJob;
+    fn highlight(
+        &self,
+        text: &str,
+        font_id: &FontId,
+        colors: &Colors,
+        line_height: Option<f32>,
+    ) -> LayoutJob;
 }
 
 /// 空高亮：整段单一前景色（无语法高亮的大文件保底）。
 pub struct PlainHighlighter;
 
 impl Highlighter for PlainHighlighter {
-    fn highlight(&self, text: &str, font_id: &FontId, colors: &Colors, line_height: Option<f32>) -> LayoutJob {
+    fn highlight(
+        &self,
+        text: &str,
+        font_id: &FontId,
+        colors: &Colors,
+        line_height: Option<f32>,
+    ) -> LayoutJob {
         let mut job = LayoutJob::default();
         job.append(
             text,
@@ -36,7 +48,13 @@ impl Highlighter for PlainHighlighter {
 pub struct JsonHighlighter;
 
 impl Highlighter for JsonHighlighter {
-    fn highlight(&self, text: &str, font_id: &FontId, colors: &Colors, line_height: Option<f32>) -> LayoutJob {
+    fn highlight(
+        &self,
+        text: &str,
+        font_id: &FontId,
+        colors: &Colors,
+        line_height: Option<f32>,
+    ) -> LayoutJob {
         let num_col = if colors.dark {
             Color32::from_rgb(0xe0, 0xb0, 0x62)
         } else {
@@ -79,7 +97,11 @@ impl Highlighter for JsonHighlighter {
                     k += 1;
                 }
                 let is_key = k < n && b[k] == b':';
-                let col = if is_key { colors.accent_strong } else { colors.ok };
+                let col = if is_key {
+                    colors.accent_strong
+                } else {
+                    colors.ok
+                };
                 job.append(&text[start..end], 0.0, mk(col));
                 run = end;
             } else if c == b'-' || c.is_ascii_digit() {
@@ -90,7 +112,13 @@ impl Highlighter for JsonHighlighter {
                 i += 1;
                 while i < n {
                     let d = b[i];
-                    if d.is_ascii_digit() || d == b'.' || d == b'e' || d == b'E' || d == b'+' || d == b'-' {
+                    if d.is_ascii_digit()
+                        || d == b'.'
+                        || d == b'e'
+                        || d == b'E'
+                        || d == b'+'
+                        || d == b'-'
+                    {
                         i += 1;
                     } else {
                         break;

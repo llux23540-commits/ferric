@@ -873,7 +873,8 @@ mod tests {
         drive_tool(&mut tool, screen, frames);
 
         assert_eq!(
-            tool.input.to_string(), "{}",
+            tool.input.to_string(),
+            "{}",
             "点了撤销按钮但正文没回到编辑前：{:?}",
             tool.input
         );
@@ -1031,7 +1032,10 @@ mod tests {
         // ① 格式化
         let ind = tool.indent;
         tool.run_op(|s| json::format(s, ind, false), "已格式化");
-        assert!(tool.ok && tool.input.to_string().contains('\n'), "格式化失败");
+        assert!(
+            tool.ok && tool.input.to_string().contains('\n'),
+            "格式化失败"
+        );
         let formatted = tool.input.to_string();
         let longest = formatted.lines().map(|l| l.chars().count()).max().unwrap();
         assert!(longest > 300, "用例前提：格式化后有超长行");
@@ -1058,18 +1062,29 @@ mod tests {
             copied.iter().any(|s| !s.is_empty()),
             "六件事一起做的时候选中失效了"
         );
-        assert_eq!(tool.input.to_string(), formatted, "选中与折叠都不该改动内容");
+        assert_eq!(
+            tool.input.to_string(),
+            formatted,
+            "选中与折叠都不该改动内容"
+        );
 
         // ③ 压缩：回到单行，且仍是合法 JSON
         tool.run_op(json::minify, "已压缩");
         assert!(tool.ok, "压缩失败：{}", tool.status);
         assert!(!tool.input.to_string().contains('\n'), "压缩后应当只有一行");
-        assert!(json::validate(&tool.input.to_string()).is_ok(), "压缩后仍须是合法 JSON");
+        assert!(
+            json::validate(&tool.input.to_string()).is_ok(),
+            "压缩后仍须是合法 JSON"
+        );
 
         // 再格式化一次，确认整轮下来内容没有被弄坏
         let ind = tool.indent;
         tool.run_op(|s| json::format(s, ind, false), "已格式化");
-        assert_eq!(tool.input.to_string(), formatted, "一轮操作下来内容应当可以完全复原");
+        assert_eq!(
+            tool.input.to_string(),
+            formatted,
+            "一轮操作下来内容应当可以完全复原"
+        );
     }
 
     /// 折叠占位要显示节点数（用户要求的「收缩显示节点数」）。

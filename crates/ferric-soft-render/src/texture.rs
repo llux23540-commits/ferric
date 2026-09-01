@@ -3,7 +3,7 @@
 //! 采样逻辑与 `egui_software_backend` 对齐：像素在入库时就 swizzle 成 BGRA，
 //! 这样光栅化阶段算出的颜色可以直接写进 softbuffer 的 BGRX 帧缓冲，无需二次转换。
 
-use egui::{Color32, TextureFilter, TextureOptions, Vec2, vec2};
+use egui::{vec2, Color32, TextureFilter, TextureOptions, Vec2};
 
 pub struct EguiTexture {
     /// 已 swizzle 成 BGRA 的像素（premultiplied alpha），行优先。
