@@ -18,8 +18,16 @@ rfd = { workspace = true }
 wasmtime = "27.0.0"
 directories.workspace = true
 libsm = { workspace = true }
-ureq = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 ropey = { workspace = true }
+
+# Windows 用系统 schannel（纯系统 API，不需要 C 编译器），彻底把 ring 从依赖树里
+# 摘掉 —— 这样 Windows 本地编译不再需要 MSVC 的 C 工具链（ring 编译 C/汇编是唯一
+# 需要它的地方）。其他平台保持 rustls（ring），CI 上工具链齐全，不受影响。
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { workspace = true }
