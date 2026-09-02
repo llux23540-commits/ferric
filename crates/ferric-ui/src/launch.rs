@@ -466,10 +466,18 @@ fn resolve_after_success(cfg: &mut LaunchCfg, used: Backend, software: bool) -> 
     let untried: Option<Backend> = if locked {
         None
     } else {
-        // 起不来的（failed）同样要跳过 —— 它们不是「没试过」，是试过进不去。
-        plan(cfg)
-            .into_iter()
-            .find(|b| !cfg.slow.contains(b) && !cfg.failed.contains(b))
+        // 内存优先：拿到软件渲染（无 GPU）时，下一个先试「纯软渲染 Soft」——
+        // 它不建任何 GPU 上下文，进程内存 ~150M；而 DX12 / Vulkan / Gl 这些 wgpu
+        // 后端在无 GPU 环境都会退化成 WARP，内存同样 ~640M，挨个试它们只是白试。
+        // 只有 Soft 也试过（或起不来）了，才退回「逐个找真实 GPU」的老路。
+        if !cfg.slow.contains(&Backend::Soft) && !cfg.failed.contains(&Backend::Soft) {
+            Some(Backend::Soft)
+        } else {
+            // 起不来的（failed）同样要跳过 —— 它们不是「没试过」，是试过进不去。
+            plan(cfg)
+                .into_iter()
+                .find(|b| !cfg.slow.contains(b) && !cfg.failed.contains(b))
+        }
     };
     match untried {
         Some(next) => {
