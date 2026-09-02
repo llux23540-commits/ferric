@@ -52,13 +52,17 @@ pub enum Backend {
 
 impl Backend {
     /// 全部可选项（设置页按这个顺序展示）。
+    ///
+    /// `Soft` 排第一：它是唯一不碰 GPU API 的后端，内存最低（~150M vs wgpu 的
+    /// ~640M），且任何机器（含无显卡的虚拟机）都能跑。ferric 是轻量工具，
+    /// CPU 光栅化足够流畅；想要 GPU 加速的用户在设置里手动切 `Auto` 即可。
     pub const ALL: [Self; 6] = [
+        Self::Soft,
         Self::Auto,
         Self::Dx12,
         Self::Vulkan,
         Self::Gl,
         Self::Glow,
-        Self::Soft,
     ];
 
     /// 传给 wgpu 的 `WGPU_BACKEND` 值；`Auto` 与 `Glow` 没有值 ——

@@ -157,12 +157,13 @@ mod tests {
         assert!(p.contains(&Backend::Auto));
     }
 
-    /// 默认情况（全新安装）就该走「自动」，让 wgpu 自己挑。
+    /// 默认情况（全新安装）就该走「软渲染」：内存最低、任何机器都能跑。
+    /// 想要 GPU 加速的用户在设置里手动切「自动」即可。
     #[test]
-    fn a_fresh_install_starts_on_auto() {
+    fn a_fresh_install_starts_on_soft() {
         assert_eq!(
             launch::plan(&LaunchCfg::default()).first(),
-            Some(&Backend::Auto)
+            Some(&Backend::Soft)
         );
     }
 }
