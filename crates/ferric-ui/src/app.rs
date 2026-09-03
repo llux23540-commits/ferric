@@ -274,6 +274,8 @@ pub struct FerricApp {
     /// 软渲染后端注入的持久化存储。eframe 路径为 `None`（走 `frame.storage_mut()`），
     /// 软渲染路径由 [`FerricApp::new_soft`] 注入，[`FerricApp::save_soft`] 用它落盘。
     soft_storage: Option<Box<dyn eframe::Storage>>,
+    /// 30 秒内存采样的状态机：None = 不在工作。详见 `crate::mem`。
+    mem_recorder: Option<crate::mem::MemoryRecorder>,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -536,6 +538,7 @@ impl FerricApp {
             want_restart: false,
             update_dialog_open: false,
             soft_storage: None,
+            mem_recorder: None,
         }
     }
 
@@ -1635,7 +1638,33 @@ impl FerricApp {
                 );
             }
         });
-    }
+        // 内存采样：按需触发 30 秒录制，写到 `memory.log`（同数据目录）。
+        // 默认不工作——点按钮才采，采完落盘 + toast。详见 `crate::mem`。
+        ui.horizontal(|ui| {
+            match self.mem_recorder.as_ref() {
+                None => {
+                    if widgets::ghost_button(ui, &theme, "记录 30 秒内存").clicked() {
+                        self.start_mem_recording();
+                    }
+                }
+                Some(rec) => {
+                    // 录制中：按钮变占位文本，进度提示在右。
+                    ui.add_enabled_ui(false, |ui| {
+                        let _ = widgets::ghost_button(ui, &theme, "记录 30 秒内存");
+                    });
+                    ui.label(
+                        RichText::new(format!(
+                            "正在记录… {} / {} 秒",
+                            rec.elapsed_secs(),
+                            rec.duration_secs()
+                        ))
+                        .size(11.5)
+                        .color(theme.muted),
+                    );
+                }
+            }
+        });
+     }
 
     /// 设置窗的**应用内回退形态**：软件渲染环境专用（见 [`Self::settings_ui`]）。
     ///
@@ -2698,10 +2727,12 @@ impl eframe::App for FerricApp {
                 // 启动诊断：稳定出帧后一次性把可量化的内部状态写到 startup.log。
                 // 「600M+」是观察值，根因在 wgpu runtime / 字体 atlas / 撤销栈 / persistence
                 // 哪一坨要靠这份拆分去对 —— 一行数对得齐，就知道下一刀该砍谁。
-                // 计算成本：一次 JSON 序列化 + 一次文件追加，3 帧后只跑一次。
                 startup_diag(self);
             }
         }
+        // 30 秒内存采样：每帧轮询，到点落盘并提示用户。
+        // 与 startup_diag 同一个上下文：可以拿到 Persist 的字节视图。
+        self.poll_mem_recorder(ctx);
         self.debug_screenshot(ctx);
         // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
         self.sync_theme(ctx);
@@ -2960,6 +2991,56 @@ fn startup_diag(app: &FerricApp) {
         fmt_bytes(cjk_bytes),
         app.gpu_desc.as_deref().unwrap_or("?"),
     ));
+}
+
+impl FerricApp {
+    /// 用户在「关于」页点"记录 30 秒内存"后启动录制。
+    /// data_dir 拿不到（极冷启动场景）就静默失败——按 mem.rs 的契约，
+    /// 拿不到路径就不开采样，不让按钮变成"点了没反应"。
+    fn start_mem_recording(&mut self) {
+        if self.mem_recorder.is_some() {
+            return; // 录制中重复点不重启，提示在 UI 上显示。
+        }
+        let Some(dir) = crate::launch::data_dir() else {
+            self.shared.toast("无法定位数据目录，录制未开始");
+            return;
+        };
+        let backend = self.launch_cfg.backend.label();
+        self.mem_recorder = Some(crate::mem::MemoryRecorder::start(&dir, backend));
+    }
+
+    /// 30 秒内存采样的轮询钩子：每帧检查 recorder 的到期状态。
+    /// 落到点就把 `memory.log` 写出去、toast 通知用户、清除 recorder。
+    fn poll_mem_recorder(&mut self, _ctx: &egui::Context) {
+        use crate::mem::TickOutcome;
+        // 先取走需要的快照数据，避免与下面 mem_recorder 的可变借用重叠。
+        let (persist_bytes, drafts_bytes) = persist_size_split(&self.persist());
+        let Some(rec) = self.mem_recorder.as_mut() else {
+            return;
+        };
+        match rec.tick(persist_bytes, drafts_bytes) {
+            TickOutcome::Pending | TickOutcome::Sampled(_) => {
+                // 录制中无需重绘提示——UI 上按钮已经显示「正在记录… X / 30」。
+            }
+            TickOutcome::Finished(_) => {
+                // take() 把 recorder 拿掉，避免下一次录制开始前多调一次 finish。
+                if let Some(rec) = self.mem_recorder.take() {
+                    match rec.finish() {
+                        Ok(()) => self.shared.toast("已保存 memory.log（30 秒采样）"),
+                        Err(e) => self.shared.toast(format!("保存 memory.log 失败：{e}")),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `(persist 序列化字节, drafts 总字节)`：和 `startup_diag` 同口径，
+/// 抽取出来给 `poll_mem_recorder` 复用，避免 `tick()` 里再写一遍序列化。
+fn persist_size_split(p: &Persist) -> (u64, u64) {
+    let persist_bytes = serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0) as u64;
+    let drafts_bytes = p.drafts.values().map(|v| v.len()).sum::<usize>() as u64;
+    (persist_bytes, drafts_bytes)
 }
 
 /// 把字节数压成对人友好的形式（512 / 1.2K / 4.7M），固定到 1 位小数。

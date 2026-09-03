@@ -20,6 +20,7 @@ mod tool;
 mod updater;
 mod views;
 mod widgets;
+mod mem;
 
 pub use app::{FerricApp, APP_NAME};
 pub use fonts::install_fonts;

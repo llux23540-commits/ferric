@@ -1592,6 +1592,7 @@ dependencies = [
 name = "ferric-ui"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "chrono-tz",
  "directories",
  "eframe",
@@ -1600,6 +1601,7 @@ dependencies = [
  "egui_json_tree",
  "ferric-core",
  "hex",
+ "libc",
  "libsm",
  "rand 0.8.7",
  "rfd",
@@ -1609,6 +1611,7 @@ dependencies = [
  "sha2",
  "ureq",
  "wasmtime",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

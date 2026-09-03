@@ -22,6 +22,9 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 ropey = { workspace = true }
+# mem.rs 的 Windows 分支用 psapi GetProcessMemoryInfo。feature 子集收窄到 ProcessStatus + 必备 Foundation/Threading。
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+chrono = { workspace = true }
 
 # Windows 用系统 schannel（纯系统 API，不需要 C 编译器），彻底把 ring 从依赖树里
 # 摘掉 —— 这样 Windows 本地编译不再需要 MSVC 的 C 工具链（ring 编译 C/汇编是唯一
@@ -30,4 +33,5 @@ ropey = { workspace = true }
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
 
 [target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
 ureq = { workspace = true }
