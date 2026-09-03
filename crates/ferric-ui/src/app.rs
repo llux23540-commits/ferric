@@ -1614,6 +1614,27 @@ impl FerricApp {
                 .size(11.5)
                 .color(theme.faint),
         );
+        ui.add_space(12.0);
+        // 数据目录按钮：`launch.json` 与 `startup.log` 都在这里。
+        // 诊断报告（见 [`startup_diag`]）需要用户能方便地把这两份交出来。
+        ui.horizontal(|ui| {
+            if widgets::ghost_button(ui, &theme, "打开数据文件夹").clicked() {
+                if let Err(e) = crate::launch::open_data_dir() {
+                    self.shared.toast(format!("打开失败：{e}"));
+                }
+            }
+            // 直接显示路径，省得用户点开再翻 —— 大多数"我这日志在哪"的问题
+            // 一眼就能答（特别是 ARM Windows 上 `eframe::storage_dir` 走
+            // `%LOCALAPPDATA%` 但有版本差异，肉眼看一眼比记忆稳）。
+            if let Some(p) = crate::launch::data_dir() {
+                ui.label(
+                    RichText::new(p.display().to_string())
+                        .family(FontFamily::Monospace)
+                        .size(11.0)
+                        .color(theme.faint),
+                );
+            }
+        });
     }
 
     /// 设置窗的**应用内回退形态**：软件渲染环境专用（见 [`Self::settings_ui`]）。
@@ -2674,6 +2695,11 @@ impl eframe::App for FerricApp {
                 if let Some(next) = out.will_retry_with {
                     self.slow_render_retry = Some(next);
                 }
+                // 启动诊断：稳定出帧后一次性把可量化的内部状态写到 startup.log。
+                // 「600M+」是观察值，根因在 wgpu runtime / 字体 atlas / 撤销栈 / persistence
+                // 哪一坨要靠这份拆分去对 —— 一行数对得齐，就知道下一刀该砍谁。
+                // 计算成本：一次 JSON 序列化 + 一次文件追加，3 帧后只跑一次。
+                startup_diag(self);
             }
         }
         self.debug_screenshot(ctx);
@@ -2859,6 +2885,118 @@ fn perf_probe(ctx: &egui::Context, t0: std::time::Instant) {
         *total = 0.0;
         *worst = 0.0;
     });
+}
+
+/// 启动后一次性诊断报告：把可量化的内部状态（持久化、工具、草稿、字体）写到 startup.log。
+///
+/// 触发时机：第三帧稳定出帧后（与 `mark_running` 同帧）。跑得太早（首帧）会让
+/// 字体纹理 / 撤销栈尚未完成首次提交；太晚（运行中）会丢掉**冷启动内存**的快照，
+/// 而那正是「600M+」现象发生的位置。
+///
+/// 这里**不**测进程 RSS：`windows-sys` / `libc` 都是新增依赖，且 RSS 自身在
+/// ARM Windows 等环境里与「任务管理器 · 内存(私有工作集)」并不完全对应
+/// （working set 还含共享 / 已映射未触页面）。用户想看 RSS 直接看任务管理器
+/// 更准。这里只把**我们可以**优化的子系统量化列出来，差值留给 RSS。
+///
+/// 输出格式（单行，便于 `grep` / 排序）：
+///
+/// ```text
+/// [diag] tools=N persist=XB drafts=NB (top3) fonts=XB (design=XB cjk=XB) adapter=...
+/// ```
+///
+/// - `tools`：工具数量（含插件）。10 个工具常驻，每个持自己的 `Vec<Rope>` /
+///   撤销栈 / 折叠树 —— 单看这个数没意义，但配合 `drafts` 总和能给出量级。
+/// - `persist`：把 `Persist` 序列化成 JSON 后的字节数 —— **这就是 eframe
+///   每次 save 写盘的体积**，会原样落到 `app.ron`。
+/// - `drafts`：各工具草稿的字节数（按字节降序，前 3 名列出，其余求和）。
+///   JSON 工具的 Rope 草稿通常是最大头；一个 5MB JSON = ~5MB 草稿。
+/// - `fonts`：内嵌字体字节总和（设计字体 + Lucide 图标 + CJK 系统字体估算）。
+///   **CJK 字体通常是这行的最大头**（8~30MB）；软渲染与 wgpu 路径都会吃，
+///   只是 wgpu 路径被 D3D12 runtime 衬得没那么显眼 —— 砍掉 CJK 之前先看这行。
+fn startup_diag(app: &FerricApp) {
+    // 持久化：与 eframe 写盘走同一份序列化，体积上下一致。
+    // 故意走 JSON（ferric-core 不必引 ron），字节数只差 ~5%，对拆分够用。
+    let persist = app.persist();
+    let persist_bytes = serde_json::to_vec(&persist).map(|v| v.len()).unwrap_or(0);
+
+    // 草稿：按字节降序，前 3 名列出，其余合并到 "other"。
+    let mut drafts: Vec<(&str, usize)> = persist
+        .drafts
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.len()))
+        .collect();
+    drafts.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let top: Vec<String> = drafts
+        .iter()
+        .take(3)
+        .map(|(k, b)| format!("{}={}", k, fmt_bytes(*b)))
+        .collect();
+    let other_sum: usize = drafts.iter().skip(3).map(|(_, b)| *b).sum();
+    let drafts_total: usize = drafts.iter().map(|(_, b)| *b).sum();
+    let mut drafts_str = top.join(",");
+    if other_sum > 0 {
+        if !drafts_str.is_empty() {
+            drafts_str.push(',');
+        }
+        drafts_str.push_str(&format!("other={}", fmt_bytes(other_sum)));
+    }
+
+    let design_font_bytes: usize = crate::fonts::embedded_bytes();
+    let cjk_bytes = crate::fonts::cjk_bytes();
+    let font_bytes = design_font_bytes + cjk_bytes;
+
+    crate::launch::log(&format!(
+        "[diag] tools={} persist={} drafts={} ({}) fonts={} (design={} cjk={}) adapter={}",
+        app.tools.len(),
+        fmt_bytes(persist_bytes),
+        fmt_bytes(drafts_total),
+        if drafts_str.is_empty() {
+            "-"
+        } else {
+            &drafts_str
+        },
+        fmt_bytes(font_bytes),
+        fmt_bytes(design_font_bytes),
+        fmt_bytes(cjk_bytes),
+        app.gpu_desc.as_deref().unwrap_or("?"),
+    ));
+}
+
+/// 把字节数压成对人友好的形式（512 / 1.2K / 4.7M），固定到 1 位小数。
+fn fmt_bytes(n: usize) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1}M", n as f64 / 1024.0 / 1024.0)
+    } else if n >= 1024 {
+        format!("{:.1}K", n as f64 / 1024.0)
+    } else {
+        format!("{n}B")
+    }
+}
+
+/// 启动诊断报告里的小工具，避免误判字节格式化。
+#[cfg(test)]
+mod diag_tests {
+    use super::fmt_bytes;
+
+    #[test]
+    fn bytes_under_kb_use_b() {
+        assert_eq!(fmt_bytes(0), "0B");
+        assert_eq!(fmt_bytes(512), "512B");
+        assert_eq!(fmt_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn bytes_kb_use_k() {
+        assert_eq!(fmt_bytes(1024), "1.0K");
+        assert_eq!(fmt_bytes(1536), "1.5K");
+        assert_eq!(fmt_bytes(1024 * 1024 - 1), "1024.0K");
+    }
+
+    #[test]
+    fn bytes_mb_use_m() {
+        let n = 5 * 1024 * 1024 + 512 * 1024; // 5.5MB
+        assert_eq!(fmt_bytes(n), "5.5M");
+    }
 }
 
 #[cfg(test)]

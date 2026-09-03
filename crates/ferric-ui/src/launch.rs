@@ -147,6 +147,12 @@ fn dir() -> Option<PathBuf> {
     eframe::storage_dir(APP_ID)
 }
 
+/// eframe 持久化目录的完整路径（同时含 `launch.json` 与 `startup.log`）。
+/// 设置 → 关于里「打开数据文件夹」按钮用这个。
+pub fn data_dir() -> Option<PathBuf> {
+    dir()
+}
+
 /// `launch.json` 的完整路径。
 pub fn path() -> Option<PathBuf> {
     dir().map(|d| d.join("launch.json"))
@@ -533,6 +539,55 @@ pub fn relaunch() -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("拉起新进程失败：{e}"))
+}
+
+/// 用系统文件管理器打开数据目录（`launch.json` 与 `startup.log` 的位置）。
+///
+/// 设置 → 关于里那个「打开数据文件夹」按钮调这个。失败时返回原因，
+/// 由调用方 toast / dialog 展示 —— 静默失败等同于「点了没反应」，
+/// 那比没有这个按钮更糟。
+///
+/// 路径不存在也当作失败：启动后第一次写 launch.json 才会建目录，
+/// 极端场景（首次启动 + 目录建失败）下也走这里，那时候给一个明确错误。
+pub fn open_data_dir() -> Result<(), String> {
+    let path = data_dir().ok_or_else(|| "找不到数据目录".to_owned())?;
+    if !path.exists() {
+        return Err(format!("目录不存在：{}", path.display()));
+    }
+    open_in_file_manager(&path)
+}
+
+/// 平台分支的文件管理器打开。
+///
+/// 子进程 detach 出去后立即返回；**不**等待子进程退出（用户关掉
+/// 文件管理器之前我们这边都不能卡）。失败透传 errno 由调用方包装成中文。
+#[cfg(target_os = "windows")]
+fn open_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    // `explorer.exe <dir>` 会新建一个窗口并定位到该目录。如果该目录已开着
+    // 一个文件管理器窗口，行为是开新窗口（不会复用旧窗口）—— 一致且好懂。
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动资源管理器失败：{e}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开 Finder 失败：{e}"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开文件管理器失败：{e}"))
 }
 
 /// 启动彻底失败时弹一个系统对话框。

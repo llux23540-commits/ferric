@@ -8,13 +8,13 @@ use egui::{FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 
 // 编译期内嵌的设计字体（crates/ferric-ui/assets/fonts）。
-const PJS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf");
-const PJS_MEDIUM: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf");
-const PJS_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-SemiBold.ttf");
-const PJS_BOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Bold.ttf");
-const JBM_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
-const JBM_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
-const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+pub const PJS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf");
+pub const PJS_MEDIUM: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf");
+pub const PJS_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-SemiBold.ttf");
+pub const PJS_BOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Bold.ttf");
+pub const JBM_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+pub const JBM_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
+pub const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
 /// 命名字体族（配合 `RichText::family(FontFamily::Name(...))` 使用）。
 pub const UI_MEDIUM: &str = "ui-medium";
@@ -103,6 +103,7 @@ pub fn install_fonts(ctx: &egui::Context) -> bool {
     );
 
     ctx.set_fonts(fonts);
+    record_cjk_bytes(if has_cjk { cjk_loaded_bytes() } else { 0 });
     has_cjk
 }
 
@@ -133,6 +134,37 @@ fn load_first_cjk() -> Option<Vec<u8>> {
         }
     }
     scan_for_cjk()
+}
+
+/// 启动后 [`install_fonts`] 写入的 CJK 字节数；0 表示未找到 CJK 字体。
+/// 用 `AtomicUsize` 是为了 `startup_diag` 在 const 上下文外能读；只写一次。
+static CJK_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn cjk_loaded_bytes() -> usize {
+    CJK_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn record_cjk_bytes(n: usize) {
+    CJK_BYTES.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 启动诊断用：返回当前 `install_fonts` 实际拿到的 CJK 字体字节数。
+/// 0 = 系统没找到中文字体（界面会显示方块，看一眼就懂）。
+pub fn cjk_bytes() -> usize {
+    cjk_loaded_bytes()
+}
+
+/// 启动诊断用：内嵌设计字体 + Lucide 图标字体的字节总和。
+/// 这部分**一定**加载（编译期 `include_bytes!`），跟系统无关，
+/// 是「确定性的下限」—— CJK 是「系统相关的不确定项」。
+pub fn embedded_bytes() -> usize {
+    PJS_REGULAR.len()
+        + PJS_MEDIUM.len()
+        + PJS_SEMIBOLD.len()
+        + PJS_BOLD.len()
+        + JBM_REGULAR.len()
+        + JBM_MEDIUM.len()
+        + LUCIDE.len()
 }
 
 /// 硬编码路径全落空之后再扫一遍常见位置。
