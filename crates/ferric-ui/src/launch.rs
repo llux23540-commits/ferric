@@ -237,11 +237,12 @@ fn set_backend_at(p: &std::path::Path, backend: Backend) -> LaunchCfg {
 /// 规则（从前往后）：
 /// 1. 用户锁定了某个后端 → 它排第一（尊重设置），但仍保留其余作为兜底 ——
 ///    「我选的那个这台机器上根本没有」不该变成打不开；
-/// 2. 否则上次成功的那个排第一（行为稳定，也省掉一次全量枚举）；
-/// 3. 然后是默认顺序：先 `Auto`（wgpu 自己挑，绝大多数机器到这就结束了），
-///    再逐个点名；
-/// 4. 只拿到软件光栅化的（`slow`）降到没试过的之后 —— 能用，但还有更好的可找；
-/// 5. 试过没跑起来的（`failed`）一律降到最后。
+/// 2. 否则（没锁定）软渲染 `Soft` 排第一：它内存最低、任何机器都能跑，
+///    是默认姿态；想要 GPU 加速的用户在设置里锁一个 wgpu 后端即可；
+/// 3. 然后是上次成功的那个（若它不是上面那个，且没被降级）；
+/// 4. 再按默认顺序逐个点名；
+/// 5. 只拿到软件光栅化的（`slow`）降到没试过的之后 —— 能用，但还有更好的可找；
+/// 6. 试过没跑起来的（`failed`）一律降到最后。
 pub fn plan(cfg: &LaunchCfg) -> Vec<Backend> {
     fn push(order: &mut Vec<Backend>, b: Backend) {
         if !order.contains(&b) {
@@ -260,6 +261,11 @@ pub fn plan(cfg: &LaunchCfg) -> Vec<Backend> {
     let mut order: Vec<Backend> = Vec::with_capacity(Backend::ALL.len());
     if cfg.backend != Backend::Auto {
         push(&mut order, cfg.backend);
+    } else {
+        // 没锁定时软渲染优先：内存最低（~150M vs wgpu ~640M），任何机器都能跑。
+        // 必须排在 last_good **之前** —— 否则老用户升级后仍被上次的 wgpu 记录压着，
+        // 永远用不上软渲染（实测：升级后内存照样 600M+，就是栽在这）。
+        push(&mut order, Backend::Soft);
     }
     if let Some(b) = cfg.last_good {
         push(&mut order, b);
