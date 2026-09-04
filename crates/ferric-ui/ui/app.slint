@@ -11,6 +11,7 @@ import { Theme } from "theme.slint";
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
 import { FieldLabel, FerricButton, IconButton, Segmented, FerricLineEdit, Card, Toast } from "widgets.slint";
+import { CodeEditor } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
 // 侧栏一行工具。
@@ -31,6 +32,180 @@ struct ToolEntry {
 struct UuidHistEntry {
     label: string,
     body: string,
+}
+
+// 一个编辑区的全部可见状态。
+//
+// 打包成 struct 而不是散成十几个 property：编辑区会被每个文本类工具用到
+//（json / diff 各两个、yaml / sql / regex / crypto / gm …），散着写等于
+// 每加一个工具就往 AppWindow 上堆十几行。
+struct EditorState {
+    // 当前可见的那几十行（已由 Rust 侧按滚动位置与横向偏移裁好）
+    lines: [string],
+    // 视口顶端的绝对行号，行号槽显示用
+    first-line: int,
+    // 文档总行数，滚动条比例用
+    total-lines: int,
+    // 光标的视口内坐标
+    cursor-line: int,
+    cursor-col: int,
+    cursor-visible: bool,
+    // 选区高亮 (视口行, 起列, 列数)，已裁到视口内
+    selection-spans: [[int]],
+}
+
+// 带标题栏的编辑区面板。
+//
+// `which` 是编辑区标识（如 "yaml-in" / "json-out"），所有回调都把它带回去 ——
+// Rust 侧一个 match 就能分派到对应的 TextBuffer，不必为每个编辑区接一遍回调。
+component EditorPane inherits Rectangle {
+    in property <string> title;
+    in property <string> which;
+    in property <EditorState> state;
+    in property <bool> read-only: false;
+    in property <string> hint: "";
+
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            FieldLabel {
+                text: root.title;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.state.total-lines + " 行";
+                font-family: Theme.font-mono;
+                font-size: 11px;
+                color: Theme.faint;
+                vertical-alignment: center;
+            }
+            if root.hint != "": Text {
+                text: root.hint;
+                font-family: Theme.font-ui;
+                font-size: 11px;
+                color: Theme.faint;
+                vertical-alignment: center;
+            }
+        }
+
+        CodeEditor {
+            vertical-stretch: 1;
+            lines: root.state.lines;
+            first-line: root.state.first-line;
+            total-lines: root.state.total-lines;
+            cursor-line: root.state.cursor-line;
+            cursor-col: root.state.cursor-col;
+            cursor-visible: root.state.cursor-visible;
+            selection-spans: root.state.selection-spans;
+            read-only: root.read-only;
+
+            viewport-changed(r, c) => { root.editor-viewport(root.which, r, c); }
+            clicked(l, c, e) => { root.editor-click(root.which, l, c, e); }
+            dragged(l, c) => { root.editor-drag(root.which, l, c); }
+            triple-clicked => { root.editor-triple(root.which); }
+            scrolled(dl, dc) => { root.editor-scroll(root.which, dl, dc); }
+            scroll-to-line(l) => { root.editor-scroll-line(root.which, l); }
+            key-pressed(t, ctrl, shift) => { root.editor-key(root.which, t, ctrl, shift); }
+        }
+    }
+}
+
+// ——— JSON → YAML（已迁移） ———
+component YamlView inherits Rectangle {
+    in property <EditorState> input-state;
+    in property <EditorState> output-state;
+    in property <bool> ok: true;
+    in property <string> status;
+
+    callback load-sample();
+    callback clear-input();
+    callback copy-output();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        // 工具条
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            FerricButton {
+                text: "示例";
+                clicked => { root.load-sample(); }
+            }
+            FerricButton {
+                text: "清空";
+                variant: "subtle";
+                clicked => { root.clear-input(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: root.ok ? Theme.muted : Theme.danger;
+                vertical-alignment: center;
+            }
+            FerricButton {
+                text: "复制 YAML";
+                variant: "primary";
+                clicked => { root.copy-output(); }
+            }
+        }
+
+        // 左输入 / 右输出
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            EditorPane {
+                title: "JSON 输入";
+                which: "yaml-in";
+                state: root.input-state;
+                horizontal-stretch: 1;
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+            EditorPane {
+                title: "YAML 输出";
+                which: "yaml-out";
+                state: root.output-state;
+                read-only: true;
+                hint: "只读";
+                horizontal-stretch: 1;
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+        }
+    }
 }
 
 component SidebarRow inherits Rectangle {
@@ -639,6 +814,8 @@ export component AppWindow inherits Window {
     in property <bool> gpu-software: true;
     in property <string> data-dir: "";
     in property <string> mem-status: "";
+    // 侧栏底部的迁移进度（Rust 侧按 registry 里 migrated 的数量算）
+    in property <string> migration-note: "";
     in property <[string]> toasts;
 
     // 设置项（双向）
@@ -662,6 +839,12 @@ export component AppWindow inherits Window {
     in property <string> uuid-status: "就绪";
     in property <[UuidHistEntry]> uuid-history;
 
+    // YAML 工具状态
+    in property <EditorState> yaml-input;
+    in property <EditorState> yaml-output;
+    in property <bool> yaml-ok: true;
+    in property <string> yaml-status: "";
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -677,6 +860,22 @@ export component AppWindow inherits Window {
     callback uuid-regenerate();
     callback uuid-copy();
     callback uuid-restore-history(int);
+
+    // 编辑区通用回调。第一个参数是编辑区标识（如 "yaml-in"），
+    // Rust 侧一个 match 分派到对应的 TextBuffer —— 每加一个文本类工具
+    // 不需要再接一遍回调。
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    // YAML 工具
+    callback yaml-sample();
+    callback yaml-clear();
+    callback yaml-copy();
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -794,7 +993,7 @@ export component AppWindow inherits Window {
                         background: Theme.border;
                     }
                     Text {
-                        text: "Slint 迁移中 · UUID 已完成";
+                        text: root.migration-note;
                         font-family: Theme.font-ui;
                         font-size: 11px;
                         color: Theme.faint;
@@ -871,7 +1070,26 @@ export component AppWindow inherits Window {
                         copy-output => { root.uuid-copy(); }
                         restore-history(i) => { root.uuid-restore-history(i); }
                     }
-                    if root.current.id != "uuid": MigrationPlaceholder {
+                    if root.current.id == "yaml": YamlView {
+                        vertical-stretch: 1;
+                        input-state: root.yaml-input;
+                        output-state: root.yaml-output;
+                        ok: root.yaml-ok;
+                        status: root.yaml-status;
+                        load-sample => { root.yaml-sample(); }
+                        clear-input => { root.yaml-clear(); }
+                        copy-output => { root.yaml-copy(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    // 未迁移的工具走占位。条件用 `migrated` 而不是逐个列 id ——
+                    // 每迁完一个只需把 Tool::migrated 翻成 true 并加上面那样一个分支。
+                    if !root.current.migrated: MigrationPlaceholder {
                         vertical-stretch: 1;
                         tool-name: root.current.name;
                         tool-desc: root.current.desc;

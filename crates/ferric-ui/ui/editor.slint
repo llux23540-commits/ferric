@@ -1,0 +1,193 @@
+import { Theme } from "theme.slint";
+
+export component CodeEditor inherits Rectangle {
+    in property <[string]> lines;
+    in property <int> first-line: 0;
+    in property <int> total-lines: 1;
+    in property <int> cursor-line: 0;
+    in property <int> cursor-col: 0;
+    in property <bool> cursor-visible: true;
+    in property <[[int]]> selection-spans;
+    in property <length> font-size: 13px;
+    in property <length> line-height: 18px;
+    in property <bool> show-gutter: true;
+    in property <bool> read-only: false;
+
+    callback viewport-changed(int, int);
+    callback clicked(int, int, bool);
+    callback dragged(int, int);
+    callback triple-clicked();
+    callback scrolled(int, int);
+    callback scroll-to-line(int);
+    /// 按键。`text` 是 Slint 的原始按键字符（功能键是约定码点，见文件末尾说明）。
+    callback key-pressed(string/* text */, bool/* ctrl */, bool/* shift */);
+
+    background: Theme.code-bg;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: focus.has-focus ? Theme.accent : Theme.border;
+    forward-focus: focus;
+
+    probe := Text {
+        visible: false;
+        text: "0";
+        font-family: Theme.font-mono;
+        font-size: root.font-size;
+    }
+    property <length> char-w: probe.preferred-width;
+    property <length> pad: 8px;
+    property <int> visible-rows: max(1, floor((self.height - root.pad * 2) / root.line-height));
+    property <int> visible-cols: max(1, floor((self.width - root.pad * 2) / root.char-w));
+
+    changed visible-rows => { root.viewport-changed(root.visible-rows, root.visible-cols); }
+    changed visible-cols => { root.viewport-changed(root.visible-rows, root.visible-cols); }
+
+    property <length> gutter-w: root.show-gutter
+        ? (root.total-lines >= 100000 ? 62px
+            : root.total-lines >= 10000 ? 54px
+            : root.total-lines >= 1000 ? 46px : 38px)
+        : 0px;
+
+    // ===== 行号槽 =====
+    if root.show-gutter: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.gutter-w;
+        height: parent.height;
+        background: Theme.dark ? #0d1014 : #f1f3f6;
+
+        for _line[i] in root.lines: Text {
+            x: 0;
+            y: root.pad + i * root.line-height;
+            width: root.gutter-w - 8px;
+            height: root.line-height;
+            text: root.first-line + i + 1;
+            font-family: Theme.font-mono;
+            font-size: root.font-size - 1px;
+            color: i == root.cursor-line ? Theme.fg-soft : Theme.faint;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            x: parent.width - 1px;
+            width: 1px;
+            height: parent.height;
+            background: Theme.border;
+        }
+    }
+
+    // ===== 正文区 =====
+    Rectangle {
+        x: root.gutter-w;
+        y: 0;
+        width: parent.width - root.gutter-w;
+        height: parent.height;
+        clip: true;
+
+        // 选区高亮（画在文本下面）
+        for span[i] in root.selection-spans: Rectangle {
+            x: root.pad + span[1] * root.char-w;
+            y: root.pad + span[0] * root.line-height;
+            width: span[2] * root.char-w;
+            height: root.line-height;
+            background: Theme.accent-soft;
+        }
+
+        for line[i] in root.lines: Text {
+            x: root.pad;
+            y: root.pad + i * root.line-height;
+            width: parent.width - root.pad;
+            height: root.line-height;
+            text: line;
+            font-family: Theme.font-mono;
+            font-size: root.font-size;
+            color: Theme.fg;
+            vertical-alignment: center;
+            // 不换行：换行会让「一行 = 一个 y 坐标」的前提失效，
+            // 光标与选区的坐标换算全部作废。横向滚动由 Rust 侧裁剪。
+            wrap: no-wrap;
+        }
+
+        if root.cursor-visible && focus.has-focus && !root.read-only: Rectangle {
+            x: root.pad + root.cursor-col * root.char-w;
+            y: root.pad + root.cursor-line * root.line-height;
+            width: 2px;
+            height: root.line-height;
+            background: Theme.accent;
+        }
+
+        touch := TouchArea {
+            width: parent.width;
+            height: parent.height;
+            mouse-cursor: text;
+
+            property <int> hit-line: max(0, floor((self.mouse-y - root.pad) / root.line-height));
+            property <int> hit-col: max(0, round((self.mouse-x - root.pad) / root.char-w));
+
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    // 必须显式抢焦点：键盘事件走 FocusScope，而点击落在 TouchArea 上。
+                    // 少了这一行的表现是「光标能点、字打不进去」。
+                    focus.focus();
+                    root.clicked(self.hit-line, self.hit-col, false);
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    root.dragged(self.hit-line, self.hit-col);
+                }
+            }
+            double-clicked => { root.triple-clicked(); }
+            scroll-event(ev) => {
+                // delta 是 length，要除以 1px 才能当数字用（单位系统是强类型的）
+                root.scrolled(-round(ev.delta-y / 40px), -round(ev.delta-x / 40px));
+                accept
+            }
+        }
+    }
+
+
+    // ===== 纵向滚动条 =====
+    if root.total-lines > root.visible-rows: Rectangle {
+        x: parent.width - 10px;
+        y: 2px;
+        width: 8px;
+        height: parent.height - 4px;
+
+        property <float> frac-visible: min(1.0, root.visible-rows / max(1, root.total-lines));
+        property <float> frac-pos: root.first-line / max(1, root.total-lines);
+
+        Rectangle {
+            x: 1px;
+            width: 6px;
+            y: parent.height * parent.frac-pos;
+            height: max(24px, parent.height * parent.frac-visible);
+            border-radius: 3px;
+            background: bar.has-hover || bar.pressed ? Theme.muted : Theme.border-2;
+        }
+
+        bar := TouchArea {
+            moved => {
+                if (self.pressed) {
+                    root.scroll-to-line(round((self.mouse-y / parent.height) * root.total-lines));
+                }
+            }
+        }
+    }
+    // ===== 键盘 =====
+    //
+    // 刻意**不在这里分派按键**：原本写成一串 `if (ev.text == Key.Backspace) …`
+    // （十三个分支），Slint 编译器在那上面**栈溢出**（`has overflowed its stack`）。
+    // 改成把原始 `ev.text` 直接交给 Rust —— Slint 的功能键就是约定好的码点
+    // （Backspace = U+0008、方向键 = U+F700..F703 等，见 i-slint-common 的
+    // key_codes.rs），Rust 侧 match 一下即可，顺便省掉这层重复。
+    focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(ev) => {
+            root.key-pressed(ev.text, ev.modifiers.control, ev.modifiers.shift);
+            accept
+        }
+    }
+}

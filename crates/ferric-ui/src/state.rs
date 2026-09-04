@@ -12,6 +12,8 @@
 //! 内存与 CPU 的主要来源差异：egui 每帧重建整棵 UI，Slint 只在 property
 //! 变化时重画脏区域。
 
+use crate::editor::TextBuffer;
+use crate::editor_bridge;
 use crate::persist::{self, Persist, ThemeMode};
 use crate::tool::{Shared, Tool};
 use crate::views;
@@ -172,30 +174,43 @@ impl AppState {
     }
 }
 
-/// 把「UUID 工具」单独拿出来持有具体类型，避免为一个工具给 `Tool` 加
-/// `as_any` 这类只服务于向下转型的接口。
+/// 已迁移的工具各持一个具体类型的字段。
 ///
-/// 迁移期的取舍：已迁移的工具都会像这样有一个具体字段；等 10 个工具全迁完，
-/// 再统一改成 `enum ToolState { Json(..), Diff(..), ... }` 一次收敛。
+/// 为什么不从 `Vec<Box<dyn Tool>>` 里向下转型：那需要给 `Tool` 加
+/// `as_any`，一个只服务于转型的接口。迁移期字段会逐个增加；等 10 个工具
+/// 全迁完，再统一收敛成 `enum ToolState { Json(..), Diff(..), … }`。
 pub struct Shell {
     pub state: Rc<RefCell<AppState>>,
     pub uuid: Rc<RefCell<views::UuidTool>>,
+    pub yaml: Rc<RefCell<views::YamlTool>>,
 }
 
 impl Shell {
     pub fn new() -> Self {
         let state = AppState::load();
-        // UUID 工具的草稿已在 `AppState::load` 里灌进注册表那一份；这里再按
-        // 同一份草稿构造一个具体类型的实例，保证两边初值一致。
+        // 草稿已在 `AppState::load` 里灌进注册表那一份；这里按同一份草稿再构造
+        // 具体类型的实例，保证两边初值一致。
+        let draft_of = |id: &str| {
+            state
+                .tools
+                .iter()
+                .find(|t| t.meta().id == id)
+                .and_then(|t| t.save_draft())
+        };
+
         let mut uuid = views::UuidTool::default();
-        if let Some(t) = state.tools.iter().find(|t| t.meta().id == "uuid") {
-            if let Some(d) = t.save_draft() {
-                uuid.load_draft(&d);
-            }
+        if let Some(d) = draft_of("uuid") {
+            uuid.load_draft(&d);
         }
+        let mut yaml = views::YamlTool::default();
+        if let Some(d) = draft_of("yaml") {
+            yaml.load_draft(&d);
+        }
+
         Self {
             state: Rc::new(RefCell::new(state)),
             uuid: Rc::new(RefCell::new(uuid)),
+            yaml: Rc::new(RefCell::new(yaml)),
         }
     }
 
@@ -212,6 +227,7 @@ impl Shell {
         self.sync_shell(win);
         self.sync_tools(win);
         self.sync_uuid(win);
+        self.sync_yaml(win);
         self.sync_toasts(win);
     }
 
@@ -235,6 +251,16 @@ impl Shell {
                 .unwrap_or_else(|| "（取不到数据目录）".to_owned()),
         ));
         win.set_mem_status(SharedString::from(s.mem_status.clone()));
+
+        // 侧栏底部的迁移进度。写成算出来的而不是硬编码文案 ——
+        // 每迁完一个工具只要 `Tool::migrated` 翻成 true，这里自动跟上。
+        let done = s.tools.iter().filter(|t| t.migrated()).count();
+        let total = s.tools.len();
+        win.set_migration_note(SharedString::from(if done == total {
+            "Slint 迁移已完成".to_owned()
+        } else {
+            format!("Slint 迁移中 · {done}/{total} 个工具已完成")
+        }));
         win.set_active_tool(s.active as i32);
     }
 
@@ -274,6 +300,15 @@ impl Shell {
         win.set_uuid_history(ModelRc::new(VecModel::from(hist)));
     }
 
+    /// YAML 工具状态 → property。
+    fn sync_yaml(&self, win: &AppWindow) {
+        let y = self.yaml.borrow();
+        win.set_yaml_input(editor_bridge::state_of(&y.input));
+        win.set_yaml_output(editor_bridge::state_of(&y.output));
+        win.set_yaml_ok(y.ok);
+        win.set_yaml_status(SharedString::from(y.status.clone()));
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -293,6 +328,8 @@ impl Shell {
         self.wire_navigation(win);
         self.wire_settings(win);
         self.wire_uuid(win);
+        self.wire_yaml(win);
+        self.wire_editors(win);
     }
 
     /// 窗口按钮：最小化 / 最大化 / 关闭。
@@ -524,6 +561,207 @@ impl Shell {
                 win.set_uuid_status(SharedString::from(u.status.clone()));
             }
         });
+    }
+
+    /// YAML 工具的工具条按钮。
+    fn wire_yaml(&self, win: &AppWindow) {
+        let yaml = self.yaml.clone();
+        let w = win.as_weak();
+        let save = self.draft_saver("yaml");
+        win.on_yaml_sample(move || {
+            yaml.borrow_mut().load_sample();
+            if let Some(win) = w.upgrade() {
+                win.set_yaml_input(editor_bridge::state_of(&yaml.borrow().input));
+                win.set_yaml_output(editor_bridge::state_of(&yaml.borrow().output));
+                win.set_yaml_status(SharedString::from(yaml.borrow().status.clone()));
+                win.set_yaml_ok(yaml.borrow().ok);
+            }
+            save(&yaml.borrow().save_draft());
+        });
+
+        let yaml = self.yaml.clone();
+        let w = win.as_weak();
+        let save = self.draft_saver("yaml");
+        win.on_yaml_clear(move || {
+            yaml.borrow_mut().clear();
+            if let Some(win) = w.upgrade() {
+                win.set_yaml_input(editor_bridge::state_of(&yaml.borrow().input));
+                win.set_yaml_output(editor_bridge::state_of(&yaml.borrow().output));
+                win.set_yaml_status(SharedString::from(yaml.borrow().status.clone()));
+                win.set_yaml_ok(yaml.borrow().ok);
+            }
+            save(&yaml.borrow().save_draft());
+        });
+
+        let yaml = self.yaml.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_yaml_copy(move || {
+            let text = yaml.borrow().output.text();
+            if text.is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast(format!("已复制 {n} 行 YAML"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 编辑区的通用回调。
+    ///
+    /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
+    /// 分派 —— 每加一个文本类工具只需在 [`Shell::with_buffer`] 的 match 里
+    /// 加一行，不必再接一遍七个回调。
+    fn wire_editors(&self, win: &AppWindow) {
+        macro_rules! editor_cb {
+            ($setter:ident, |$slf:ident, $which:ident $(, $arg:ident)*| $body:block) => {{
+                let shell = self.clone_handles();
+                let w = win.as_weak();
+                win.$setter(move |$which $(, $arg)*| {
+                    let Some(win) = w.upgrade() else { return };
+                    let $which = $which.to_string();
+                    let $slf = &shell;
+                    $body
+                    shell.sync_editor(&win, &$which);
+                });
+            }};
+        }
+
+        editor_cb!(on_editor_viewport, |s, which, rows, cols| {
+            s.with_buffer(&which, |b| {
+                b.set_viewport(rows.max(1) as usize, cols.max(1) as usize);
+            });
+        });
+        editor_cb!(on_editor_scroll, |s, which, dl, dc| {
+            s.with_buffer(&which, |b| {
+                b.scroll_by(dl);
+                b.scroll_cols_by(dc);
+            });
+        });
+        editor_cb!(on_editor_scroll_line, |s, which, line| {
+            s.with_buffer(&which, |b| b.scroll_to_line(line.max(0) as usize));
+        });
+        editor_cb!(on_editor_click, |s, which, line, col, extend| {
+            s.with_buffer(&which, |b| {
+                b.click(line.max(0) as usize, col.max(0) as usize, extend);
+            });
+        });
+        editor_cb!(on_editor_drag, |s, which, line, col| {
+            // 拖动 = 从原锚点扩选，所以 extend = true
+            s.with_buffer(&which, |b| {
+                b.click(line.max(0) as usize, col.max(0) as usize, true);
+            });
+        });
+        editor_cb!(on_editor_triple, |s, which| {
+            s.with_buffer(&which, |b| b.select_line());
+        });
+
+        // 按键要额外处理「改过内容」→ 重算 + 落盘，以及剪贴板请求。
+        let shell = self.clone_handles();
+        let w = win.as_weak();
+        win.on_editor_key(move |which, text, ctrl, shift| {
+            let Some(win) = w.upgrade() else { return };
+            let which = which.to_string();
+            let read_only = which.ends_with("-out");
+            let text = text.to_string();
+
+            let outcome = shell
+                .with_buffer(&which, |b| {
+                    editor_bridge::apply_key(b, &text, ctrl, shift, read_only)
+                })
+                .unwrap_or_default();
+
+            if let Some(payload) = outcome.copy {
+                let n = payload.lines().count();
+                shell.state.borrow_mut().shared.copy(payload);
+                shell.state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+                Self::flush_toasts(&shell.state, &win);
+            }
+            if outcome.edited {
+                shell.recompute(&which);
+                shell.persist_tool(&which);
+            }
+            shell.sync_editor(&win, &which);
+        });
+    }
+
+    /// 拿到一份共享句柄（给回调捕获用）。
+    fn clone_handles(&self) -> Shell {
+        Shell {
+            state: self.state.clone(),
+            uuid: self.uuid.clone(),
+            yaml: self.yaml.clone(),
+        }
+    }
+
+    /// 按编辑区标识借出对应的缓冲区。
+    ///
+    /// **每迁一个文本类工具，在这里加一行。** 标识约定：`"<工具>-in"` /
+    /// `"<工具>-out"`，`-out` 后缀同时表示只读（见 `wire_editors`）。
+    fn with_buffer<R>(&self, which: &str, f: impl FnOnce(&mut TextBuffer) -> R) -> Option<R> {
+        match which {
+            "yaml-in" => Some(f(&mut self.yaml.borrow_mut().input)),
+            "yaml-out" => Some(f(&mut self.yaml.borrow_mut().output)),
+            _ => None,
+        }
+    }
+
+    /// 某个编辑区的内容改了之后，重算它所属工具的派生结果。
+    fn recompute(&self, which: &str) {
+        if which.starts_with("yaml-") {
+            self.yaml.borrow_mut().convert();
+        }
+    }
+
+    /// 把编辑区所属工具的草稿落盘。
+    fn persist_tool(&self, which: &str) {
+        let (id, draft) = match which.split('-').next() {
+            Some("yaml") => ("yaml", self.yaml.borrow().save_draft()),
+            _ => return,
+        };
+        self.draft_saver(id)(&draft);
+    }
+
+    /// 生成一个「把某个工具的草稿写回注册表并落盘」的闭包。
+    ///
+    /// 草稿有两份来源：具体类型的实例（真正在用的那份）与注册表里的
+    /// `Box<dyn Tool>`（落盘时遍历的那份）。这里把前者同步给后者再存 ——
+    /// 少了这一步，改动不会进 `app.ron`。
+    fn draft_saver(&self, id: &'static str) -> impl Fn(&Option<String>) {
+        let state = self.state.clone();
+        move |draft: &Option<String>| {
+            let mut s = state.borrow_mut();
+            if let Some(d) = draft {
+                if let Some(t) = s.tools.iter_mut().find(|t| t.meta().id == id) {
+                    t.load_draft(d);
+                }
+            }
+            s.save();
+        }
+    }
+
+    /// 只同步某一个编辑区所属工具的状态（避免每次按键都全量刷）。
+    fn sync_editor(&self, win: &AppWindow, which: &str) {
+        if which.starts_with("yaml-") {
+            self.sync_yaml(win);
+        }
+    }
+
+    /// 把提示队列刷进 Slint（多处要用，收成一个函数）。
+    fn flush_toasts(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
+        let mut s = state.borrow_mut();
+        s.shared.prune_toasts();
+        let msgs: Vec<SharedString> = s
+            .shared
+            .toasts
+            .iter()
+            .map(|t| SharedString::from(t.text.clone()))
+            .collect();
+        drop(s);
+        win.set_toasts(ModelRc::new(VecModel::from(msgs)));
     }
 
     /// 生成一个「重新同步侧栏」的闭包（收藏或搜索词变化后要重建模型）。

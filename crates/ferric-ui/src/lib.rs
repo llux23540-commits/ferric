@@ -14,6 +14,8 @@
 //! 数据层（`net` / `github` / `source` / `market` / `updater` / `plugin_host` /
 //! `release` / `mock` / `mem` / `launch`）**完全没动** —— 它们本来就不依赖 GUI。
 
+mod editor;
+mod editor_bridge;
 mod fonts;
 mod github;
 mod icons;

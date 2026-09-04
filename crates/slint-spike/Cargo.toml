@@ -9,6 +9,11 @@ license.workspace = true
 name = "slint-spike"
 path = "src/main.rs"
 
+# 大文本压力测试（判定 JSON 工具能否用原生 TextEdit）
+[[bin]]
+name = "rope-spike"
+path = "src/rope.rs"
+
 [dependencies]
 slint = { version = "1.17", default-features = false, features = ["renderer-software", "backend-winit", "std", "libm", "image-default-formats", "software-renderer-systemfonts", "compat-1-2"] }
 chrono = { workspace = true }

@@ -9,9 +9,11 @@
 
 mod pending;
 mod uuid;
+mod yaml;
 
 pub use pending::PendingTool;
 pub use uuid::UuidTool;
+pub use yaml::YamlTool;
 
 use crate::icons;
 use crate::tool::{Tool, ToolMeta};
@@ -60,14 +62,8 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
             "转换",
             &["timestamp", "unix", "时间戳", "时间", "date", "时区"],
         ),
-        pending(
-            "yaml",
-            "JSON → YAML",
-            "JSON 转 YAML，实时校验",
-            icons::CODE,
-            "转换",
-            &["yaml", "json", "转换", "convert"],
-        ),
+        // ——— 已迁移 ———
+        Box::new(YamlTool::default()),
         pending(
             "sql",
             "SQL 格式化",
@@ -162,12 +158,12 @@ mod tests {
     }
 
     #[test]
-    fn exactly_uuid_is_migrated_so_far() {
+    fn migrated_set_is_explicit() {
         let migrated: Vec<&str> = registry()
             .iter()
             .filter(|t| t.migrated())
             .map(|t| t.meta().id)
             .collect();
-        assert_eq!(migrated, vec!["uuid"]);
+        assert_eq!(migrated, vec!["yaml", "uuid"], "迁完一个就在这里加一项");
     }
 }
