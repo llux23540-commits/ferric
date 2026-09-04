@@ -188,6 +188,7 @@ pub struct Shell {
     pub rsa: Rc<RefCell<views::RsaTool>>,
     pub crypto: Rc<RefCell<views::CryptoTool>>,
     pub gm: Rc<RefCell<views::GmTool>>,
+    pub ts: Rc<RefCell<views::TimestampTool>>,
 }
 
 impl Shell {
@@ -231,6 +232,10 @@ impl Shell {
         if let Some(d) = draft_of("gm") {
             gm.load_draft(&d);
         }
+        let mut ts = views::TimestampTool::default();
+        if let Some(d) = draft_of("timestamp") {
+            ts.load_draft(&d);
+        }
 
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -241,6 +246,7 @@ impl Shell {
             rsa: Rc::new(RefCell::new(rsa)),
             crypto: Rc::new(RefCell::new(crypto)),
             gm: Rc::new(RefCell::new(gm)),
+            ts: Rc::new(RefCell::new(ts)),
         }
     }
 
@@ -263,6 +269,7 @@ impl Shell {
         self.sync_rsa(win);
         self.sync_crypto(win);
         self.sync_gm(win);
+        self.sync_ts(win);
         self.sync_toasts(win);
     }
 
@@ -467,6 +474,41 @@ impl Shell {
         win.set_gm_sig_status(SharedString::from(t.sig_status.clone()));
     }
 
+    /// 时间戳工具状态 → property。
+    fn sync_ts(&self, win: &AppWindow) {
+        Self::push_ts(&self.ts, win, true);
+    }
+
+    /// 把时间戳工具刷进 Slint。
+    ///
+    /// `with_list` = 是否重建时区列表。列表有 597 条，实时刷新每秒都重建
+    /// 一次纯属白烧 —— 只在筛选词变化或首次同步时给 true。
+    fn push_ts(ts: &Rc<RefCell<views::TimestampTool>>, win: &AppWindow, with_list: bool) {
+        let t = ts.borrow();
+        win.set_ts_now(SharedString::from(t.now_seconds().to_string()));
+        win.set_ts_now_ms(SharedString::from(format!("{} 毫秒", t.now_ms)));
+        win.set_ts_running(t.running);
+        win.set_ts_offset(SharedString::from(t.offset.clone()));
+        win.set_ts_tz_label(SharedString::from(t.tz_label_current()));
+        win.set_ts_ts_input(SharedString::from(t.ts_input.clone()));
+        win.set_ts_ts_output(SharedString::from(t.ts_output.clone()));
+        win.set_ts_ts_ok(t.ts_ok);
+        win.set_ts_date_input(SharedString::from(t.date_input.clone()));
+        win.set_ts_date_output(SharedString::from(t.date_output.clone()));
+        win.set_ts_date_ok(t.date_ok);
+        if with_list {
+            let rows: Vec<TzRow> = t
+                .tz_hits
+                .iter()
+                .map(|r| TzRow {
+                    name: SharedString::from(r.name.clone()),
+                    label: SharedString::from(r.label.clone()),
+                })
+                .collect();
+            win.set_ts_tz_hits(ModelRc::new(VecModel::from(rows)));
+        }
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -492,6 +534,7 @@ impl Shell {
         self.wire_rsa(win);
         self.wire_crypto(win);
         self.wire_gm(win);
+        self.wire_ts(win);
         self.wire_editors(win);
     }
 
@@ -1107,6 +1150,93 @@ impl Shell {
         gm_cb!(on_gm_sig_hex_edited, |t, h| { t.sig_hex = h.to_string(); });
     }
 
+    /// 时间戳工具。
+    ///
+    /// 实时刷新由一个 1 秒定时器驱动。egui 时代这里需要一整套省帧逻辑
+    ///（对齐秒边界 / 失焦零调度 / 静置 90 秒停表），因为立即模式为了让秒数
+    /// 跳动就得整窗重绘，而软件光栅化下整窗重绘要上百毫秒。Slint 只重画
+    /// 那一小块脏区域，所以这里只留开关本身。
+    fn wire_ts(&self, win: &AppWindow) {
+        // 秒定时器常驻：tick() 在没开实时刷新时直接返回 false，不碰 property，
+        // 因此不会引起任何重绘。
+        let ts = self.ts.clone();
+        let w = win.as_weak();
+        let clock = Rc::new(slint::Timer::default());
+        let keep = clock.clone();
+        clock.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                if !ts.borrow_mut().tick() {
+                    return;
+                }
+                if let Some(win) = w.upgrade() {
+                    Self::push_ts(&ts, &win, false);
+                }
+            },
+        );
+        // 定时器的所有权挂到窗口上：Timer drop 了就停表。
+        // 用一个不会被调用的闭包持有它 —— Slint 没有「把任意对象挂到窗口」的 API。
+        let ts_hold = self.ts.clone();
+        win.on_ts_refresh_now(move || {
+            let _keep_alive = &keep;
+            ts_hold.borrow_mut().refresh_now();
+        });
+
+        macro_rules! ts_cb {
+            ($setter:ident, $with_list:expr, |$t:ident| $body:block) => {{
+                let ts = self.ts.clone();
+                let save = self.draft_saver("timestamp");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = ts.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_ts(&ts, &win, $with_list);
+                    }
+                    save(&ts.borrow().save_draft());
+                });
+            }};
+            ($setter:ident, $with_list:expr, |$t:ident, $arg:ident| $body:block) => {{
+                let ts = self.ts.clone();
+                let save = self.draft_saver("timestamp");
+                let w = win.as_weak();
+                win.$setter(move |$arg| {
+                    {
+                        let mut $t = ts.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_ts(&ts, &win, $with_list);
+                    }
+                    save(&ts.borrow().save_draft());
+                });
+            }};
+        }
+
+        ts_cb!(on_ts_toggle_running, false, |t| { t.toggle_running(); });
+        ts_cb!(on_ts_use_now, false, |t| { t.use_now(); });
+        ts_cb!(on_ts_input_edited, false, |t, v| { t.set_ts_input(&v); });
+        ts_cb!(on_ts_date_edited, false, |t, v| { t.set_date_input(&v); });
+        // 这两个会改时区列表 / 选中项，要重建列表
+        ts_cb!(on_ts_filter_edited, true, |t, f| { t.set_filter(&f); });
+        ts_cb!(on_ts_select_tz, false, |t, n| { t.select_tz(&n); });
+
+        let ts = self.ts.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_ts_copy_now(move || {
+            let v = ts.borrow().now_seconds().to_string();
+            state.borrow_mut().shared.copy(v.clone());
+            state.borrow_mut().shared.toast(format!("已复制 {v}"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -1196,6 +1326,7 @@ impl Shell {
             rsa: self.rsa.clone(),
             crypto: self.crypto.clone(),
             gm: self.gm.clone(),
+            ts: self.ts.clone(),
         }
     }
 
@@ -1242,6 +1373,7 @@ impl Shell {
             Some("rsa") => ("rsa", self.rsa.borrow().save_draft()),
             Some("crypto") => ("crypto", self.crypto.borrow().save_draft()),
             Some("gm") => ("gm", self.gm.borrow().save_draft()),
+            Some("timestamp") => ("timestamp", self.ts.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);

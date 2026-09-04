@@ -35,6 +35,12 @@ struct RegexMatch {
     groups: [string],
 }
 
+// 时区列表里的一项。
+struct TzRow {
+    name: string,
+    label: string,
+}
+
 // UUID 工具的一次执行记录。
 struct UuidHistEntry {
     label: string,
@@ -1175,6 +1181,215 @@ component GmView inherits Rectangle {
     }
 }
 
+// ——— 时间戳（已迁移） ———
+component TimestampView inherits Rectangle {
+    in property <string> now-text;
+    in property <string> now-ms-text;
+    in property <bool> running;
+    in property <string> offset;
+    in property <string> tz-label;
+    in-out property <string> tz-filter;
+    in property <[TzRow]> tz-hits;
+    in-out property <string> ts-input;
+    in property <string> ts-output;
+    in property <bool> ts-ok: true;
+    in-out property <string> date-input;
+    in property <string> date-output;
+    in property <bool> date-ok: true;
+
+    callback toggle-running();
+    callback refresh-now();
+    callback use-now();
+    callback copy-now();
+    callback filter-edited(string);
+    callback select-tz(string);
+    callback ts-edited(string);
+    callback date-edited(string);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        // ===== 当前时间戳 =====
+        Card {
+            vertical-stretch: 0;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    FieldLabel { text: "当前 Unix 时间戳"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.offset;
+                        font-family: Theme.font-mono;
+                        font-size: 11.5px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                    Segmented {
+                        options: ["实时刷新", "手动"];
+                        current: root.running ? 0 : 1;
+                        changed(i) => { root.toggle-running(); }
+                    }
+                    if !root.running: FerricButton {
+                        text: "刷新";
+                        clicked => { root.refresh-now(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 16px;
+                    Text {
+                        text: root.now-text;
+                        font-family: Theme.font-mono-medium;
+                        font-size: 22px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.now-ms-text;
+                        font-family: Theme.font-mono;
+                        font-size: 13px;
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    FerricButton {
+                        text: "填入下方";
+                        clicked => { root.use-now(); }
+                    }
+                    FerricButton {
+                        text: "复制";
+                        variant: "subtle";
+                        clicked => { root.copy-now(); }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            // ===== 双向转换 =====
+            VerticalLayout {
+                spacing: 12px;
+                horizontal-stretch: 1;
+
+                Card {
+                    vertical-stretch: 0;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 6px;
+                        FieldLabel { text: "时间戳 → 日期时间（秒 / 毫秒自动识别）"; }
+                        FerricLineEdit {
+                            text <=> root.ts-input;
+                            placeholder: "1700000000 或 1700000000000";
+                            mono: true;
+                            edited(t) => { root.ts-edited(t); }
+                        }
+                        Text {
+                            text: root.ts-output;
+                            font-family: Theme.font-mono-medium;
+                            font-size: 13px;
+                            color: root.ts-ok ? Theme.accent-strong : Theme.danger;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Card {
+                    vertical-stretch: 0;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 6px;
+                        FieldLabel { text: "日期时间 → 时间戳"; }
+                        FerricLineEdit {
+                            text <=> root.date-input;
+                            placeholder: "2023-11-14 22:13:20";
+                            mono: true;
+                            edited(t) => { root.date-edited(t); }
+                        }
+                        Text {
+                            text: root.date-output;
+                            font-family: Theme.font-mono-medium;
+                            font-size: 13px;
+                            color: root.date-ok ? Theme.accent-strong : Theme.danger;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+
+            // ===== 时区选择 =====
+            VerticalLayout {
+                spacing: 6px;
+                width: 40%;
+                HorizontalLayout {
+                    FieldLabel { text: "目标时区"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.tz-hits.length + " / 597";
+                        font-family: Theme.font-mono;
+                        font-size: 11px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: root.tz-label;
+                    font-family: Theme.font-mono-medium;
+                    font-size: 12.5px;
+                    color: Theme.accent-strong;
+                    overflow: elide;
+                }
+                FerricLineEdit {
+                    placeholder: "搜索时区（支持中文，如「上海」）";
+                    text <=> root.tz-filter;
+                    edited(t) => { root.filter-edited(t); }
+                }
+                Rectangle {
+                    background: Theme.code-bg;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    vertical-stretch: 1;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 1px;
+                            alignment: start;
+                            for z in root.tz-hits: Rectangle {
+                                height: 26px;
+                                border-radius: 5px;
+                                background: tz-ta.has-hover ? Theme.border : transparent;
+                                Text {
+                                    x: 8px;
+                                    width: parent.width - 16px;
+                                    height: 100%;
+                                    text: z.label;
+                                    font-family: Theme.font-ui;
+                                    font-size: 12px;
+                                    color: Theme.fg-soft;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                tz-ta := TouchArea {
+                                    clicked => { root.select-tz(z.name); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
     in property <ToolEntry> entry;
     in property <bool> active;
@@ -1880,6 +2095,21 @@ export component AppWindow inherits Window {
     in property <bool> gm-sig-ok: true;
     in property <string> gm-sig-status: "";
 
+    // 时间戳工具状态
+    in property <string> ts-now: "";
+    in property <string> ts-now-ms: "";
+    in property <bool> ts-running;
+    in property <string> ts-offset: "";
+    in property <string> ts-tz-label: "";
+    in-out property <string> ts-tz-filter;
+    in property <[TzRow]> ts-tz-hits;
+    in-out property <string> ts-ts-input;
+    in property <string> ts-ts-output: "";
+    in property <bool> ts-ts-ok: true;
+    in-out property <string> ts-date-input;
+    in property <string> ts-date-output: "";
+    in property <bool> ts-date-ok: true;
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -1956,6 +2186,16 @@ export component AppWindow inherits Window {
     callback gm-send-to-decrypt();
     callback gm-sign();
     callback gm-verify();
+
+    // 时间戳工具
+    callback ts-toggle-running();
+    callback ts-refresh-now();
+    callback ts-use-now();
+    callback ts-copy-now();
+    callback ts-filter-edited(string);
+    callback ts-select-tz(string);
+    callback ts-input-edited(string);
+    callback ts-date-edited(string);
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -2309,6 +2549,30 @@ export component AppWindow inherits Window {
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "timestamp": TimestampView {
+                        vertical-stretch: 1;
+                        now-text: root.ts-now;
+                        now-ms-text: root.ts-now-ms;
+                        running: root.ts-running;
+                        offset: root.ts-offset;
+                        tz-label: root.ts-tz-label;
+                        tz-filter <=> root.ts-tz-filter;
+                        tz-hits: root.ts-tz-hits;
+                        ts-input <=> root.ts-ts-input;
+                        ts-output: root.ts-ts-output;
+                        ts-ok: root.ts-ts-ok;
+                        date-input <=> root.ts-date-input;
+                        date-output: root.ts-date-output;
+                        date-ok: root.ts-date-ok;
+                        toggle-running => { root.ts-toggle-running(); }
+                        refresh-now => { root.ts-refresh-now(); }
+                        use-now => { root.ts-use-now(); }
+                        copy-now => { root.ts-copy-now(); }
+                        filter-edited(f) => { root.ts-filter-edited(f); }
+                        select-tz(n) => { root.ts-select-tz(n); }
+                        ts-edited(v) => { root.ts-input-edited(v); }
+                        date-edited(v) => { root.ts-date-edited(v); }
                     }
                     // 未迁移的工具走占位。条件用 `migrated` 而不是逐个列 id ——
                     // 每迁完一个只需把 Tool::migrated 翻成 true 并加上面那样一个分支。

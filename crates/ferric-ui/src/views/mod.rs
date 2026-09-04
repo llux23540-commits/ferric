@@ -13,6 +13,7 @@ mod pending;
 mod regex;
 mod rsa;
 mod sql;
+mod timestamp;
 mod uuid;
 mod yaml;
 
@@ -22,6 +23,7 @@ pub use pending::PendingTool;
 pub use regex::RegexTool;
 pub use rsa::RsaTool;
 pub use sql::SqlTool;
+pub use timestamp::TimestampTool;
 pub use uuid::UuidTool;
 pub use yaml::YamlTool;
 
@@ -64,14 +66,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
             "格式",
             &["diff", "compare", "对比", "比较", "差异"],
         ),
-        pending(
-            "timestamp",
-            "时间戳",
-            "Unix ↔ 日期时间，秒/毫秒，全量时区可搜索，自动识别多种日期格式",
-            icons::CLOCK,
-            "转换",
-            &["timestamp", "unix", "时间戳", "时间", "date", "时区"],
-        ),
+        Box::new(TimestampTool::default()),
         // ——— 已迁移 ———
         Box::new(YamlTool::default()),
         Box::new(SqlTool::default()),
@@ -141,7 +136,7 @@ mod tests {
             .collect();
         assert_eq!(
             migrated,
-            vec!["yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
+            vec!["timestamp", "yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
             "迁完一个就在这里加一项"
         );
     }
