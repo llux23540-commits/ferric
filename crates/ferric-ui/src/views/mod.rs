@@ -8,6 +8,7 @@
 //! 换成真实构造。侧栏顺序 = 此处顺序，与 egui 版一致，不要重排。
 
 mod crypto;
+mod gm;
 mod pending;
 mod regex;
 mod rsa;
@@ -16,6 +17,7 @@ mod uuid;
 mod yaml;
 
 pub use crypto::CryptoTool;
+pub use gm::GmTool;
 pub use pending::PendingTool;
 pub use regex::RegexTool;
 pub use rsa::RsaTool;
@@ -77,14 +79,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         Box::new(UuidTool::default()),
         Box::new(RsaTool::default()),
         Box::new(CryptoTool::default()),
-        pending(
-            "gm",
-            "国密 SM",
-            "SM4 对称、SM2 公钥加解密、SM3 摘要，一键生成 SM2 密钥对",
-            icons::SHIELD_CHECK,
-            "加密",
-            &["gm", "国密", "sm2", "sm3", "sm4", "国密sm"],
-        ),
+        Box::new(GmTool::default()),
         Box::new(RegexTool::default()),
         pending(
             "market",
@@ -146,7 +141,7 @@ mod tests {
             .collect();
         assert_eq!(
             migrated,
-            vec!["yaml", "sql", "uuid", "rsa", "crypto", "regex"],
+            vec!["yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
             "迁完一个就在这里加一项"
         );
     }

@@ -187,6 +187,7 @@ pub struct Shell {
     pub regex: Rc<RefCell<views::RegexTool>>,
     pub rsa: Rc<RefCell<views::RsaTool>>,
     pub crypto: Rc<RefCell<views::CryptoTool>>,
+    pub gm: Rc<RefCell<views::GmTool>>,
 }
 
 impl Shell {
@@ -226,6 +227,10 @@ impl Shell {
         if let Some(d) = draft_of("crypto") {
             crypto.load_draft(&d);
         }
+        let mut gm = views::GmTool::default();
+        if let Some(d) = draft_of("gm") {
+            gm.load_draft(&d);
+        }
 
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -235,6 +240,7 @@ impl Shell {
             regex: Rc::new(RefCell::new(regex)),
             rsa: Rc::new(RefCell::new(rsa)),
             crypto: Rc::new(RefCell::new(crypto)),
+            gm: Rc::new(RefCell::new(gm)),
         }
     }
 
@@ -256,6 +262,7 @@ impl Shell {
         self.sync_regex(win);
         self.sync_rsa(win);
         self.sync_crypto(win);
+        self.sync_gm(win);
         self.sync_toasts(win);
     }
 
@@ -409,6 +416,57 @@ impl Shell {
         win.set_crypto_dec_status(SharedString::from(t.dec.status.clone()));
     }
 
+    /// 国密 SM 工具状态 → property。下拉的标签只在这里灌一次（它们是常量）。
+    fn sync_gm(&self, win: &AppWindow) {
+        let labels = |v: Vec<&'static str>| {
+            ModelRc::new(VecModel::from(
+                v.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+            ))
+        };
+        win.set_gm_enc_algos(labels(views::GmTool::enc_algo_labels()));
+        win.set_gm_dec_algos(labels(views::GmTool::dec_algo_labels()));
+        win.set_gm_fmts(labels(views::GmTool::fmt_labels()));
+        Self::push_gm(&self.gm, win);
+    }
+
+    /// 把国密工具的状态刷进 Slint（多条路径共用）。
+    fn push_gm(gm: &Rc<RefCell<views::GmTool>>, win: &AppWindow) {
+        let t = gm.borrow();
+        win.set_gm_pub_key(SharedString::from(t.pub_key.clone()));
+        win.set_gm_priv_key(SharedString::from(t.priv_key.clone()));
+        win.set_gm_key_status(SharedString::from(t.key_status.clone()));
+        win.set_gm_enc_algo(t.enc_algo_index());
+        win.set_gm_dec_algo(t.dec_algo_index());
+        win.set_gm_fmt(t.fmt_index());
+        win.set_gm_enc_needs_key(t.enc_needs_key());
+        // SM2 那一栏放的是公钥 / 私钥，其余算法放的是口令 —— 标签要跟着变，
+        // 否则用户会把口令填进本该放公钥的框里，然后收到一条看不懂的报错。
+        win.set_gm_enc_key_label(SharedString::from(if t.enc_key_is_pubkey() {
+            "公钥（SM2）"
+        } else {
+            "口令"
+        }));
+        win.set_gm_dec_key_label(SharedString::from(if t.dec_key_is_privkey() {
+            "私钥（SM2）"
+        } else {
+            "口令"
+        }));
+        win.set_gm_enc_key(SharedString::from(t.enc_key.clone()));
+        win.set_gm_dec_key(SharedString::from(t.dec_key.clone()));
+        win.set_gm_enc_in(editor_bridge::state_of(&t.enc_input));
+        win.set_gm_enc_out(editor_bridge::state_of(&t.enc_output));
+        win.set_gm_dec_in(editor_bridge::state_of(&t.dec_input));
+        win.set_gm_dec_out(editor_bridge::state_of(&t.dec_output));
+        win.set_gm_enc_ok(t.enc_ok);
+        win.set_gm_dec_ok(t.dec_ok);
+        win.set_gm_enc_status(SharedString::from(t.enc_status.clone()));
+        win.set_gm_dec_status(SharedString::from(t.dec_status.clone()));
+        win.set_gm_sig(editor_bridge::state_of(&t.sig_text));
+        win.set_gm_sig_hex(SharedString::from(t.sig_hex.clone()));
+        win.set_gm_sig_ok(t.sig_ok);
+        win.set_gm_sig_status(SharedString::from(t.sig_status.clone()));
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -433,6 +491,7 @@ impl Shell {
         self.wire_regex(win);
         self.wire_rsa(win);
         self.wire_crypto(win);
+        self.wire_gm(win);
         self.wire_editors(win);
     }
 
@@ -996,6 +1055,58 @@ impl Shell {
         win.set_crypto_dec_status(SharedString::from(t.dec.status.clone()));
     }
 
+    /// 国密 SM 工具。
+    fn wire_gm(&self, win: &AppWindow) {
+        macro_rules! gm_cb {
+            ($setter:ident, |$t:ident| $body:block) => {{
+                let gm = self.gm.clone();
+                let save = self.draft_saver("gm");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = gm.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_gm(&gm, &win);
+                    }
+                    save(&gm.borrow().save_draft());
+                });
+            }};
+            ($setter:ident, |$t:ident, $arg:ident| $body:block) => {{
+                let gm = self.gm.clone();
+                let save = self.draft_saver("gm");
+                let w = win.as_weak();
+                win.$setter(move |$arg| {
+                    {
+                        let mut $t = gm.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_gm(&gm, &win);
+                    }
+                    save(&gm.borrow().save_draft());
+                });
+            }};
+        }
+
+        gm_cb!(on_gm_gen_keypair, |t| { t.gen_keypair(); });
+        gm_cb!(on_gm_derive_pub, |t| { t.derive_pub(); });
+        gm_cb!(on_gm_encrypt, |t| { t.encrypt(); });
+        gm_cb!(on_gm_decrypt, |t| { t.decrypt(); });
+        gm_cb!(on_gm_send_to_decrypt, |t| { t.send_to_decrypt(); });
+        gm_cb!(on_gm_sign, |t| { t.sign(); });
+        gm_cb!(on_gm_verify, |t| { t.verify(); });
+        gm_cb!(on_gm_enc_algo_changed, |t, i| { t.set_enc_algo(i); });
+        gm_cb!(on_gm_dec_algo_changed, |t, i| { t.set_dec_algo(i); });
+        gm_cb!(on_gm_fmt_changed, |t, i| { t.set_fmt(i); });
+        gm_cb!(on_gm_enc_key_edited, |t, k| { t.enc_key = k.to_string(); });
+        gm_cb!(on_gm_dec_key_edited, |t, k| { t.dec_key = k.to_string(); });
+        gm_cb!(on_gm_pub_key_edited, |t, k| { t.pub_key = k.to_string(); });
+        gm_cb!(on_gm_priv_key_edited, |t, k| { t.priv_key = k.to_string(); });
+        gm_cb!(on_gm_sig_hex_edited, |t, h| { t.sig_hex = h.to_string(); });
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -1084,6 +1195,7 @@ impl Shell {
             regex: self.regex.clone(),
             rsa: self.rsa.clone(),
             crypto: self.crypto.clone(),
+            gm: self.gm.clone(),
         }
     }
 
@@ -1103,6 +1215,11 @@ impl Shell {
             "crypto-enc-out" => Some(f(&mut self.crypto.borrow_mut().enc.output)),
             "crypto-dec-in" => Some(f(&mut self.crypto.borrow_mut().dec.input)),
             "crypto-dec-out" => Some(f(&mut self.crypto.borrow_mut().dec.output)),
+            "gm-enc-in" => Some(f(&mut self.gm.borrow_mut().enc_input)),
+            "gm-enc-out" => Some(f(&mut self.gm.borrow_mut().enc_output)),
+            "gm-dec-in" => Some(f(&mut self.gm.borrow_mut().dec_input)),
+            "gm-dec-out" => Some(f(&mut self.gm.borrow_mut().dec_output)),
+            "gm-sig-in" => Some(f(&mut self.gm.borrow_mut().sig_text)),
             _ => None,
         }
     }
@@ -1124,6 +1241,7 @@ impl Shell {
             Some("regex") => ("regex", self.regex.borrow().save_draft()),
             Some("rsa") => ("rsa", self.rsa.borrow().save_draft()),
             Some("crypto") => ("crypto", self.crypto.borrow().save_draft()),
+            Some("gm") => ("gm", self.gm.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);
@@ -1159,6 +1277,8 @@ impl Shell {
             self.sync_rsa(win);
         } else if which.starts_with("crypto-") {
             self.sync_crypto(win);
+        } else if which.starts_with("gm-") {
+            Self::push_gm(&self.gm, win);
         }
     }
 

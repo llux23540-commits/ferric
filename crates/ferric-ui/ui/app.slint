@@ -804,6 +804,377 @@ component CryptoView inherits Rectangle {
     }
 }
 
+// ——— 国密 SM（已迁移） ———
+component GmView inherits Rectangle {
+    // 密钥对
+    in-out property <string> pub-key;
+    in-out property <string> priv-key;
+    in property <string> key-status;
+    // 加密 / 解密
+    in property <[string]> enc-algos;
+    in property <[string]> dec-algos;
+    in property <[string]> fmts;
+    in property <int> enc-algo;
+    in property <int> dec-algo;
+    in property <int> fmt-index;
+    in property <bool> enc-needs-key: true;
+    in property <string> enc-key-label: "口令";
+    in property <string> dec-key-label: "口令";
+    in-out property <string> enc-key;
+    in-out property <string> dec-key;
+    in property <EditorState> enc-in;
+    in property <EditorState> enc-out;
+    in property <EditorState> dec-in;
+    in property <EditorState> dec-out;
+    in property <bool> enc-ok: true;
+    in property <bool> dec-ok: true;
+    in property <string> enc-status;
+    in property <string> dec-status;
+    // 签名
+    in property <EditorState> sig-state;
+    in-out property <string> sig-hex;
+    in property <bool> sig-ok: true;
+    in property <string> sig-status;
+
+    callback gen-keypair();
+    callback derive-pub();
+    callback enc-algo-changed(int);
+    callback dec-algo-changed(int);
+    callback fmt-changed(int);
+    callback enc-key-edited(string);
+    callback dec-key-edited(string);
+    callback pub-key-edited(string);
+    callback priv-key-edited(string);
+    callback sig-hex-edited(string);
+    callback do-encrypt();
+    callback do-decrypt();
+    callback send-to-decrypt();
+    callback do-sign();
+    callback do-verify();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    // 只允许纵向滚动：内容宽度钉在可视宽度上。不钉的话长公钥 / 双栏编辑区
+    // 会把布局顶出右边界（实测右半边被裁掉），而横向滚动条对这种表单没意义。
+    ScrollView {
+        VerticalLayout {
+            width: root.width;
+            padding: 16px;
+            spacing: 12px;
+            alignment: start;
+
+            // ===== SM2 密钥对 =====
+            Card {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "SM2 密钥对";
+                            font-family: Theme.font-ui-semibold;
+                            font-size: 14px;
+                            color: Theme.fg;
+                            vertical-alignment: center;
+                        }
+                        FerricButton {
+                            text: "生成密钥对";
+                            variant: "primary";
+                            clicked => { root.gen-keypair(); }
+                        }
+                        FerricButton {
+                            text: "由私钥推公钥";
+                            clicked => { root.derive-pub(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.key-status;
+                            font-family: Theme.font-ui;
+                            font-size: 11.5px;
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            spacing: 4px;
+                            horizontal-stretch: 1;
+                            FieldLabel { text: "公钥"; }
+                            FerricLineEdit {
+                                text <=> root.pub-key;
+                                placeholder: "04…";
+                                mono: true;
+                                edited(t) => { root.pub-key-edited(t); }
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            horizontal-stretch: 1;
+                            FieldLabel { text: "私钥"; }
+                            FerricLineEdit {
+                                text <=> root.priv-key;
+                                placeholder: "hex";
+                                mono: true;
+                                edited(t) => { root.priv-key-edited(t); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===== 加密 / 解密 =====
+            Card {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "加密 / 解密";
+                            font-family: Theme.font-ui-semibold;
+                            font-size: 14px;
+                            color: Theme.fg;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        FieldLabel { text: "SM2 密文排布"; vertical-alignment: center; }
+                        ComboBox {
+                            model: root.fmts;
+                            current-index: root.fmt-index;
+                            selected(v) => { root.fmt-changed(self.current-index); }
+                        }
+                        FerricButton {
+                            text: "把密文送去解密";
+                            clicked => { root.send-to-decrypt(); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 16px;
+
+                        // 加密侧
+                        VerticalLayout {
+                            spacing: 6px;
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    width: 45%;
+                                    FieldLabel { text: "算法"; }
+                                    ComboBox {
+                                        model: root.enc-algos;
+                                        current-index: root.enc-algo;
+                                        selected(v) => { root.enc-algo-changed(self.current-index); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 1;
+                                    // SM3 是摘要，没有口令可言 —— 那一栏整体隐掉，
+                                    // 比留一个灰掉的空框清楚
+                                    FieldLabel {
+                                        text: root.enc-needs-key ? root.enc-key-label : "（SM3 摘要，无需口令）";
+                                    }
+                                    if root.enc-needs-key: FerricLineEdit {
+                                        text <=> root.enc-key;
+                                        mono: true;
+                                        edited(t) => { root.enc-key-edited(t); }
+                                    }
+                                }
+                            }
+                            EditorPane {
+                                title: "输入";
+                                which: "gm-enc-in";
+                                state: root.enc-in;
+                                height: 150px;
+                                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                                editor-triple(w) => { root.editor-triple(w); }
+                                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                FerricButton {
+                                    text: "加密 / 摘要";
+                                    variant: "primary";
+                                    clicked => { root.do-encrypt(); }
+                                }
+                                Text {
+                                    text: root.enc-status;
+                                    font-family: Theme.font-ui;
+                                    font-size: 11.5px;
+                                    color: root.enc-ok ? Theme.muted : Theme.danger;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            EditorPane {
+                                title: "输出 (hex)";
+                                which: "gm-enc-out";
+                                state: root.enc-out;
+                                read-only: true;
+                                hint: "只读";
+                                height: 150px;
+                                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                                editor-triple(w) => { root.editor-triple(w); }
+                                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                            }
+                        }
+
+                        // 解密侧
+                        VerticalLayout {
+                            spacing: 6px;
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    width: 45%;
+                                    FieldLabel { text: "算法"; }
+                                    ComboBox {
+                                        model: root.dec-algos;
+                                        current-index: root.dec-algo;
+                                        selected(v) => { root.dec-algo-changed(self.current-index); }
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 1;
+                                    FieldLabel { text: root.dec-key-label; }
+                                    FerricLineEdit {
+                                        text <=> root.dec-key;
+                                        mono: true;
+                                        edited(t) => { root.dec-key-edited(t); }
+                                    }
+                                }
+                            }
+                            EditorPane {
+                                title: "密文 (hex)";
+                                which: "gm-dec-in";
+                                state: root.dec-in;
+                                height: 150px;
+                                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                                editor-triple(w) => { root.editor-triple(w); }
+                                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                FerricButton {
+                                    text: "解密";
+                                    variant: "primary";
+                                    clicked => { root.do-decrypt(); }
+                                }
+                                Text {
+                                    text: root.dec-status;
+                                    font-family: Theme.font-ui;
+                                    font-size: 11.5px;
+                                    color: root.dec-ok ? Theme.muted : Theme.danger;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            EditorPane {
+                                title: "明文";
+                                which: "gm-dec-out";
+                                state: root.dec-out;
+                                read-only: true;
+                                hint: "只读";
+                                height: 150px;
+                                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                                editor-triple(w) => { root.editor-triple(w); }
+                                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===== 签名 / 验签 =====
+            Card {
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "SM2 签名 / 验签";
+                            font-family: Theme.font-ui-semibold;
+                            font-size: 14px;
+                            color: Theme.fg;
+                            vertical-alignment: center;
+                        }
+                        FerricButton {
+                            text: "签名（用私钥）";
+                            variant: "primary";
+                            clicked => { root.do-sign(); }
+                        }
+                        FerricButton {
+                            text: "验签（用公钥）";
+                            clicked => { root.do-verify(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.sig-status;
+                            font-family: Theme.font-ui-medium;
+                            font-size: 12px;
+                            color: root.sig-ok ? Theme.ok : Theme.danger;
+                            vertical-alignment: center;
+                        }
+                    }
+                    EditorPane {
+                        title: "待签名 / 待验签文本";
+                        which: "gm-sig-in";
+                        state: root.sig-state;
+                        height: 130px;
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: "签名 (hex)"; }
+                        FerricLineEdit {
+                            text <=> root.sig-hex;
+                            placeholder: "签名结果，也可粘入他人的签名做验签";
+                            mono: true;
+                            edited(t) => { root.sig-hex-edited(t); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
     in property <ToolEntry> entry;
     in property <bool> active;
@@ -1481,6 +1852,34 @@ export component AppWindow inherits Window {
     in property <string> crypto-enc-status: "";
     in property <string> crypto-dec-status: "";
 
+    // 国密 SM 工具状态
+    in-out property <string> gm-pub-key;
+    in-out property <string> gm-priv-key;
+    in property <string> gm-key-status: "";
+    in property <[string]> gm-enc-algos;
+    in property <[string]> gm-dec-algos;
+    in property <[string]> gm-fmts;
+    in property <int> gm-enc-algo;
+    in property <int> gm-dec-algo;
+    in property <int> gm-fmt;
+    in property <bool> gm-enc-needs-key: true;
+    in property <string> gm-enc-key-label: "口令";
+    in property <string> gm-dec-key-label: "口令";
+    in-out property <string> gm-enc-key;
+    in-out property <string> gm-dec-key;
+    in property <EditorState> gm-enc-in;
+    in property <EditorState> gm-enc-out;
+    in property <EditorState> gm-dec-in;
+    in property <EditorState> gm-dec-out;
+    in property <bool> gm-enc-ok: true;
+    in property <bool> gm-dec-ok: true;
+    in property <string> gm-enc-status: "";
+    in property <string> gm-dec-status: "";
+    in property <EditorState> gm-sig;
+    in-out property <string> gm-sig-hex;
+    in property <bool> gm-sig-ok: true;
+    in property <string> gm-sig-status: "";
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -1540,6 +1939,23 @@ export component AppWindow inherits Window {
     callback crypto-send-to-decrypt();
     callback crypto-copy-enc();
     callback crypto-copy-dec();
+
+    // 国密 SM 工具
+    callback gm-gen-keypair();
+    callback gm-derive-pub();
+    callback gm-enc-algo-changed(int);
+    callback gm-dec-algo-changed(int);
+    callback gm-fmt-changed(int);
+    callback gm-enc-key-edited(string);
+    callback gm-dec-key-edited(string);
+    callback gm-pub-key-edited(string);
+    callback gm-priv-key-edited(string);
+    callback gm-sig-hex-edited(string);
+    callback gm-encrypt();
+    callback gm-decrypt();
+    callback gm-send-to-decrypt();
+    callback gm-sign();
+    callback gm-verify();
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -1835,6 +2251,57 @@ export component AppWindow inherits Window {
                         send-to-decrypt => { root.crypto-send-to-decrypt(); }
                         copy-enc => { root.crypto-copy-enc(); }
                         copy-dec => { root.crypto-copy-dec(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "gm": GmView {
+                        vertical-stretch: 1;
+                        pub-key <=> root.gm-pub-key;
+                        priv-key <=> root.gm-priv-key;
+                        key-status: root.gm-key-status;
+                        enc-algos: root.gm-enc-algos;
+                        dec-algos: root.gm-dec-algos;
+                        fmts: root.gm-fmts;
+                        enc-algo: root.gm-enc-algo;
+                        dec-algo: root.gm-dec-algo;
+                        fmt-index: root.gm-fmt;
+                        enc-needs-key: root.gm-enc-needs-key;
+                        enc-key-label: root.gm-enc-key-label;
+                        dec-key-label: root.gm-dec-key-label;
+                        enc-key <=> root.gm-enc-key;
+                        dec-key <=> root.gm-dec-key;
+                        enc-in: root.gm-enc-in;
+                        enc-out: root.gm-enc-out;
+                        dec-in: root.gm-dec-in;
+                        dec-out: root.gm-dec-out;
+                        enc-ok: root.gm-enc-ok;
+                        dec-ok: root.gm-dec-ok;
+                        enc-status: root.gm-enc-status;
+                        dec-status: root.gm-dec-status;
+                        sig-state: root.gm-sig;
+                        sig-hex <=> root.gm-sig-hex;
+                        sig-ok: root.gm-sig-ok;
+                        sig-status: root.gm-sig-status;
+                        gen-keypair => { root.gm-gen-keypair(); }
+                        derive-pub => { root.gm-derive-pub(); }
+                        enc-algo-changed(i) => { root.gm-enc-algo-changed(i); }
+                        dec-algo-changed(i) => { root.gm-dec-algo-changed(i); }
+                        fmt-changed(i) => { root.gm-fmt-changed(i); }
+                        enc-key-edited(k) => { root.gm-enc-key-edited(k); }
+                        dec-key-edited(k) => { root.gm-dec-key-edited(k); }
+                        pub-key-edited(k) => { root.gm-pub-key-edited(k); }
+                        priv-key-edited(k) => { root.gm-priv-key-edited(k); }
+                        sig-hex-edited(h) => { root.gm-sig-hex-edited(h); }
+                        do-encrypt => { root.gm-encrypt(); }
+                        do-decrypt => { root.gm-decrypt(); }
+                        send-to-decrypt => { root.gm-send-to-decrypt(); }
+                        do-sign => { root.gm-sign(); }
+                        do-verify => { root.gm-verify(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
