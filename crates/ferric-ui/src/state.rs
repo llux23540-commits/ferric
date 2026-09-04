@@ -121,6 +121,59 @@ impl AppState {
         }
     }
 
+    /// 当前生效的数据源（自建服务端 / GitHub 发布页 / 演示数据）。
+    pub fn source(&self) -> Option<crate::source::Source> {
+        crate::source::Source::resolve(
+            self.source_pref,
+            self.server_override.clone(),
+            self.github_override
+                .clone()
+                .or_else(crate::github::GithubSource::builtin),
+        )
+    }
+
+    /// 热加载插件：把插件那截工具换成磁盘上的当前状态，内置工具原封不动。
+    ///
+    /// 保留当前选中的工具（按 id 找回；插件被卸载则回落到市场页）与各插件的
+    /// 输入草稿。装 / 卸插件之后不必重启 —— 这条是 egui 版就有的承诺。
+    ///
+    /// ⚠️ `PluginTool` 的 `ToolMeta` 需要 `&'static str`，加载时用 `Box::leak`
+    /// 得到，因此每次热加载会漏掉一份插件元数据（每个插件几百字节）。
+    /// 装插件是低频动作，这点代价换「不用重启」是划算的；但别把这个函数
+    /// 接到什么每帧调用的地方去。
+    pub fn reload_plugins(&mut self) {
+        let active_id = self
+            .tools
+            .get(self.active)
+            .map(|t| t.meta().id.to_owned())
+            .unwrap_or_default();
+        // 插件的输入草稿：重建前先收起来，重建后按 id 放回去。
+        let drafts: std::collections::HashMap<String, String> = self.tools[self.builtin_tools..]
+            .iter()
+            .filter_map(|t| t.save_draft().map(|d| (t.meta().id.to_owned(), d)))
+            .collect();
+
+        self.tools.truncate(self.builtin_tools);
+        let (plugin_tools, warns) = crate::plugin_host::load_all();
+        for mut t in plugin_tools {
+            if let Some(d) = drafts.get(t.meta().id) {
+                t.load_draft(d);
+            }
+            self.tools.push(Box::new(t));
+        }
+        for w in warns {
+            self.shared.toast(format!("插件加载失败 · {w}"));
+        }
+
+        // 选中的工具可能刚被卸载 —— 找不回来就退回插件市场（用户就是从那儿来的）。
+        self.active = self
+            .tools
+            .iter()
+            .position(|t| t.meta().id == active_id)
+            .or_else(|| self.tools.iter().position(|t| t.meta().id == "market"))
+            .unwrap_or(0);
+    }
+
     /// 收集当前状态并落盘。每次改设置 / 切工具 / 改草稿后调用。
     pub fn save(&self) {
         let mut drafts = std::collections::HashMap::new();
@@ -190,6 +243,8 @@ pub struct Shell {
     pub gm: Rc<RefCell<views::GmTool>>,
     pub ts: Rc<RefCell<views::TimestampTool>>,
     pub json: Rc<RefCell<views::JsonTool>>,
+    pub diff: Rc<RefCell<views::DiffTool>>,
+    pub market: Rc<RefCell<views::MarketTool>>,
 }
 
 impl Shell {
@@ -241,6 +296,12 @@ impl Shell {
         if let Some(d) = draft_of("json") {
             json.load_draft(&d);
         }
+        let mut diff = views::DiffTool::default();
+        if let Some(d) = draft_of("diff") {
+            diff.load_draft(&d);
+        }
+        // 市场不持久化草稿（列表是服务端状态）。
+        let market = views::MarketTool::default();
 
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -253,6 +314,8 @@ impl Shell {
             gm: Rc::new(RefCell::new(gm)),
             ts: Rc::new(RefCell::new(ts)),
             json: Rc::new(RefCell::new(json)),
+            diff: Rc::new(RefCell::new(diff)),
+            market: Rc::new(RefCell::new(market)),
         }
     }
 
@@ -277,6 +340,8 @@ impl Shell {
         self.sync_gm(win);
         self.sync_ts(win);
         self.sync_json(win);
+        self.sync_diff(win);
+        self.sync_market(win);
         self.sync_toasts(win);
     }
 
@@ -532,6 +597,81 @@ impl Shell {
         win.set_json_can_redo(t.can_redo());
     }
 
+    /// 对比工具状态 → property。
+    fn sync_diff(&self, win: &AppWindow) {
+        Self::push_diff(&self.diff, win);
+    }
+
+    /// 把对比结果刷进 Slint。
+    fn push_diff(diff: &Rc<RefCell<views::DiffTool>>, win: &AppWindow) {
+        use ferric_core::diff::Tag;
+        let t = diff.borrow();
+        win.set_diff_left(editor_bridge::state_of(&t.left));
+        win.set_diff_right(editor_bridge::state_of(&t.right));
+        win.set_diff_only_changes(t.only_changes);
+        win.set_diff_status(SharedString::from(t.status.clone()));
+
+        let rows: Vec<DiffRow> = t
+            .rows
+            .iter()
+            .map(|r| DiffRow {
+                sign: SharedString::from(r.sign),
+                left_no: SharedString::from(r.left_no.clone()),
+                right_no: SharedString::from(r.right_no.clone()),
+                kind: match r.tag {
+                    Tag::Equal => 0,
+                    Tag::Delete => 1,
+                    Tag::Insert => 2,
+                },
+                segs: ModelRc::new(VecModel::from(
+                    r.segs
+                        .iter()
+                        .map(|(text, emph)| DiffSeg {
+                            text: SharedString::from(text.clone()),
+                            emph: *emph,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        win.set_diff_rows(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// 插件市场状态 → property。
+    fn sync_market(&self, win: &AppWindow) {
+        Self::push_market(&self.market, win);
+    }
+
+    /// 把市场状态刷进 Slint。
+    fn push_market(market: &Rc<RefCell<views::MarketTool>>, win: &AppWindow) {
+        let t = market.borrow();
+        win.set_market_query(SharedString::from(t.query.clone()));
+        win.set_market_loading(t.loading);
+        win.set_market_ok(t.ok);
+        win.set_market_status(SharedString::from(t.status.clone()));
+        win.set_market_progress(t.progress_pct());
+        win.set_market_installing(t.installing.is_some());
+        win.set_market_pending(t.pending_updates() as i32);
+
+        let cards: Vec<PluginCard> = t
+            .items
+            .iter()
+            .map(|i| PluginCard {
+                slug: SharedString::from(i.slug.clone()),
+                name: SharedString::from(i.name.clone()),
+                desc: SharedString::from(i.desc.clone()),
+                version: SharedString::from(i.version.clone()),
+                installed: SharedString::from(i.installed.clone().unwrap_or_default()),
+                has_update: i.has_update,
+                is_installed: i.installed.is_some(),
+                size_text: SharedString::from(fmt_size(i.size)),
+                downloads_text: SharedString::from(format!("{} 次下载", i.downloads)),
+                busy: t.installing.as_deref() == Some(i.slug.as_str()),
+            })
+            .collect();
+        win.set_market_cards(ModelRc::new(VecModel::from(cards)));
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -559,6 +699,8 @@ impl Shell {
         self.wire_gm(win);
         self.wire_ts(win);
         self.wire_json(win);
+        self.wire_diff(win);
+        self.wire_market(win);
         self.wire_editors(win);
     }
 
@@ -597,17 +739,28 @@ impl Shell {
     /// 侧栏：切工具、收藏。
     fn wire_navigation(&self, win: &AppWindow) {
         let state = self.state.clone();
+        let market = self.market.clone();
         let w = win.as_weak();
         win.on_select_tool(move |i| {
-            let mut s = state.borrow_mut();
             let i = i.max(0) as usize;
-            if i < s.tools.len() {
+            let picked = {
+                let mut s = state.borrow_mut();
+                if i >= s.tools.len() {
+                    return;
+                }
                 s.active = i;
                 s.save();
-            }
-            drop(s);
-            if let Some(win) = w.upgrade() {
-                win.set_active_tool(i as i32);
+                s.tools[i].meta().id
+            };
+            let Some(win) = w.upgrade() else { return };
+            win.set_active_tool(i as i32);
+
+            // 进插件市场就自动拉一次列表。以前必须先点「刷新」才有内容 ——
+            // 用户点开「插件市场」本来就是为了看列表。
+            if picked == "market" {
+                let src = state.borrow().source();
+                market.borrow_mut().on_enter(src.as_ref());
+                Self::push_market(&market, &win);
             }
         });
 
@@ -1343,6 +1496,131 @@ impl Shell {
         win.set_json_can_redo(t.can_redo());
     }
 
+    /// 对比工具。
+    fn wire_diff(&self, win: &AppWindow) {
+        macro_rules! diff_cb {
+            ($setter:ident, |$t:ident| $body:block) => {{
+                let diff = self.diff.clone();
+                let save = self.draft_saver("diff");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = diff.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_diff(&diff, &win);
+                    }
+                    save(&diff.borrow().save_draft());
+                });
+            }};
+        }
+
+        diff_cb!(on_diff_compare, |t| { t.compare(); });
+        diff_cb!(on_diff_toggle_only_changes, |t| { t.toggle_only_changes(); });
+        diff_cb!(on_diff_swap, |t| { t.swap(); });
+        diff_cb!(on_diff_clear, |t| { t.clear(); });
+
+        let diff = self.diff.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_diff_copy(move || {
+            let text = diff.borrow().as_text();
+            if text.trim().is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast(format!("已复制 {n} 行差异"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 插件市场。
+    ///
+    /// 网络与安装都在后台线程，这里用一个 200ms 定时器取结果。
+    /// 装完 / 卸完会置 `changed`，外壳据此热加载插件目录 —— 装完立刻生效，
+    /// 不必重启（这条是 egui 版就有的承诺，迁移后必须保住）。
+    fn wire_market(&self, win: &AppWindow) {
+        let market = self.market.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        let poll = Rc::new(slint::Timer::default());
+        let poll_for_cb = poll.clone();
+
+        // 常驻定时器：没有后台任务时 poll() 直接返回 false，不碰 property。
+        let m2 = market.clone();
+        let s2 = state.clone();
+        let w2 = win.as_weak();
+        poll.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(200),
+            move || {
+                let src = s2.borrow().source();
+                if !m2.borrow_mut().poll(src.as_ref()) {
+                    return;
+                }
+                let Some(win) = w2.upgrade() else { return };
+                Self::push_market(&m2, &win);
+                // 装 / 卸完了 → 热加载插件目录，并把提示排出去。
+                if m2.borrow_mut().take_changed() {
+                    let msg = {
+                        let mut st = s2.borrow_mut();
+                        st.reload_plugins();
+                        "插件目录已重新加载"
+                    };
+                    s2.borrow_mut().shared.toast(msg);
+                    Self::flush_toasts(&s2, &win);
+                }
+            },
+        );
+
+        macro_rules! market_cb {
+            ($setter:ident, |$t:ident, $src:ident| $body:block) => {{
+                let market = market.clone();
+                let state = state.clone();
+                let w = w.clone();
+                let _keep = poll_for_cb.clone();
+                win.$setter(move || {
+                    let _keep_alive = &_keep;
+                    let $src = state.borrow().source();
+                    {
+                        let mut $t = market.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_market(&market, &win);
+                    }
+                });
+            }};
+            ($setter:ident, |$t:ident, $src:ident, $arg:ident| $body:block) => {{
+                let market = market.clone();
+                let state = state.clone();
+                let w = w.clone();
+                let _keep = poll_for_cb.clone();
+                win.$setter(move |$arg| {
+                    let _keep_alive = &_keep;
+                    let $src = state.borrow().source();
+                    {
+                        let mut $t = market.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_market(&market, &win);
+                    }
+                });
+            }};
+        }
+
+        market_cb!(on_market_refresh, |t, src| { t.refresh(src.as_ref()); });
+        market_cb!(on_market_update_all, |t, src| { t.update_all(src.as_ref()); });
+        market_cb!(on_market_install, |t, src, slug| { t.install(src.as_ref(), &slug); });
+        market_cb!(on_market_uninstall, |t, src, slug| { t.uninstall(src.as_ref(), &slug); });
+        market_cb!(on_market_query_edited, |t, _src, q| { t.set_query(&q); });
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -1434,6 +1712,8 @@ impl Shell {
             gm: self.gm.clone(),
             ts: self.ts.clone(),
             json: self.json.clone(),
+            diff: self.diff.clone(),
+            market: self.market.clone(),
         }
     }
 
@@ -1448,6 +1728,8 @@ impl Shell {
             "sql-in" => Some(f(&mut self.sql.borrow_mut().input)),
             "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
             "json-in" => Some(f(&mut self.json.borrow_mut().input)),
+            "diff-left-in" => Some(f(&mut self.diff.borrow_mut().left)),
+            "diff-right-in" => Some(f(&mut self.diff.borrow_mut().right)),
             "rsa-pub-out" => Some(f(&mut self.rsa.borrow_mut().pub_pem)),
             "rsa-priv-out" => Some(f(&mut self.rsa.borrow_mut().priv_pem)),
             "crypto-enc-in" => Some(f(&mut self.crypto.borrow_mut().enc.input)),
@@ -1471,6 +1753,8 @@ impl Shell {
             self.regex.borrow_mut().run();
         } else if which.starts_with("json-") {
             self.json.borrow_mut().on_edited();
+        } else if which.starts_with("diff-") {
+            self.diff.borrow_mut().compare();
         }
     }
 
@@ -1485,6 +1769,7 @@ impl Shell {
             Some("gm") => ("gm", self.gm.borrow().save_draft()),
             Some("timestamp") => ("timestamp", self.ts.borrow().save_draft()),
             Some("json") => ("json", self.json.borrow().save_draft()),
+            Some("diff") => ("diff", self.diff.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);
@@ -1524,6 +1809,8 @@ impl Shell {
             Self::push_gm(&self.gm, win);
         } else if which.starts_with("json-") {
             self.sync_json(win);
+        } else if which.starts_with("diff-") {
+            Self::push_diff(&self.diff, win);
         }
     }
 
@@ -1551,6 +1838,18 @@ impl Shell {
             let filter = win.get_rail_filter().to_string();
             win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &filter))));
         }
+    }
+}
+
+/// 把字节数格式成 `1.2 MB` 这种（插件卡片显示体积用）。
+fn fmt_size(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    if b >= 1024.0 * 1024.0 {
+        format!("{:.1} MB", b / (1024.0 * 1024.0))
+    } else if b >= 1024.0 {
+        format!("{:.0} KB", b / 1024.0)
+    } else {
+        format!("{bytes} B")
     }
 }
 

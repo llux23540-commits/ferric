@@ -1,16 +1,20 @@
 //! 工具视图集合与注册表。
 //!
-//! 迁移状态：`uuid` 已迁到 Slint；其余 10 个走 [`pending::PendingTool`]
-//! （侧栏照旧显示、草稿照旧保存，只是主区显示「正在迁移」）。
+//! 全部 11 个内置工具都已迁到 Slint：视图在 `ui/app.slint`，状态与业务在
+//! 各自的 `views/*.rs`。
 //!
-//! 迁完一个工具的做法：写 `views/<id>.rs`（形状参照 `views/uuid.rs`），
-//! 在 `ui/app.slint` 里加对应的视图组件与分支，然后把这里的 `pending(...)`
-//! 换成真实构造。侧栏顺序 = 此处顺序，与 egui 版一致，不要重排。
+//! 新增一个工具 = 写 `views/<id>.rs`（形状参照 `views/uuid.rs`：状态 + 业务
+//! + 索引映射 + `migrated() -> true`）+ 在 `ui/app.slint` 里加视图组件与分支
+//! + 在这里注册一行 + 在 `state.rs` 的 `Shell::with_buffer` 里加编辑区映射。
+//! 侧栏顺序 = 此处顺序，与 egui 版逐项对齐，不要重排。
+//!
+//! `every_builtin_tool_is_migrated` 守着「新工具别忘了实现视图」。
 
 mod crypto;
+mod diff;
 mod gm;
 mod json;
-mod pending;
+mod market;
 mod regex;
 mod rsa;
 mod sql;
@@ -19,9 +23,10 @@ mod uuid;
 mod yaml;
 
 pub use crypto::CryptoTool;
+pub use diff::DiffTool;
 pub use gm::GmTool;
 pub use json::JsonTool;
-pub use pending::PendingTool;
+pub use market::MarketTool;
 pub use regex::RegexTool;
 pub use rsa::RsaTool;
 pub use sql::SqlTool;
@@ -30,37 +35,12 @@ pub use uuid::UuidTool;
 pub use yaml::YamlTool;
 
 use crate::icons;
-use crate::tool::{Tool, ToolMeta};
-fn pending(
-    id: &'static str,
-    name: &'static str,
-    desc: &'static str,
-    icon: char,
-    group: &'static str,
-    keywords: &'static [&'static str],
-) -> Box<dyn Tool> {
-    Box::new(PendingTool::new(ToolMeta {
-        id,
-        name,
-        desc,
-        icon,
-        group,
-        keywords,
-    }))
-}
-
+use crate::tool::Tool;
 /// 全部工具的注册表。侧栏顺序即此顺序（与 egui 版逐项对齐）。
 pub fn registry() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(JsonTool::default()),
-        pending(
-            "diff",
-            "文本 / 文件对比",
-            "逐行 diff，差异高亮在左右面板内，左右同步滚动，载入 / 拖入文件",
-            icons::GIT_COMPARE,
-            "格式",
-            &["diff", "compare", "对比", "比较", "差异"],
-        ),
+        Box::new(DiffTool::default()),
         Box::new(TimestampTool::default()),
         // ——— 已迁移 ———
         Box::new(YamlTool::default()),
@@ -71,14 +51,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         Box::new(CryptoTool::default()),
         Box::new(GmTool::default()),
         Box::new(RegexTool::default()),
-        pending(
-            "market",
-            "插件市场",
-            "浏览并安装 WASM 插件，全部更新，签名校验",
-            icons::BOX,
-            "扩展",
-            &["plugin", "market", "插件", "市场", "扩展"],
-        ),
+        Box::new(MarketTool::default()),
     ]
 }
 
@@ -123,16 +96,17 @@ mod tests {
     }
 
     #[test]
-    fn migrated_set_is_explicit() {
-        let migrated: Vec<&str> = registry()
+    fn every_builtin_tool_is_migrated() {
+        // 迁移收尾的守门人：内置工具**全部**已有 Slint 视图。
+        // 将来新增工具若忘了实现视图，这条会红。
+        let pending: Vec<&str> = registry()
             .iter()
-            .filter(|t| t.migrated())
+            .filter(|t| !t.migrated())
             .map(|t| t.meta().id)
             .collect();
-        assert_eq!(
-            migrated,
-            vec!["json", "timestamp", "yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
-            "迁完一个就在这里加一项"
+        assert!(
+            pending.is_empty(),
+            "这些内置工具还没有 Slint 视图：{pending:?}"
         );
     }
 }
