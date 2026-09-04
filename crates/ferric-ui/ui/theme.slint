@@ -1,0 +1,53 @@
+// 设计令牌（亮 / 暗），逐值对齐原 theme.rs（egui 时代的 index.html 色板）。
+// 迁 Slint 后主题不再走 egui Visuals，而是一个 global：所有组件读 Theme.xxx，
+// 深浅色由 Rust 侧把 `dark` 灌进来，一处切换全局生效。
+
+export global Theme {
+    // Rust 侧写入：true = 暗色。默认亮色（与 Persist.dark 默认一致）。
+    in-out property <bool> dark: false;
+
+    // ——— 底色 ———
+    out property <color> canvas: dark ? #0e1116 : #eceef1;
+    out property <color> bg: dark ? #181c22 : #ffffff;
+    out property <color> rail: dark ? #1b2027 : #ffffff;
+    out property <color> titlebar: dark ? #1b2027 : #ffffff;
+
+    // ——— 文字 ———
+    out property <color> fg: dark ? #eef1f4 : #20272e;
+    out property <color> fg-soft: dark ? #cbd2d9 : #3d4650;
+    out property <color> muted: dark ? #8b949e : #6b747d;
+    out property <color> faint: dark ? #626c76 : #9aa2ab;
+
+    // ——— 线与面 ———
+    // 暗色的 border/border-2 原本是白色低 alpha；Slint 的 color 支持 rgba()。
+    out property <color> border: dark ? rgba(255, 255, 255, 0.07) : #ebedf0;
+    out property <color> border-2: dark ? rgba(255, 255, 255, 0.11) : #e0e3e7;
+    out property <color> field: dark ? #12161b : #ffffff;
+    out property <color> field-bd: dark ? rgba(255, 255, 255, 0.12) : #d8dce1;
+    out property <color> code-bg: dark ? #12161b : #f7f8fa;
+
+    // ——— 主色 ———
+    out property <color> accent: dark ? #2bb56a : #18a058;
+    out property <color> accent-strong: dark ? #39c176 : #14894b;
+    out property <color> accent-soft: dark ? rgba(43, 181, 106, 0.15) : #e9f6ee;
+    out property <color> accent-ring: dark ? rgba(43, 181, 106, 0.25) : rgba(24, 160, 88, 0.18);
+
+    // ——— 语义色 ———
+    out property <color> ok: dark ? #2bb56a : #18a058;
+    out property <color> danger: dark ? #e06b67 : #d9534f;
+
+    // ——— diff 行内标记 ———
+    out property <color> add-bg: dark ? rgba(43, 181, 106, 0.13) : #e7f6ec;
+    out property <color> add-mark: dark ? rgba(43, 181, 106, 0.33) : #b8e6c6;
+    out property <color> del-bg: dark ? rgba(224, 107, 103, 0.14) : #fdecec;
+    out property <color> del-mark: dark ? rgba(224, 107, 103, 0.33) : #f6c9c7;
+
+    // ——— 字体族（与 fonts.rs 的命名族对齐；stem = TTF 文件名） ———
+    out property <string> font-ui: "PlusJakartaSans-Regular";
+    out property <string> font-ui-medium: "PlusJakartaSans-Medium";
+    out property <string> font-ui-semibold: "PlusJakartaSans-SemiBold";
+    out property <string> font-ui-bold: "PlusJakartaSans-Bold";
+    out property <string> font-mono: "JetBrainsMono-Regular";
+    out property <string> font-mono-medium: "JetBrainsMono-Medium";
+    out property <string> font-icons: "lucide";
+}

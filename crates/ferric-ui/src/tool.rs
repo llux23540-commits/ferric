@@ -1,10 +1,16 @@
-//! 工具抽象与共享上下文。
+//! 工具抽象与共享上下文（Slint 版）。
 //!
-//! 每个工具实现 [`Tool`]，[`FerricApp`](crate::FerricApp) 持有
-//! `Vec<Box<dyn Tool>>`，由此统一驱动侧边栏、搜索、收藏与路由。
-//! 新增工具 = 加一个 `views/*.rs` + 在 `views::registry()` 注册一行。
+//! 与 egui 时代的关键差别：`Tool` 不再有 `ui(&mut egui::Ui)` —— 视图层搬到
+//! `.slint` 里，Rust 侧只负责**状态与业务**。每个工具：
+//!
+//! - `meta()` 提供侧栏所需的元信息（id / 名称 / 描述 / 图标 / 分组）；
+//! - `save_draft()` / `load_draft()` 维持原有的草稿持久化契约（格式不变，
+//!   所以老用户的 `drafts` 数据在迁移后仍然读得出来）;
+//! - `migrated()` 标记该工具的 Slint 视图是否已就绪。未就绪的在界面上显示
+//!   「正在迁移」占位，但**状态与草稿照旧保留**，迁完即接上。
+//!
+//! 具体的输入/输出绑定由外壳（`state.rs`）按工具 id 分派到对应的 Slint property。
 
-use crate::theme::Theme;
 use serde::{Deserialize, Serialize};
 
 /// 界面语言（轻量 i18n）。
@@ -16,144 +22,115 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// 折叠摘要的「N 节点 / N node(s)」用词（英文含复数）。
-    #[allow(dead_code)]
-    pub fn nodes(self, n: usize) -> String {
+    pub fn label(self) -> &'static str {
         match self {
-            Lang::Zh => format!("{n} 节点"),
-            Lang::En if n == 1 => "1 node".to_owned(),
-            Lang::En => format!("{n} nodes"),
+            Lang::Zh => "中文",
+            Lang::En => "English",
         }
     }
 
-    /// 当前语言的短标签（用于切换按钮）。
-    pub fn short(self) -> &'static str {
+    /// 双语取串：中文界面取 `zh`，英文取 `en`。
+    pub fn pick(self, zh: &'static str, en: &'static str) -> &'static str {
         match self {
-            Lang::Zh => "中",
-            Lang::En => "EN",
-        }
-    }
-
-    /// 切换到另一种语言。
-    pub fn toggled(self) -> Lang {
-        match self {
-            Lang::Zh => Lang::En,
-            Lang::En => Lang::Zh,
+            Lang::Zh => zh,
+            Lang::En => en,
         }
     }
 }
 
 /// 工具元信息（用于侧栏、搜索、标题）。
+#[derive(Clone, Copy)]
 pub struct ToolMeta {
     pub id: &'static str,
     pub name: &'static str,
-    pub group: &'static str,
     pub desc: &'static str,
-    /// 侧栏 / 顶栏图标（Lucide 字形，见 [`crate::icons`]）。
+    /// Lucide 图标字符（见 `crate::icons`）。
     pub icon: char,
+    /// 侧栏分组标签。
+    pub group: &'static str,
+    /// 搜索关键词（侧栏搜索除名称/描述外也匹配这里，命中英文名与别名）。
     pub keywords: &'static [&'static str],
 }
 
-/// 跨工具共享的运行时上下文。
-pub struct Shared {
-    pub theme: Theme,
-    pub toasts: Vec<Toast>,
-    /// 内容区可用高度（由外壳在进入滚动区前测得，供需要铺满高度的工具使用）。
-    pub content_height: f32,
-    /// 界面语言。
-    pub lang: Lang,
-    /// 当前生效的插件/更新数据源（真服务端或演示数据）。None = 两者都没有。
-    /// 由外壳每帧写入，供插件市场视图使用。
-    pub source: Option<crate::source::Source>,
-    /// 请求外壳热加载插件（装完 / 卸完置位）。
-    ///
-    /// 为什么不由视图自己重建：此刻正在 `self.tools[i].ui()` 里面，
-    /// 那个向量的元素正被借着，谁也不能在这里改它。外壳在本帧渲染结束后处理。
-    pub reload_plugins: bool,
-    /// 代码编辑区的排版（字号 / 字重 / 行距）。
-    ///
-    /// 放在 Shared 而不是各工具自己存：设置面板与 JSON 工具条上的字体菜单改的是
-    /// **同一份**配置 —— 两个入口各存一份的话，用户从哪边改都只对一半界面生效。
-    pub code_font: crate::widgets::FontCfg,
-    /// 当前跑在软件光栅化（WARP / llvmpipe）上 —— 虚拟机与无驱动环境。
-    /// 外壳启动时探测一次；视图可据此收敛大范围渐变这类软渲染下会糊的效果。
-    pub gpu_software: bool,
-}
-
-impl Shared {
-    pub fn new(theme: Theme) -> Self {
-        Self {
-            theme,
-            toasts: Vec::new(),
-            content_height: 0.0,
-            lang: Lang::default(),
-            source: None,
-            reload_plugins: false,
-            code_font: Default::default(),
-            gpu_software: false,
-        }
-    }
-
-    /// 弹一条提示。
-    pub fn toast(&mut self, msg: impl Into<String>) {
-        self.toasts.push(Toast::new(msg.into()));
-    }
-
-    /// 复制文本到剪贴板并提示。
-    pub fn copy(&mut self, ctx: &egui::Context, text: impl Into<String>) {
-        let text = text.into();
-        ctx.copy_text(text);
-        self.toast("已复制");
-    }
-}
-
-/// 短暂提示。以帧计时，避免依赖 `Instant`（便于跨平台与测试）。
-/// 提示条的存活时长。
+/// 短暂提示的存活时长。
 ///
-/// ⚠️ **必须是时间，不能是帧数**。这里原本是 `frames_left: 120`，配合每帧
-/// `request_repaint()`，效果是「提示在的时候界面按满帧率狂转」：
-/// - 有硬件 GPU 的机器 60fps 跑完 120 帧 = 2 秒，看不出问题；
-/// - 软件光栅化（Windows 的 WARP、Linux 的 llvmpipe）只跑得动 8fps，
-///   同样 120 帧要 **15 秒**，而这 15 秒里整窗都在被 CPU 重画。
-///
-/// 也就是说机器越慢、风暴越久 —— 正反馈。这正是「Windows 打开就很卡、
-/// Linux 没事」的直接来源（实测归因见 `FerricApp::toasts_ui`）。
+/// ⚠️ **必须是时间，不能是帧数** —— egui 时代这里踩过坑：帧数计时在软件光栅化
+/// （8fps）的机器上会把 2 秒的提示拖成 15 秒，且那 15 秒整窗都在重画。
+/// Slint 是 retained mode，不存在「提示在就满帧率转」的问题，但语义仍保持时间。
 pub const TOAST_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub struct Toast {
-    pub msg: String,
-    /// 到期时刻。用 `Instant` 而不是 egui 的 `input.time`：这里拿不到 `Context`，
-    /// 而且单调时钟不受系统改时间影响。
-    pub until: std::time::Instant,
+    pub text: String,
+    pub born: std::time::Instant,
 }
 
 impl Toast {
-    fn new(msg: String) -> Self {
+    pub fn new(text: impl Into<String>) -> Self {
         Self {
-            msg,
-            until: std::time::Instant::now() + TOAST_TTL,
+            text: text.into(),
+            born: std::time::Instant::now(),
         }
+    }
+
+    /// 是否已过期该移除。
+    pub fn expired(&self) -> bool {
+        self.born.elapsed() >= TOAST_TTL
+    }
+}
+
+/// 跨工具共享的运行时上下文。
+///
+/// egui 时代它还带着 `Theme`（每帧传给视图画东西）；Slint 里主题是 `.slint`
+/// 的 global，Rust 只需要把 `dark` 灌进去，所以这里不再持有 Theme。
+#[derive(Default)]
+pub struct Shared {
+    pub lang: Lang,
+    /// 是否为软件渲染（Slint software renderer 恒为真）。
+    pub gpu_software: bool,
+    /// 待显示的提示队列。
+    pub toasts: Vec<Toast>,
+    /// 剪贴板请求：外壳在下一次同步时消费并写进系统剪贴板。
+    pub clipboard: Option<String>,
+}
+
+impl Shared {
+    pub fn new() -> Self {
+        Self {
+            gpu_software: true,
+            ..Default::default()
+        }
+    }
+
+    /// 排一条提示。
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.toasts.push(Toast::new(text));
+    }
+
+    /// 请求把文本写进系统剪贴板（由外壳执行 —— Slint 的剪贴板 API 需要窗口句柄）。
+    pub fn copy(&mut self, text: impl Into<String>) {
+        self.clipboard = Some(text.into());
+    }
+
+    /// 丢掉过期提示。外壳每次同步时调一次。
+    pub fn prune_toasts(&mut self) {
+        self.toasts.retain(|t| !t.expired());
     }
 }
 
 pub trait Tool {
     fn meta(&self) -> ToolMeta;
-    fn ui(&mut self, ui: &mut egui::Ui, shared: &mut Shared);
 
-    /// 是否在顶栏下方显示描述（page-intro）。默认显示。
-    fn show_desc(&self) -> bool {
-        true
-    }
-
-    /// 是否铺满内容区（标题左对齐、内容不按 1080 列居中）。默认按列居中。
-    fn full_bleed(&self) -> bool {
+    /// 该工具的 Slint 视图是否已就绪。
+    ///
+    /// `false` = 界面显示「正在迁移到 Slint」占位。业务逻辑与草稿仍然完整保留，
+    /// 迁完视图即可翻成 `true`，不需要动状态层。
+    fn migrated(&self) -> bool {
         false
     }
 
-    /// 在顶栏标题右侧渲染的工具专属操作（如 JSON 工具条）。默认无。
-    fn header_actions(&mut self, _ui: &mut egui::Ui, _shared: &mut Shared) {}
-
     /// 序列化当前输入草稿以便持久化；返回 `None` 表示该工具不持久化。
+    ///
+    /// ⚠️ 格式与 egui 版**保持一致** —— 老用户升级后草稿不能丢。
     fn save_draft(&self) -> Option<String> {
         None
     }

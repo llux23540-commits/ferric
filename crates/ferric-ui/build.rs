@@ -80,6 +80,20 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     bake_update_pins();
+
+    // 编译 Slint UI：ui/app.slint（会连带 theme.slint / widgets.slint）。
+    //
+    // ⚠️ 刻意**不用** `EmbedResourcesKind::EmbedForSoftwareRenderer`：那个模式会在
+    // 编译期把每个字形预光栅化进二进制（为 MCU 省运行时开销），但它在 Lucide
+    // 图标字体上直接 panic —— `embed_glyphs.rs:494` 的
+    // `large glyph y coordinate: TryFromIntError(PosOverflow)`（图标字形的
+    // 坐标超出它假定的 i16 范围）。默认的资源嵌入照样把 TTF 打进二进制，
+    // 只是字形在运行时按需光栅化，对桌面端毫无问题。
+    slint_build::compile_with_config(
+        "ui/app.slint",
+        slint_build::CompilerConfiguration::new().with_style("fluent".into()),
+    )
+    .expect("Slint UI 编译失败");
 }
 
 /// 把「更新服务器身份」烘进二进制。

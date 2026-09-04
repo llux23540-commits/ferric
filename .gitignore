@@ -6,3 +6,6 @@ Cargo.lock.orig
 /dist
 /packages
 /.codewhale
+
+# 迁移期的 egui 版源码备份与验证截图（本地参考，不入库）
+.migration-backup/

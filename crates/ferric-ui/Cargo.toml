@@ -7,28 +7,38 @@ license.workspace = true
 
 [dependencies]
 ferric-core = { workspace = true }
-eframe = { workspace = true }
-egui = { workspace = true }
-egui-rope-editor = { workspace = true }
-egui_json_tree = { workspace = true }
+
+# GUI: 从 eframe/egui 切到 Slint 1.17。Software renderer 是默认 + 无 GPU 兜底，
+# 完整保留 ferric 之前的「任何机器都能跑」承诺。
+slint = { version = "1.17", default-features = false, features = ["renderer-software", "backend-winit", "std", "libm", "image-default-formats", "software-renderer-systemfonts", "compat-1-2"] }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono-tz = { workspace = true }
+uuid = { workspace = true }
 rfd = { workspace = true }
-wasmtime = "27.0.0"
 directories.workspace = true
 libsm = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 ropey = { workspace = true }
-# mem.rs 的 Windows 分支用 psapi GetProcessMemoryInfo。feature 子集收窄到 ProcessStatus + 必备 Foundation/Threading。
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 chrono = { workspace = true }
 
-# Windows 用系统 schannel（纯系统 API，不需要 C 编译器），彻底把 ring 从依赖树里
-# 摘掉 —— 这样 Windows 本地编译不再需要 MSVC 的 C 工具链（ring 编译 C/汇编是唯一
-# 需要它的地方）。其他平台保持 rustls（ring），CI 上工具链齐全，不受影响。
+# 保留 wasmtime（plugin_host 不动）+ ferric-core 的全部加密 / 序列化能力。
+wasmtime = "27.0.0"
+
+# 移除（迁到 Slint 后不再需要）：
+# - eframe / egui：UI 框架本身
+# - egui-rope-editor：绑 egui，Slint 用 Slint::TextEdit 替代（损失 Rope 增量），
+#   留给后续 phase 处理
+# - egui_json_tree：同上
+# - ropey：暂保留以备后续 JSON 大文件 Rope 复刻阶段
+
+[build-dependencies]
+slint-build = "1.17"
+
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
 

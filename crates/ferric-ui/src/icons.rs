@@ -1,20 +1,11 @@
-//! Lucide 图标字体的字形常量与辅助。
+//! Lucide 图标字体的字形常量。
 //!
 //! 码点对照 Lucide `info.json`（`lucide-static`），与设计原型所用图标一致。
-//! 用 [`text`] 生成一段图标 `RichText`，以 [`crate::fonts::LUCIDE_FAMILY`] 族渲染。
+//! Slint 侧用 `font-family: "lucide"`（见 `ui/theme.slint` 的 `font-icons`）
+//! 加上这里的字符渲染图标；Rust 侧只提供常量，不再构造富文本。
 
-use crate::fonts::LUCIDE_FAMILY;
-use egui::{Color32, FontFamily, RichText};
-
-/// Lucide 图标字体族。
-pub fn family() -> FontFamily {
-    FontFamily::Name(LUCIDE_FAMILY.into())
-}
-
-/// 生成一个图标 `RichText`（指定字号与颜色）。
-pub fn text(ch: char, size: f32, color: Color32) -> RichText {
-    RichText::new(ch).family(family()).size(size).color(color)
-}
+/// Lucide 图标字体族名。与 `ui/theme.slint` 的 `font-icons` 必须一致。
+pub const FAMILY: &str = crate::fonts::LUCIDE_FAMILY;
 
 // ---- 字形常量（对照 Lucide info.json）----
 pub const CODE: char = '\u{e093}';

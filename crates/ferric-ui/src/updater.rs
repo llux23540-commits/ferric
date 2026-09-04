@@ -166,13 +166,7 @@ impl Updater {
     /// - `auto`：设置里的「自动检查并后台下载」开关。
     /// - `stale`：距上次成功检查是否已超过 [`AUTO_CHECK_INTERVAL_SECS`]，
     ///   由外壳依据持久化的时间戳判断（跨启动节流，否则每开一次应用就查一次）。
-    pub fn tick(
-        &mut self,
-        ctx: &egui::Context,
-        source: Option<&Source>,
-        auto: bool,
-        stale: bool,
-    ) -> Tick {
+    pub fn tick(&mut self, now: f64, source: Option<&Source>, auto: bool, stale: bool) -> Tick {
         let Some(src) = source else {
             return Tick::Nothing;
         };
@@ -182,16 +176,15 @@ impl Updater {
 
         // ① 到点自动检查（只在完全空闲、且这一轮还没查过的时候）
         if stale && self.rx.is_none() && matches!(self.phase, Phase::Idle) {
-            let now = ctx.input(|i| i.time);
             let due = *self
                 .auto_check_at
                 .get_or_insert(now + FIRST_CHECK_DELAY_SECS);
             if now >= due {
-                self.check(src.clone(), ctx);
-            } else {
-                // 空闲时应用是不出帧的，必须约好那一刻醒过来，否则这次检查永远不发生
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(due - now));
+                self.check(src.clone());
             }
+            // Slint 是 retained mode：不需要预约「醒点」。到点由外壳的定时器
+            // 再调一次 tick 即可（egui 时代必须 request_repaint_after，
+            // 否则空闲不出帧、这次检查永远不发生）。
         }
 
         // ② 发现新版 → 后台下载。只对可信来源自动下载：自定义更新源可能是
@@ -204,7 +197,7 @@ impl Updater {
         };
         if let Some(info) = to_download {
             self.auto_downloaded = true;
-            self.download(src.clone(), info, ctx);
+            self.download(src.clone(), info);
         }
 
         // ③ 就绪 → 通知一次
@@ -220,36 +213,29 @@ impl Updater {
     }
 
     /// 启动一次检查。UI 线程只负责起线程，SM2 标量乘法绝不能放主线程。
-    pub fn check(&mut self, source: Source, ctx: &egui::Context) {
+    pub fn check(&mut self, source: Source) {
         if self.busy() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let ctx = ctx.clone();
         std::thread::spawn(move || {
             let r = check_blocking(&source);
             let _ = tx.send(Msg::Checked(Box::new(r)));
-            ctx.request_repaint();
         });
         self.rx = Some(rx);
         self.phase = Phase::Checking;
     }
 
     /// 下载 + 校验 + 验签。只在内置服务器下允许调用（自定义服务器降级为仅通知）。
-    pub fn download(&mut self, source: Source, info: ReleaseInfo, ctx: &egui::Context) {
+    pub fn download(&mut self, source: Source, info: ReleaseInfo) {
         if self.busy() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let ctx2 = ctx.clone();
         std::thread::spawn(move || {
             let tx2 = tx.clone();
             let r = download_blocking(&source, &info, &mut |done, total| {
                 let _ = tx2.send(Msg::Progress { done, total });
-                // 节流：每块数据到达都立即 request_repaint 会把界面拖进 30+fps 的
-                // 重绘风暴（软件渲染机器整机变卡，实测归因至此行）。
-                // repaint_after 会把多次请求合并成一个醒点，间隔见 PROGRESS_BEAT。
-                ctx2.request_repaint_after(PROGRESS_BEAT);
             });
             match r {
                 Ok(path) => {
@@ -259,14 +245,17 @@ impl Updater {
                     let _ = tx.send(Msg::Failed(e));
                 }
             }
-            ctx2.request_repaint();
         });
         self.rx = Some(rx);
         self.phase = Phase::Downloading { done: 0, total: 0 };
     }
 
-    /// 每帧调用（`App::ui` 顶层）。用 `request_repaint_after` 而非死循环重绘。
-    pub fn poll(&mut self, ctx: &egui::Context) {
+    /// 收取后台线程的消息。由外壳的定时器周期性调用。
+    ///
+    /// egui 时代这里还要 `request_repaint_after` 安排下一次醒点（立即模式下
+    /// 不出帧就等于状态不更新）。Slint 只要 property 变了就会重画脏区域，
+    /// 所以这个函数纯粹是「把消息搬进 phase」。
+    pub fn poll(&mut self) {
         let Some(rx) = &self.rx else { return };
         loop {
             match rx.try_recv() {
@@ -300,18 +289,7 @@ impl Updater {
                     self.rx = None;
                     return;
                 }
-                Err(TryRecvError::Empty) => {
-                    // 只是「还没有新消息」。按阶段决定下一次醒点：
-                    // - 下载中：界面上有个百分比在变，按 PROGRESS_BEAT 醒；
-                    // - 检查中：界面上**什么都没变**（纯网络往返），不该重绘，
-                    //   走 IDLE_BEAT 兜底即可 —— 结果到达时线程会主动叫醒我们。
-                    // 此前一律 120ms，等于整个检查+下载期间界面都被钉在 8fps。
-                    ctx.request_repaint_after(match self.phase {
-                        Phase::Downloading { .. } => PROGRESS_BEAT,
-                        _ => IDLE_BEAT,
-                    });
-                    return;
-                }
+                Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
                     self.phase = Phase::Failed("更新线程意外中断".into());
                     self.rx = None;
@@ -755,7 +733,6 @@ fn launch_command(os: &str, ext: &str, file: &Path) -> Result<std::process::Comm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RunUiExt;
 
     /// 扩展名白名单必须按平台严格限制 —— 它决定了我们怎么执行下载到的文件。
     #[test]
@@ -853,17 +830,6 @@ mod tests {
         assert!(!my_version().is_empty());
     }
 
-    /// 把 egui 的时间轴推到 `t`（`tick` 里读的是上一帧的 `input().time`）。
-    fn frame_at(ctx: &egui::Context, t: f64) {
-        let _ = ctx.run_ui_cleared(
-            egui::RawInput {
-                time: Some(t),
-                ..Default::default()
-            },
-            |_| {},
-        );
-    }
-
     fn custom_server() -> Source {
         Source::Server(ServerProfile {
             base_url: "http://127.0.0.1:1/api/v1".into(),
@@ -877,37 +843,26 @@ mod tests {
     /// 检查更新会把本机版本号发给服务器，关了就必须是真的关了。
     #[test]
     fn auto_pipeline_stays_idle_when_disabled_or_sourceless() {
-        let ctx = egui::Context::default();
-        frame_at(&ctx, 100.0);
-
         let mut u = Updater::default();
-        assert_eq!(
-            u.tick(&ctx, Some(&Source::Mock), false, true),
-            Tick::Nothing
-        );
+        assert_eq!(u.tick(100.0, Some(&Source::Mock), false, true), Tick::Nothing);
         assert!(matches!(u.phase, Phase::Idle), "关掉开关后仍然发起了检查");
 
         let mut u = Updater::default();
-        assert!(matches!(u.tick(&ctx, None, true, true), Tick::Nothing));
+        assert!(matches!(u.tick(100.0, None, true, true), Tick::Nothing));
         assert!(matches!(u.phase, Phase::Idle), "没有数据源却发起了检查");
 
         // 距上次检查还不够久 → 这一轮不查（跨启动节流）
         let mut u = Updater::default();
-        assert_eq!(
-            u.tick(&ctx, Some(&Source::Mock), true, false),
-            Tick::Nothing
-        );
+        assert_eq!(u.tick(100.0, Some(&Source::Mock), true, false), Tick::Nothing);
         assert!(matches!(u.phase, Phase::Idle), "节流期内不该发起检查");
     }
 
     /// 自动检查要**延后**到启动之后一小会儿，别和首屏抢资源；到点了才真的查。
     #[test]
     fn auto_check_waits_a_moment_after_launch() {
-        let ctx = egui::Context::default();
-        frame_at(&ctx, 0.0);
         let mut u = Updater::default();
 
-        u.tick(&ctx, Some(&Source::Mock), true, true);
+        u.tick(0.0, Some(&Source::Mock), true, true);
         assert!(matches!(u.phase, Phase::Idle), "刚启动就查了，太急");
         assert_eq!(
             u.auto_check_at,
@@ -916,8 +871,7 @@ mod tests {
         );
 
         // 时间推过去 → 应当真的发起检查
-        frame_at(&ctx, FIRST_CHECK_DELAY_SECS + 1.0);
-        u.tick(&ctx, Some(&Source::Mock), true, true);
+        u.tick(FIRST_CHECK_DELAY_SECS + 1.0, Some(&Source::Mock), true, true);
         assert!(matches!(u.phase, Phase::Checking), "到点了却没发起检查");
     }
 
@@ -925,13 +879,11 @@ mod tests {
     /// 用户点的时候东西已经在盘上了，不必现等几十 MB。
     #[test]
     fn a_found_update_starts_downloading_in_the_background() {
-        let ctx = egui::Context::default();
-        frame_at(&ctx, 100.0);
         let mut u = Updater {
             phase: Phase::Available(crate::mock::latest_release()),
             ..Default::default()
         };
-        u.tick(&ctx, Some(&Source::Mock), true, false);
+        u.tick(100.0, Some(&Source::Mock), true, false);
         assert!(
             matches!(u.phase, Phase::Downloading { .. }),
             "发现新版却没有开始后台下载：{:?}",
@@ -944,19 +896,14 @@ mod tests {
             auto_downloaded: true,
             ..Default::default()
         };
-        u2.tick(&ctx, Some(&Source::Mock), true, false);
-        assert!(
-            matches!(u2.phase, Phase::Available(_)),
-            "自动下载重复触发了"
-        );
+        u2.tick(100.0, Some(&Source::Mock), true, false);
+        assert!(matches!(u2.phase, Phase::Available(_)), "自动下载重复触发了");
     }
 
     /// 自定义更新源**不许**后台自动下载 —— 那个地址可能是用户被诱导改的，
     /// 让它在后台往盘上拉东西是不可接受的（手动按钮仍然可用，且不会自动安装）。
     #[test]
     fn a_custom_source_never_downloads_by_itself() {
-        let ctx = egui::Context::default();
-        frame_at(&ctx, 100.0);
         let src = custom_server();
         assert!(!src.allows_auto_download());
 
@@ -964,7 +911,7 @@ mod tests {
             phase: Phase::Available(crate::mock::latest_release()),
             ..Default::default()
         };
-        u.tick(&ctx, Some(&src), true, false);
+        u.tick(100.0, Some(&src), true, false);
         assert!(
             matches!(u.phase, Phase::Available(_)),
             "自定义源竟然自动下载了：{:?}",
@@ -972,11 +919,9 @@ mod tests {
         );
     }
 
-    /// 就绪只通知一次，不能每帧弹一遍。
+    /// 就绪只通知一次，不能反复弹。
     #[test]
     fn ready_notifies_exactly_once() {
-        let ctx = egui::Context::default();
-        frame_at(&ctx, 100.0);
         let mut u = Updater {
             phase: Phase::Ready {
                 info: crate::mock::latest_release(),
@@ -985,15 +930,12 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            u.tick(&ctx, Some(&Source::Mock), true, false),
+            u.tick(100.0, Some(&Source::Mock), true, false),
             Tick::ReadyToInstall { .. }
         ));
         for _ in 0..5 {
             assert!(
-                matches!(
-                    u.tick(&ctx, Some(&Source::Mock), true, false),
-                    Tick::Nothing
-                ),
+                matches!(u.tick(100.0, Some(&Source::Mock), true, false), Tick::Nothing),
                 "已就绪的提示重复弹了"
             );
         }

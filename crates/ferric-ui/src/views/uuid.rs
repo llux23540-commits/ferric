@@ -1,18 +1,21 @@
-//! UUID 生成器视图（v4 / v7 / v5 命名 / v6）。
+//! UUID 生成器（v4 / v7 / v5 命名 / v6）—— 已完整迁移到 Slint。
+//!
+//! 视图在 `ui/app.slint` 的 `UuidView`；这里只有状态与业务。生成逻辑全在
+//! `ferric_core::idgen`（无 GUI 依赖，带单测），迁 GUI 框架时完全没动过。
 
-use crate::tool::{Shared, Tool, ToolMeta};
-use crate::{icons, widgets};
-use egui::{ComboBox, RichText, Ui};
+use crate::icons;
+use crate::tool::{Tool, ToolMeta};
 use ferric_core::idgen::{self, IdKind, Namespace, Opts};
 use serde::{Deserialize, Serialize};
 
-/// 执行记录保留条数的可选档位。
-const KEEP_OPTS: [i64; 4] = [3, 5, 10, 20];
+/// 执行记录保留条数的可选档位（对应 Slint 里的 Segmented 索引）。
+pub const KEEP_OPTS: [i64; 4] = [3, 5, 10, 20];
 
 fn default_hist_keep() -> i64 {
     3
 }
 
+/// 草稿格式与 egui 版**逐字段一致** —— 老用户升级后 UUID 工具的设置不会丢。
 #[derive(Serialize, Deserialize)]
 struct UuidDraft {
     kind: IdKind,
@@ -27,27 +30,27 @@ struct UuidDraft {
     hist_keep: i64,
 }
 
-struct HistEntry {
-    label: String,
-    body: String,
+pub struct HistEntry {
+    pub label: String,
+    pub body: String,
 }
 
 pub struct UuidTool {
-    kind: IdKind,
-    count: i64,
-    namespace: Namespace,
-    custom_ns: String,
-    name: String,
-    upper: bool,
-    nohyphen: bool,
-    as_json: bool,
-    output: String,
-    ok: bool,
-    status: String,
-    history: Vec<HistEntry>,
+    pub kind: IdKind,
+    pub count: i64,
+    pub namespace: Namespace,
+    pub custom_ns: String,
+    pub name: String,
+    pub upper: bool,
+    pub nohyphen: bool,
+    pub as_json: bool,
+    pub output: String,
+    pub ok: bool,
+    pub status: String,
+    pub history: Vec<HistEntry>,
     counter: u32,
     /// 执行记录保留条数（3/5/10/20 档位，随草稿持久化）。
-    hist_keep: i64,
+    pub hist_keep: i64,
 }
 
 impl Default for UuidTool {
@@ -87,8 +90,8 @@ impl UuidTool {
         }
     }
 
-    fn regen(&mut self) {
-        // 生成失败（如无效自定义命名空间）时不覆盖输出、不记历史，只报状态。
+    /// 重新生成。失败（如自定义命名空间非法）时不覆盖输出、不记历史，只报状态。
+    pub fn regen(&mut self) {
         match idgen::generate(&self.opts()) {
             Ok(items) => {
                 self.output = if self.as_json {
@@ -106,7 +109,7 @@ impl UuidTool {
             }
         }
         self.counter = self.counter.wrapping_add(1);
-        // 记入历史：history[0] 是当前这次，其后保留最近 hist_keep 次
+        // history[0] 是当前这次，其后保留最近 hist_keep 次
         let label = format!(
             "{} · {} 个 · #{}",
             self.kind.label(),
@@ -123,6 +126,63 @@ impl UuidTool {
         self.history
             .truncate(1 + self.hist_keep.clamp(1, 20) as usize);
     }
+
+    /// 把某条历史恢复成当前输出（不重新生成 —— 用户要的就是那一次的结果）。
+    pub fn restore(&mut self, idx: usize) -> bool {
+        match self.history.get(idx) {
+            Some(h) => {
+                self.output = h.body.clone();
+                self.status = format!("已恢复：{}", h.label);
+                self.ok = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    // ——— Slint 侧用索引表达枚举，这里做双向映射 ———
+
+    pub fn kind_index(&self) -> i32 {
+        IdKind::ALL
+            .iter()
+            .position(|k| *k == self.kind)
+            .unwrap_or(0) as i32
+    }
+
+    pub fn set_kind_index(&mut self, i: i32) {
+        if let Some(k) = IdKind::ALL.get(i.max(0) as usize) {
+            self.kind = *k;
+        }
+    }
+
+    pub fn namespace_index(&self) -> i32 {
+        Namespace::ALL
+            .iter()
+            .position(|n| *n == self.namespace)
+            .unwrap_or(0) as i32
+    }
+
+    pub fn set_namespace_index(&mut self, i: i32) {
+        if let Some(n) = Namespace::ALL.get(i.max(0) as usize) {
+            self.namespace = *n;
+        }
+    }
+
+    pub fn hist_keep_index(&self) -> i32 {
+        KEEP_OPTS
+            .iter()
+            .position(|k| *k == self.hist_keep)
+            .unwrap_or(0) as i32
+    }
+
+    pub fn set_hist_keep_index(&mut self, i: i32) {
+        if let Some(k) = KEEP_OPTS.get(i.max(0) as usize) {
+            self.hist_keep = *k;
+            // 档位调小时立刻裁掉多余记录，别让界面显示比设置更多的行。
+            self.history
+                .truncate(1 + self.hist_keep.clamp(1, 20) as usize);
+        }
+    }
 }
 
 impl Tool for UuidTool {
@@ -130,213 +190,15 @@ impl Tool for UuidTool {
         ToolMeta {
             id: "uuid",
             name: "UUID 生成器",
+            desc: "UUID v4 / v7 / v6 / v5（命名空间），大小写 / 无连字符，Raw / JSON，执行历史",
+            icon: icons::CREDIT_CARD,
             group: "生成",
-            desc: "生成 UUID —— 支持 v4（随机）、v7 / v6（时间有序）、v5（命名空间 + 名称）。",
-            icon: crate::icons::CREDIT_CARD,
             keywords: &["uuid", "guid", "v4", "v5", "v7", "生成", "标识符"],
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
-        let theme = shared.theme;
-
-        // 版本
-        widgets::field_label(ui, &theme, "版本");
-        ui.add_space(4.0);
-        let labels: Vec<&str> = IdKind::ALL.iter().map(|k| k.label()).collect();
-        let cur = IdKind::ALL
-            .iter()
-            .position(|k| *k == self.kind)
-            .unwrap_or(0);
-        ui.horizontal(|ui| {
-            if let Some(n) = widgets::seg(ui, &theme, &labels, cur) {
-                self.kind = IdKind::ALL[n];
-                self.regen();
-            }
-        });
-        ui.add_space(10.0);
-
-        // 数量
-        widgets::field_label(ui, &theme, "数量");
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if widgets::num_field(ui, &theme, &mut self.count, 1, 1000, 1) {
-                self.regen();
-            }
-        });
-        ui.add_space(10.0);
-
-        // 命名空间（仅 v5）
-        if self.kind.is_named() {
-            widgets::field_label(ui, &theme, "命名");
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ComboBox::from_id_salt("uuid-ns")
-                    .selected_text(self.namespace.label())
-                    .show_ui(ui, |ui| {
-                        for ns in Namespace::ALL {
-                            if ui
-                                .selectable_value(&mut self.namespace, ns, ns.label())
-                                .clicked()
-                            {
-                                self.regen();
-                            }
-                        }
-                    });
-                if self.namespace == Namespace::Custom
-                    && ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.custom_ns)
-                                .desired_width(260.0)
-                                .hint_text("自定义命名空间 UUID"),
-                        )
-                        .changed()
-                {
-                    self.regen();
-                }
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                widgets::field_label(ui, &theme, "名称");
-                ui.add_space(6.0);
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.name)
-                            .desired_width(300.0)
-                            .hint_text("名称，如 example.com"),
-                    )
-                    .changed()
-                {
-                    self.regen();
-                }
-            });
-            ui.add_space(10.0);
-        }
-
-        // 格式
-        widgets::field_label(ui, &theme, "格式");
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let fmt = if self.as_json { 1 } else { 0 };
-            if let Some(n) = widgets::seg(ui, &theme, &["Raw", "JSON"], fmt) {
-                self.as_json = n == 1;
-                self.regen();
-            }
-            ui.add_space(10.0);
-            if widgets::pill_toggle(ui, &theme, self.upper, "大写") {
-                self.upper = !self.upper;
-                self.regen();
-            }
-            if widgets::pill_toggle(ui, &theme, self.nohyphen, "去连字符") {
-                self.nohyphen = !self.nohyphen;
-                self.regen();
-            }
-        });
-        ui.add_space(12.0);
-
-        // 操作 + 输出
-        ui.horizontal(|ui| {
-            if widgets::primary_icon(ui, &theme, icons::REFRESH_CW, "刷新").clicked() {
-                self.regen();
-            }
-            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
-                let out = self.output.clone();
-                shared.copy(ui.ctx(), out);
-            }
-            ui.add_space(6.0);
-            widgets::status_line(ui, &theme, self.ok, &self.status);
-        });
-        ui.add_space(8.0);
-        ui.add_space(4.0);
-        widgets::code_area(ui, "uuid-out", &mut self.output, false, 10);
-
-        // 历史
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            widgets::field_label(ui, &theme, "执行记录 · 保留最近");
-            ui.add_space(6.0);
-            let mut changed = false;
-            ComboBox::from_id_salt("uuid-hist-keep")
-                .selected_text(format!("{} 条", self.hist_keep))
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    for opt in KEEP_OPTS {
-                        if ui
-                            .selectable_value(&mut self.hist_keep, opt, format!("{opt} 条"))
-                            .clicked()
-                        {
-                            changed = true;
-                        }
-                    }
-                });
-            if changed {
-                // 调小时立刻裁掉多余记录（history[0] 是当前这次，不计入展示）。
-                self.history
-                    .truncate(1 + self.hist_keep.clamp(1, 20) as usize);
-            }
-        });
-        ui.add_space(6.0);
-        if self.history.len() <= 1 {
-            ui.label(
-                RichText::new("暂无记录，点「刷新」生成一次即可记录")
-                    .size(12.0)
-                    .color(theme.faint),
-            );
-        } else {
-            let hist: Vec<(String, String)> = self
-                .history
-                .iter()
-                .skip(1)
-                .map(|h| (h.label.clone(), h.body.clone()))
-                .collect();
-            // 左右排列：每行最多 3 张卡片，超出换行；卡片内完整展示全部数据（超长时卡内滚动）。
-            for (row, chunk) in hist.chunks(3).enumerate() {
-                ui.columns(3, |cols| {
-                    for (col, (label, body)) in chunk.iter().enumerate() {
-                        let ui = &mut cols[col];
-                        widgets::card(ui, &theme, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(label)
-                                        .size(11.5)
-                                        .color(theme.muted)
-                                        .monospace(),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if widgets::subtle_button(
-                                            ui,
-                                            &theme,
-                                            Some(icons::COPY),
-                                            "复制",
-                                        )
-                                        .clicked()
-                                        {
-                                            shared.copy(ui.ctx(), body.clone());
-                                        }
-                                    },
-                                );
-                            });
-                            ui.add_space(4.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt(format!("uuid-hist-{row}-{col}"))
-                                .max_height(240.0)
-                                .auto_shrink([false, true])
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new(body)
-                                            .size(12.0)
-                                            .monospace()
-                                            .color(theme.fg_soft),
-                                    );
-                                });
-                        });
-                    }
-                });
-                ui.add_space(8.0);
-            }
-        }
+    fn migrated(&self) -> bool {
+        true
     }
 
     fn save_draft(&self) -> Option<String> {
@@ -364,14 +226,114 @@ impl Tool for UuidTool {
             self.upper = d.upper;
             self.nohyphen = d.nohyphen;
             self.as_json = d.as_json;
-            // 旧草稿可能存有档位之外的值（如步进器时代的 1-6），回落为默认 3。
-            self.hist_keep = if KEEP_OPTS.contains(&d.hist_keep) {
-                d.hist_keep
-            } else {
-                default_hist_keep()
-            };
-            self.history.clear();
+            self.hist_keep = d.hist_keep.clamp(1, 20);
+            // 恢复草稿后按恢复出来的参数重算一次，界面上不留空输出。
             self.regen();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_roundtrip_preserves_every_field() {
+        let mut t = UuidTool::default();
+        t.kind = IdKind::UuidV5;
+        t.count = 42;
+        t.namespace = Namespace::Url;
+        t.custom_ns = "6ba7b810-9dad-11d1-80b4-00c04fd430c8".into();
+        t.name = "ferric.dev".into();
+        t.upper = true;
+        t.nohyphen = true;
+        t.as_json = true;
+        t.hist_keep = 20;
+
+        let saved = t.save_draft().expect("UUID 工具必须持久化草稿");
+        let mut restored = UuidTool::default();
+        restored.load_draft(&saved);
+
+        assert_eq!(restored.kind, IdKind::UuidV5);
+        assert_eq!(restored.count, 42);
+        assert_eq!(restored.namespace, Namespace::Url);
+        assert_eq!(restored.custom_ns, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+        assert_eq!(restored.name, "ferric.dev");
+        assert!(restored.upper);
+        assert!(restored.nohyphen);
+        assert!(restored.as_json);
+        assert_eq!(restored.hist_keep, 20);
+    }
+
+    #[test]
+    fn count_out_of_range_is_clamped_on_load() {
+        let mut t = UuidTool::default();
+        // 手工构造越界草稿（外部文件可写，必须防住）
+        let bad = r#"{"kind":"UuidV4","count":99999,"namespace":"Dns","custom_ns":"","name":"x","upper":false,"nohyphen":false,"as_json":false,"hist_keep":999}"#;
+        t.load_draft(bad);
+        assert_eq!(t.count, 1000, "数量上限必须夹到 1000");
+        assert_eq!(t.hist_keep, 20, "历史档位上限必须夹到 20");
+    }
+
+    #[test]
+    fn shrinking_history_keep_trims_existing_entries() {
+        let mut t = UuidTool::default();
+        t.hist_keep = 20;
+        for _ in 0..12 {
+            t.regen();
+        }
+        assert!(t.history.len() > 4, "先攒够记录才能验证裁剪");
+        // 档位调到最小（3）应立刻裁到 1 + 3
+        t.set_hist_keep_index(0);
+        assert_eq!(t.history.len(), 4);
+    }
+
+    #[test]
+    fn restore_puts_that_run_back_into_output() {
+        let mut t = UuidTool::default();
+        t.regen();
+        t.regen();
+        let want = t.history[1].body.clone();
+        assert!(t.restore(1));
+        assert_eq!(t.output, want);
+    }
+
+    #[test]
+    fn invalid_custom_namespace_reports_error_without_clobbering_output() {
+        let mut t = UuidTool::default();
+        let good = t.output.clone();
+        t.kind = IdKind::UuidV5;
+        t.namespace = Namespace::Custom;
+        t.custom_ns = "not-a-uuid".into();
+        t.regen();
+        assert!(!t.ok, "非法命名空间必须报错");
+        assert_eq!(t.output, good, "失败时不能把上一次的好输出冲掉");
+    }
+
+    #[test]
+    fn enum_index_mapping_is_bidirectional() {
+        let mut t = UuidTool::default();
+        for (i, kind) in IdKind::ALL.iter().enumerate() {
+            t.set_kind_index(i as i32);
+            assert_eq!(t.kind, *kind);
+            assert_eq!(t.kind_index(), i as i32);
+        }
+        for (i, ns) in Namespace::ALL.iter().enumerate() {
+            t.set_namespace_index(i as i32);
+            assert_eq!(t.namespace, *ns);
+            assert_eq!(t.namespace_index(), i as i32);
+        }
+    }
+
+    #[test]
+    fn out_of_range_index_is_ignored_not_panicking() {
+        let mut t = UuidTool::default();
+        t.set_kind_index(99);
+        t.set_namespace_index(-3);
+        t.set_hist_keep_index(1234);
+        // 越界索引一律忽略，保持原值
+        assert_eq!(t.kind, IdKind::UuidV4);
+        assert_eq!(t.namespace, Namespace::Dns);
+        assert_eq!(t.hist_keep, 3);
     }
 }

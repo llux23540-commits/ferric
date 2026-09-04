@@ -1,169 +1,25 @@
 //! Ferric 桌面客户端入口。
 //!
-//! 这里只做一件事：**把窗口开出来，而且要开得起来**。
-//! 渲染后端在不同机器上能不能用差别极大（无驱动的虚拟机、精简版 Windows、远程
-//! 桌面……），所以启动是一个「按计划逐个尝试 + 记住哪个成功」的过程，
-//! 而不是一次性的 `run_native`。计划怎么排、失败了怎么自愈，见 [`ferric_ui::launch`]。
+//! 迁 Slint 之后这里只剩一件事：**把窗口开出来**。
+//!
+//! egui 时代这个文件是一套「按计划逐个试渲染后端 + 记住哪个成功 + 崩了自动降级」
+//! 的状态机（`launch::plan` / `begin` / `run_once` 循环 + wgpu/glow/软渲染三条
+//! 分支），因为在无 GPU 驱动的机器上「哪个后端能用」只有到了那台机器才知道。
+//!
+//! Slint 的 software renderer 让那个问题整体消失 —— 它不碰任何 GPU API，
+//! 任何机器上都一样能起来。于是入口回归成一行 `ferric_ui::run()`，
+//! 失败时把原因写进 `startup.log` 并弹窗（发行版没有控制台，
+//! 不弹窗用户看到的就是「双击了没反应」）。
 
 // 发行版隐藏 Windows 控制台窗口。
-// 代价是 stderr 没有任何去处 —— 启动失败必须落到日志文件 + 弹窗，
-// 否则用户看到的就是「双击了没反应」。
+// 代价是 stderr 没有任何去处 —— 启动失败必须落到日志文件 + 弹窗。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui;
-use ferric_soft_render as soft;
-use ferric_ui::launch;
-use ferric_ui::launch::Backend;
-use ferric_ui::{FerricApp, APP_NAME};
-
-fn native_options(renderer: eframe::Renderer) -> eframe::NativeOptions {
-    // 窗口/任务栏图标（Windows 标题栏+任务栏、X11）。Wayland 不走这里 ——
-    // 合成器按 app_id 找 .desktop 文件拿图标，见下面的 with_app_id。
-    // macOS Dock 用的是 bundle 里的 icns（cargo-packager 打包时带入）。
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/128x128@2x.png"))
-        .expect("内嵌图标是构建期资源，坏了只能是资源本身被改坏");
-    eframe::NativeOptions {
-        // 渲染器由 launch::begin 选出的后端决定：`Glow` 走 OpenGL（glow）渲染器，
-        // 其余走 wgpu（具体 DX12 / Vulkan / GL 由 WGPU_BACKEND 环境变量决定）。
-        renderer,
-        // 首次在主屏居中打开（之后由 persist_window 记住用户调整）。
-        centered: true,
-        // 表面配置（仅 Windows）：present 用 Mailbox。DX12 上 Fifo 是 3 帧队列，
-        // 画面恒定落后、hover 高亮「闪一下」；Immediate 则撕裂。Mailbox 是单帧队列、
-        // 新帧替换旧帧，vblank 时弹出最新帧：既不撕裂也不落后。软件光栅化的机器
-        // 靠帧率封顶兜底。其余平台保持 LOW_LATENCY：它们没有 DX12 flip-model 这套问题。
-        wgpu_options: eframe::WgpuConfiguration {
-            surface: if cfg!(target_os = "windows") {
-                eframe::SurfaceConfig {
-                    present_mode: eframe::wgpu::PresentMode::Mailbox,
-                    desired_maximum_frame_latency: Some(1),
-                }
-            } else {
-                eframe::SurfaceConfig::LOW_LATENCY
-            },
-            ..Default::default()
-        },
-        viewport: egui::ViewportBuilder::default()
-            // 首次启动的默认尺寸；之后由 eframe 记住用户自己调过的大小。
-            // 默认 1280×800（比早期的 1560×980 收敛）：虚拟机 / 远程桌面的软渲染
-            // 没有 GPU 显存，窗口物理像素直接吃进程内存，尺寸每大一圈、内存与
-            // CPU 都跟着涨。有 GPU 的机器不受影响 —— 想开大随时拖大，eframe 会记住。
-            .with_inner_size([1280.0, 800.0])
-            // 最小尺寸放到 640×420：软件光栅化（无 GPU 的虚拟机）下，每帧开销与
-            // **窗口物理像素数成正比**——实测把窗口从 1320×840 拖到约一半边长，交互
-            // CPU 直接降到 ~1/4（4× 提速，≈4fps→≈16fps）。这是这类环境里唯一真正
-            // 有效的软件侧手段（关动画/阴影/羽化都只是杯水车薪，实测无感）。原来的
-            // 下限 1000×640 卡住了用户往这个方向自救；调低后可拖到真正流畅的尺寸，
-            // 且 eframe 会记住。有 GPU 的机器不受影响——他们没有拖小的动机。
-            .with_min_inner_size([640.0, 420.0])
-            .with_resizable(true)
-            .with_decorations(false) // 自绘标题栏（缩放由 chrome::handle_resize 手动处理）
-            // 关闭透明：WARP 软件光栅化器只支持 Opaque 表面，透明窗口会导致找不到适配器。
-            // 有硬件 GPU 时可改回 true 获得圆角透明效果。
-            .with_transparent(false)
-            .with_icon(icon)
-            // Wayland 的任务栏图标靠 app_id ↔ .desktop 文件名匹配；
-            // 必须与打包产物的 desktop 文件名（= 二进制名 ferric）一致。
-            // 同时决定 eframe 的状态目录（launch.json 也放在那儿）。
-            .with_app_id(launch::APP_ID)
-            .with_title(APP_NAME),
-        ..Default::default()
-    }
-}
-
-fn run_once(backend: Backend) -> Result<(), String> {
-    if backend == Backend::Soft {
-        // 纯 CPU 软渲染：不建 wgpu / glow 上下文。窗口外观沿用 native_options 的 viewport 配置。
-        let opts = native_options(eframe::Renderer::Wgpu);
-        return soft::run_soft(
-            soft::SoftOptions {
-                viewport: opts.viewport,
-                app_id: Some(launch::APP_ID.to_owned()),
-            },
-            Box::new(
-                |ctx: &egui::Context, storage: Option<Box<dyn eframe::Storage>>| {
-                    Ok::<Box<dyn eframe::App>, Box<dyn std::error::Error + Send + Sync>>(Box::new(
-                        FerricApp::new_soft(ctx, storage),
-                    ))
-                },
-            ),
-        );
-    }
-
-    let renderer = match backend {
-        Backend::Glow => eframe::Renderer::Glow,
-        _ => eframe::Renderer::Wgpu,
-    };
-    eframe::run_native(
-        APP_NAME,
-        native_options(renderer),
-        Box::new(|cc| Ok(Box::new(FerricApp::new(cc)))),
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// 把纯字符串的启动失败包装成 `eframe::Error`（eframe 没有 `From<String>`）。
-#[derive(Debug)]
-struct SoftRenderError(String);
-
-impl std::fmt::Display for SoftRenderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for SoftRenderError {}
-
-fn main() -> eframe::Result<()> {
-    // 选后端 + 落下「正在尝试」标记。winit 全进程只允许一次事件循环，
-    // 所以这里**不能**失败了在同一进程里换个后端重来 —— 自愈是跨启动的，
-    // 崩过的这次会被记下，下次启动自动轮到下一个。细节见 launch::plan。
-    let mut cfg = launch::load();
-    let backend = launch::begin(&mut cfg);
-    launch::log(&format!("启动：渲染后端 = {}", backend.label()));
-
-    match run_once(backend) {
-        Ok(()) => Ok(()),
-        Err(detail) => {
-            launch::log(&format!("以 {} 启动失败：{detail}", backend.label()));
-            // 已经出过帧的话就不是「打不开」，而是跑着跑着出的错。那种情况：
-            // 既不弹「无法启动」（误导），也**不碰配置文件** —— 盘上那份已经被
-            // mark_running 标成「这个后端是好的」，把内存里带着 pending 的旧快照
-            // 存回去，等于让下次启动误以为上次崩在了启动路上。
-            if !launch::is_running() {
-                cfg.last_error = Some(detail.clone());
-                // pending 保持原样：下次启动据此把这个后端排到最后，改用下一个。
-                launch::save(&cfg);
-                launch::fatal_dialog(&detail);
-            }
-            Err(eframe::Error::AppCreation(Box::new(SoftRenderError(
-                detail,
-            ))))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ferric_ui::launch::{Backend, LaunchCfg};
-
-    /// 计划里必须包含「自动」这一档，而且不能是空的 ——
-    /// 空计划意味着这次启动一个后端都不会用。
-    #[test]
-    fn plan_is_never_empty() {
-        let p = launch::plan(&LaunchCfg::default());
-        assert!(!p.is_empty());
-        assert!(p.contains(&Backend::Auto));
-    }
-
-    /// 默认情况（全新安装）就该走「软渲染」：内存最低、任何机器都能跑。
-    /// 想要 GPU 加速的用户在设置里手动切「自动」即可。
-    #[test]
-    fn a_fresh_install_starts_on_soft() {
-        assert_eq!(
-            launch::plan(&LaunchCfg::default()).first(),
-            Some(&Backend::Soft)
-        );
+fn main() {
+    if let Err(e) = ferric_ui::run() {
+        let detail = e.to_string();
+        ferric_ui::launch::mark_failed(&detail);
+        ferric_ui::launch::fatal_dialog(&detail);
+        std::process::exit(1);
     }
 }

@@ -89,7 +89,7 @@ fn seeded() -> Installed {
 }
 
 fn store_path() -> Option<PathBuf> {
-    eframe::storage_dir(crate::launch::APP_ID).map(|d| d.join("mock-plugins.json"))
+    crate::launch::data_dir().map(|d| d.join("mock-plugins.json"))
 }
 
 fn load_installed() -> Installed {

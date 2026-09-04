@@ -1,11 +1,15 @@
-//! 字体与图标字体注入。
+//! 字体注入（Slint 版）。
 //!
-//! 内嵌设计字体：**Plus Jakarta Sans**（UI，含 Medium/SemiBold/Bold 命名族）、
-//! **JetBrains Mono**（等宽）、**Lucide**（图标字体，见 [`crate::icons`]）。
-//! 中文从系统字体加载并作为 UI / 等宽两族的回退。
+//! 设计字体（Plus Jakarta Sans / JetBrains Mono / Lucide）由 `build.rs` 的
+//! `slint_build::embed_resources(EmbedForSoftwareRenderer)` 在**编译期**嵌入
+//! 二进制，`.slint` 里按文件名 stem 引用（见 `ui/theme.slint` 的 font-* 属性），
+//! 因此这里不需要运行期注册它们。
+//!
+//! 运行期只做一件 Slint 做不到的事：**把系统中文字体注册进去**。CJK 字体不能
+//! 内嵌（几十 MB，且各平台字体不同），只能启动时从系统路径找一个注册上。
+//! 找不到就返回 false，由调用方提示用户 —— 界面文案几乎全是中文，缺字体等于
+//! 整个界面废掉。
 
-use egui::{FontData, FontDefinitions, FontFamily};
-use std::sync::Arc;
 
 // 编译期内嵌的设计字体（crates/ferric-ui/assets/fonts）。
 pub const PJS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf");
@@ -16,11 +20,12 @@ pub const JBM_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Reg
 pub const JBM_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
 pub const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
-/// 命名字体族（配合 `RichText::family(FontFamily::Name(...))` 使用）。
-pub const UI_MEDIUM: &str = "ui-medium";
-pub const UI_SEMIBOLD: &str = "ui-semibold";
-pub const UI_BOLD: &str = "ui-bold";
-pub const MONO_MEDIUM: &str = "mono-medium";
+/// 命名字体族。与 `ui/theme.slint` 里的 `font-*` 属性一一对应；
+/// Slint 侧按 TTF 文件名 stem 引用内嵌字体，这些常量供 Rust 侧诊断使用。
+pub const UI_MEDIUM: &str = "PlusJakartaSans-Medium";
+pub const UI_SEMIBOLD: &str = "PlusJakartaSans-SemiBold";
+pub const UI_BOLD: &str = "PlusJakartaSans-Bold";
+pub const MONO_MEDIUM: &str = "JetBrainsMono-Medium";
 pub const LUCIDE_FAMILY: &str = "lucide";
 
 /// 各平台常见的中文字体候选路径（按优先级）。
@@ -47,93 +52,47 @@ const CANDIDATES: &[&str] = &[
     "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
 ];
 
-/// 注册全部字体族。返回**是否找到了中文字体** —— 没找到的话界面上的中文会是
-/// 一片方块（本应用的文案几乎全是中文，等于整个界面废掉），调用方应当提示用户。
-pub fn install_fonts(ctx: &egui::Context) -> bool {
-    let mut fonts = FontDefinitions::default();
-
-    fonts
-        .font_data
-        .insert("pjs".into(), Arc::new(FontData::from_static(PJS_REGULAR)));
-    fonts.font_data.insert(
-        "pjs-med".into(),
-        Arc::new(FontData::from_static(PJS_MEDIUM)),
-    );
-    fonts.font_data.insert(
-        "pjs-semi".into(),
-        Arc::new(FontData::from_static(PJS_SEMIBOLD)),
-    );
-    fonts
-        .font_data
-        .insert("pjs-bold".into(), Arc::new(FontData::from_static(PJS_BOLD)));
-    fonts
-        .font_data
-        .insert("jbm".into(), Arc::new(FontData::from_static(JBM_REGULAR)));
-    fonts.font_data.insert(
-        "jbm-med".into(),
-        Arc::new(FontData::from_static(JBM_MEDIUM)),
-    );
-    fonts
-        .font_data
-        .insert("lucide".into(), Arc::new(FontData::from_static(LUCIDE)));
-
-    // 系统中文字体作为回退。
-    let has_cjk = match load_first_cjk() {
-        Some(bytes) => {
-            fonts
-                .font_data
-                .insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
-            true
-        }
-        None => false,
+/// 探测系统是否有中文字体。返回 `false` 时界面上的中文会是一片方块
+///（本应用文案几乎全是中文，等于整个界面废掉），调用方应当提示用户。
+///
+/// # 为什么这里不再「注册」字体
+///
+/// egui 时代必须自己把 CJK 字体读进内存、塞进 `FontDefinitions` 的回退链
+///（几十 MB 的 `Vec<u8>` 常驻，`mem.rs` 里那个 `fonts_src_bytes` 就是它）。
+///
+/// Slint 开了 `software-renderer-systemfonts` feature 之后，**系统字体由
+/// Slint 自己通过 fontdb 枚举并按需回退** —— 我们不需要（也没有公开 API）
+/// 手动注册。于是那几十 MB 的常驻拷贝直接消失，这是迁移顺手拿到的一笔内存收益。
+///
+/// 这个函数因此只剩一件事：**看一眼系统里到底有没有中文字体**，决定要不要
+/// 提示用户。找到就记下字节数供 `mem.rs` 诊断用（磁盘大小，不再是常驻内存）。
+pub fn install_fonts() -> bool {
+    let Some(path) = find_cjk_path() else {
+        record_cjk_bytes(0);
+        crate::launch::log("未找到系统中文字体 —— 界面中文会显示为方块");
+        return false;
     };
-
-    // 主族：把设计字体前置，中文其后，保留 egui 默认（含 emoji 回退）在末尾。
-    front(&mut fonts, FontFamily::Proportional, "pjs", has_cjk);
-    front(&mut fonts, FontFamily::Monospace, "jbm", has_cjk);
-
-    // 命名族：粗细变体与图标。
-    named(&mut fonts, UI_MEDIUM, "pjs-med", has_cjk);
-    named(&mut fonts, UI_SEMIBOLD, "pjs-semi", has_cjk);
-    named(&mut fonts, UI_BOLD, "pjs-bold", has_cjk);
-    named(&mut fonts, MONO_MEDIUM, "jbm-med", has_cjk);
-    fonts.families.insert(
-        FontFamily::Name(LUCIDE_FAMILY.into()),
-        vec!["lucide".into()],
-    );
-
-    ctx.set_fonts(fonts);
-    record_cjk_bytes(if has_cjk { cjk_loaded_bytes() } else { 0 });
-    has_cjk
+    let n = std::fs::metadata(&path)
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+    record_cjk_bytes(n);
+    crate::launch::log(&format!(
+        "系统中文字体：{}（{n} 字节，由 Slint 按需回退，不常驻）",
+        path.display()
+    ));
+    true
 }
 
-/// 把 `primary`（+可选 cjk）前置到已有族的最前，保留原有回退于末尾。
-fn front(fonts: &mut FontDefinitions, fam: FontFamily, primary: &str, has_cjk: bool) {
-    let base = fonts.families.remove(&fam).unwrap_or_default();
-    let mut v = vec![primary.to_string()];
-    if has_cjk {
-        v.push("cjk".to_string());
-    }
-    v.extend(base);
-    fonts.families.insert(fam, v);
-}
-
-/// 创建一个命名族：`primary`（+可选 cjk 回退）。
-fn named(fonts: &mut FontDefinitions, name: &str, primary: &str, has_cjk: bool) {
-    let mut v = vec![primary.to_string()];
-    if has_cjk {
-        v.push("cjk".to_string());
-    }
-    fonts.families.insert(FontFamily::Name(name.into()), v);
-}
-
-fn load_first_cjk() -> Option<Vec<u8>> {
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            return Some(bytes);
+/// 找到第一个存在的中文字体**路径**（不读进内存 —— Slint 按路径注册，
+/// 省掉一次几十 MB 的拷贝，这本身就是迁移顺手拿到的内存收益）。
+fn find_cjk_path() -> Option<std::path::PathBuf> {
+    for p in CANDIDATES {
+        let path = std::path::Path::new(p);
+        if path.is_file() {
+            return Some(path.to_path_buf());
         }
     }
-    scan_for_cjk()
+    scan_for_cjk_path()
 }
 
 /// 启动后 [`install_fonts`] 写入的 CJK 字节数；0 表示未找到 CJK 字体。
@@ -174,7 +133,7 @@ pub fn embedded_bytes() -> usize {
 /// 系统（微软雅黑压根没预装，用户手动装了 Noto / 思源）。这里按优先级在两个目录里
 /// 逐个找，找到哪个用哪个。
 #[cfg(target_os = "windows")]
-fn scan_for_cjk() -> Option<Vec<u8>> {
+fn scan_for_cjk_path() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
     // 优先级：雅黑 → 常见系统字体 → 用户可能自己装的开源中文字体
@@ -210,8 +169,9 @@ fn scan_for_cjk() -> Option<Vec<u8>> {
     }
     for file in FILES {
         for dir in &dirs {
-            if let Ok(bytes) = std::fs::read(dir.join(file)) {
-                return Some(bytes);
+            let p = dir.join(file);
+            if p.is_file() {
+                return Some(p);
             }
         }
     }
@@ -221,6 +181,6 @@ fn scan_for_cjk() -> Option<Vec<u8>> {
 /// 非 Windows 平台：常见发行版路径已经写在 `CANDIDATES` 里，再扫一遍
 /// fontconfig 的目录收益不大（缺字体时用户装一个包就好），这里不做额外事。
 #[cfg(not(target_os = "windows"))]
-fn scan_for_cjk() -> Option<Vec<u8>> {
+fn scan_for_cjk_path() -> Option<std::path::PathBuf> {
     None
 }

@@ -1,0 +1,239 @@
+// 复用 UI 组件，对位原 widgets/mod.rs 的那一套（primary / ghost / subtle 按钮、
+// 图标按钮、分段控件、字段标签）。样式全部从 Theme global 取，不在这里写死颜色。
+
+import { Theme } from "theme.slint";
+
+// 区块小标题（原 field_label）。
+export component FieldLabel inherits Text {
+    font-family: Theme.font-ui-medium;
+    font-size: 12.5px;
+    color: Theme.fg-soft;
+}
+
+// ——— 按钮 ———
+// 原 widgets::btn 的三个 variant 合成一个组件，用 `variant` 选。
+// 尺寸沿用原实现：高 38、primary/default 横向 padding 16、subtle 12、圆角 10。
+export component FerricButton inherits Rectangle {
+    in property <string> text;
+    // 可选前置图标（Lucide 字符）。空串 = 不画图标。
+    in property <string> icon: "";
+    // "primary" | "default" | "subtle"
+    in property <string> variant: "default";
+    in property <bool> enabled: true;
+    callback clicked();
+
+    property <bool> is-primary: variant == "primary";
+    property <bool> is-subtle: variant == "subtle";
+    property <length> pad: is-subtle ? 12px : 16px;
+
+    height: 38px;
+    min-width: layout.min-width;
+    border-radius: 10px;
+
+    background: !enabled
+        ? (is-primary ? Theme.accent.with-alpha(0.45) : Theme.code-bg)
+        : is-primary
+            ? (ta.pressed ? Theme.accent-strong : (ta.has-hover ? Theme.accent-strong : Theme.accent))
+            : is-subtle
+                ? (ta.has-hover ? Theme.border : transparent)
+                : (ta.has-hover ? Theme.border-2 : Theme.code-bg);
+
+    property <color> fg: is-primary
+        ? #ffffff
+        : is-subtle
+            ? (ta.has-hover ? Theme.fg : Theme.muted)
+            : Theme.fg-soft;
+
+    layout := HorizontalLayout {
+        padding-left: root.pad;
+        padding-right: root.pad;
+        spacing: 8px;
+        alignment: center;
+
+        if root.icon != "": Text {
+            text: root.icon;
+            font-family: Theme.font-icons;
+            font-size: 16px;
+            color: root.fg;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.text;
+            font-family: Theme.font-ui-medium;
+            font-size: 13.5px;
+            color: root.fg;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 图标按钮（正方形，muted → hover 变 fg + border 底）。
+// 方块边长跟着字号走：原实现是 (size * 1.65).max(26.0)。
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> icon-size: 18px;
+    in property <bool> enabled: true;
+    in property <string> tooltip: "";
+    callback clicked();
+
+    property <length> side: max(root.icon-size * 1.65, 26px);
+    // 只声明 min-*（Slint 不允许 width 与 min-width 同时给）：
+    // 布局据此分配空间，且不会把标题栏里挤在一起的按钮压扁。
+    min-width: side;
+    min-height: side;
+    horizontal-stretch: 0;
+    border-radius: 9px;
+    background: ta.has-hover && root.enabled ? Theme.border : transparent;
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.icon;
+        font-family: Theme.font-icons;
+        font-size: root.icon-size;
+        color: !root.enabled
+            ? Theme.faint
+            : (ta.has-hover ? Theme.fg : Theme.muted);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 分段控件（segmented pill）。`options` 是标签数组，`current` 双向。
+export component Segmented inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> current: 0;
+    callback changed(int);
+
+    height: 36px;
+    border-radius: 9px;
+    background: Theme.code-bg;
+    min-width: row.min-width;
+
+    row := HorizontalLayout {
+        padding: 3px;
+        spacing: 0px;
+
+        for opt[i] in root.options: Rectangle {
+            property <bool> on: i == root.current;
+            border-radius: 7px;
+            height: 30px;
+            min-width: seg-label.min-width + 28px;
+            background: on ? Theme.accent-soft : transparent;
+
+            seg-label := Text {
+                x: 14px;
+                width: parent.width - 28px;
+                height: 100%;
+                text: opt;
+                font-family: Theme.font-ui-medium;
+                font-size: 13px;
+                color: on ? Theme.accent-strong : Theme.muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => {
+                    root.current = i;
+                    root.changed(i);
+                }
+            }
+        }
+    }
+}
+
+// 单行输入框（原 widgets 里的 TextEdit 包装：field 底 + field_bd 边 + 聚焦光环）。
+export component FerricLineEdit inherits Rectangle {
+    in property <string> placeholder: "";
+    in-out property <string> text;
+    in property <bool> read-only: false;
+    in property <bool> mono: false;
+    callback edited(string);
+    callback accepted(string);
+
+    height: 38px;
+    border-radius: 9px;
+    background: Theme.field;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.field-bd;
+
+    // 聚焦光环：外圈再画一层半透明主色（对位 egui 的 accent_ring）。
+    Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: 12px;
+        border-width: 3px;
+        border-color: input.has-focus ? Theme.accent-ring : transparent;
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        input := TextInput {
+            text <=> root.text;
+            read-only: root.read-only;
+            font-family: root.mono ? Theme.font-mono-medium : Theme.font-ui;
+            font-size: 13.5px;
+            color: Theme.fg;
+            vertical-alignment: center;
+            single-line: true;
+            edited => { root.edited(self.text); }
+            accepted => { root.accepted(self.text); }
+        }
+    }
+
+    if root.text == "" && !input.has-focus: Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: 100%;
+        text: root.placeholder;
+        font-family: Theme.font-ui;
+        font-size: 13.5px;
+        color: Theme.faint;
+        vertical-alignment: center;
+    }
+}
+
+// 卡片容器：主内容区里那一格格的白/深底 + 圆角 + 细边。
+export component Card inherits Rectangle {
+    in property <length> pad: 16px;
+    background: Theme.bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.border;
+}
+
+// 提示条（toast）。存活时长由 Rust 侧控制（TOAST_TTL = 3s），这里只管样式。
+export component Toast inherits Rectangle {
+    in property <string> text;
+    height: 40px;
+    border-radius: 10px;
+    background: Theme.dark ? #232a33 : #2a3138;
+    min-width: toast-label.min-width + 32px;
+
+    toast-label := Text {
+        x: 16px;
+        width: parent.width - 32px;
+        height: 100%;
+        text: root.text;
+        font-family: Theme.font-ui-medium;
+        font-size: 13px;
+        color: #ffffff;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+}

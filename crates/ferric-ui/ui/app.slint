@@ -1,0 +1,914 @@
+// Ferric 外壳（Slint 版）。
+//
+// 对位原 egui 版的结构：自绘无边框窗口（标题栏 44px）+ 可搜索侧栏（默认 264px）
+// + 主内容区 + 设置浮层 + toast 区。
+//
+// 与 egui 版的关键差别：这里是 retained mode —— 状态放在 property 上，Rust 侧用
+// setter 灌数据、用 callback 收事件；不再每帧重跑 UI 代码。
+
+import { Theme } from "theme.slint";
+// 把 Theme 再导出一次：Slint 只为**本文件导出**的 global 生成 Rust 侧类型，
+// 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
+export { Theme }
+import { FieldLabel, FerricButton, IconButton, Segmented, FerricLineEdit, Card, Toast } from "widgets.slint";
+import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
+
+// 侧栏一行工具。
+struct ToolEntry {
+    id: string,
+    name: string,
+    desc: string,
+    icon: string,
+    group: string,
+    // 是否已迁到 Slint（false = 显示「迁移中」占位）
+    migrated: bool,
+    favorite: bool,
+    // 是否通过当前搜索过滤（Rust 侧按 name / desc / keywords 计算）
+    visible: bool,
+}
+
+// UUID 工具的一次执行记录。
+struct UuidHistEntry {
+    label: string,
+    body: string,
+}
+
+component SidebarRow inherits Rectangle {
+    in property <ToolEntry> entry;
+    in property <bool> active;
+    callback selected();
+    callback toggle-favorite();
+
+    height: 40px;
+    border-radius: 9px;
+    background: active
+        ? Theme.accent-soft
+        : (ta.has-hover ? Theme.border : transparent);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        Text {
+            text: root.entry.icon;
+            font-family: Theme.font-icons;
+            font-size: 17px;
+            color: root.active ? Theme.accent-strong : Theme.muted;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.entry.name;
+                font-family: Theme.font-ui-medium;
+                font-size: 13.5px;
+                color: root.active ? Theme.fg : Theme.fg-soft;
+                overflow: elide;
+            }
+        }
+        // 未迁移的工具挂一个小圆点提示
+        if !root.entry.migrated: Rectangle {
+            width: 7px;
+            height: 7px;
+            y: (parent.height - 7px) / 2;
+            border-radius: 4px;
+            background: Theme.faint;
+        }
+        // 收藏星标：hover 或已收藏时可见
+        if ta.has-hover || root.entry.favorite: IconButton {
+            icon: root.entry.favorite ? "★" : "☆";
+            icon-size: 13px;
+            clicked => { root.toggle-favorite(); }
+        }
+    }
+
+    ta := TouchArea {
+        clicked => { root.selected(); }
+    }
+}
+
+// ——— 迁移中占位（9 个尚未迁的工具共用） ———
+component MigrationPlaceholder inherits Rectangle {
+    in property <string> tool-name;
+    in property <string> tool-desc;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 14px;
+
+        Text {
+            text: "⚙";
+            font-family: Theme.font-icons;
+            font-size: 40px;
+            color: Theme.faint;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.tool-name + " · 正在迁移到 Slint";
+            font-family: Theme.font-ui-semibold;
+            font-size: 16px;
+            color: Theme.fg;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.tool-desc;
+            font-family: Theme.font-ui;
+            font-size: 13px;
+            color: Theme.muted;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        Text {
+            text: "该工具的业务逻辑在 ferric-core 里已就绪且带单测；\n这里只差 Slint 视图层。见 feat/slint-migration 分支的 phase 3。";
+            font-family: Theme.font-ui;
+            font-size: 12px;
+            color: Theme.faint;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// ——— UUID 生成器（已完整迁移） ———
+component UuidView inherits Rectangle {
+    // 输入侧（双向：Rust 灌初值，UI 改了回写）
+    in-out property <int> kind-index: 0;
+    in-out property <int> count: 10;
+    in-out property <int> namespace-index: 0;
+    in-out property <string> custom-ns;
+    in-out property <string> name-input: "example.com";
+    in-out property <bool> upper: false;
+    in-out property <bool> nohyphen: false;
+    in-out property <bool> as-json: false;
+    in-out property <int> hist-keep-index: 0;
+
+    // 输出侧（只读：Rust 算完写进来）
+    in property <string> output;
+    in property <bool> ok: true;
+    in property <string> status: "就绪";
+    in property <[UuidHistEntry]> history;
+
+    // v5 才需要命名空间 + name
+    property <bool> needs-namespace: root.kind-index == 2;
+
+    callback regenerate();
+    callback copy-output();
+    callback restore-history(int);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+
+        // —— 参数区 ——
+        Card {
+            vertical-stretch: 0;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "版本"; }
+                        Segmented {
+                            options: ["v4 随机", "v7 时间序", "v5 命名", "v6 时间序"];
+                            current <=> root.kind-index;
+                            changed(i) => { root.regenerate(); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        width: 140px;
+                        FieldLabel { text: "数量"; }
+                        SpinBox {
+                            minimum: 1;
+                            maximum: 1000;
+                            value <=> root.count;
+                            edited(v) => { root.regenerate(); }
+                        }
+                    }
+                }
+
+                // v5 专属：命名空间 + name
+                if root.needs-namespace: HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        spacing: 6px;
+                        width: 200px;
+                        FieldLabel { text: "命名空间"; }
+                        ComboBox {
+                            model: ["DNS", "URL", "OID", "X500", "自定义"];
+                            current-index <=> root.namespace-index;
+                            selected(v) => { root.regenerate(); }
+                        }
+                    }
+                    if root.namespace-index == 4: VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        FieldLabel { text: "自定义命名空间 UUID"; }
+                        FerricLineEdit {
+                            text <=> root.custom-ns;
+                            placeholder: "如 6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+                            mono: true;
+                            edited(t) => { root.regenerate(); }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        FieldLabel { text: "名称"; }
+                        FerricLineEdit {
+                            text <=> root.name-input;
+                            placeholder: "example.com";
+                            edited(t) => { root.regenerate(); }
+                        }
+                    }
+                }
+
+                // 输出格式开关
+                HorizontalLayout {
+                    spacing: 20px;
+                    alignment: start;
+                    CheckBox {
+                        text: "大写";
+                        checked <=> root.upper;
+                        toggled => { root.regenerate(); }
+                    }
+                    CheckBox {
+                        text: "去连字符";
+                        checked <=> root.nohyphen;
+                        toggled => { root.regenerate(); }
+                    }
+                    CheckBox {
+                        text: "JSON 数组";
+                        checked <=> root.as-json;
+                        toggled => { root.regenerate(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    FerricButton {
+                        text: "重新生成";
+                        icon: "⟳";
+                        variant: "primary";
+                        clicked => { root.regenerate(); }
+                    }
+                }
+            }
+        }
+
+        // —— 输出区 ——
+        Card {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    FieldLabel { text: "输出"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.status;
+                        font-family: Theme.font-ui;
+                        font-size: 12px;
+                        color: root.ok ? Theme.ok : Theme.danger;
+                        vertical-alignment: center;
+                    }
+                    FerricButton {
+                        text: "复制";
+                        icon: "⧉";
+                        variant: "default";
+                        clicked => { root.copy-output(); }
+                    }
+                }
+
+                Rectangle {
+                    background: Theme.code-bg;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    vertical-stretch: 1;
+
+                    ScrollView {
+                        Text {
+                            x: 12px;
+                            y: 10px;
+                            width: parent.width - 24px;
+                            text: root.output;
+                            font-family: Theme.font-mono-medium;
+                            font-size: 13px;
+                            color: Theme.fg;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— 执行历史 ——
+        Card {
+            vertical-stretch: 0;
+            height: 132px;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    FieldLabel { text: "执行记录"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    FieldLabel { text: "保留"; vertical-alignment: center; }
+                    Segmented {
+                        options: ["3", "5", "10", "20"];
+                        current <=> root.hist-keep-index;
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 4px;
+                        for h[i] in root.history: Rectangle {
+                            height: 26px;
+                            border-radius: 6px;
+                            background: hist-ta.has-hover ? Theme.border : transparent;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                Text {
+                                    text: h.label;
+                                    font-family: Theme.font-ui;
+                                    font-size: 12px;
+                                    color: Theme.muted;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                if hist-ta.has-hover: Text {
+                                    text: "点击恢复";
+                                    font-family: Theme.font-ui;
+                                    font-size: 11px;
+                                    color: Theme.accent-strong;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            hist-ta := TouchArea {
+                                clicked => { root.restore-history(i); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ——— 设置浮层 ———
+component SettingsOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in-out property <int> tab: 0;
+    in-out property <int> theme-mode: 0;     // 0 系统 / 1 亮 / 2 暗
+    in-out property <float> ui-scale: 1.0;
+    in-out property <bool> auto-update: true;
+    in property <string> backend-label;
+    in property <string> gpu-desc;
+    in property <bool> gpu-software;
+    in property <string> version;
+    in property <string> data-dir;
+    in property <string> mem-status: "";
+
+    callback close();
+    callback open-data-dir();
+    callback record-memory();
+    callback check-update();
+
+    visible: root.open;
+    background: rgba(0, 0, 0, 0.45);
+
+    // 点背景关闭
+    TouchArea {
+        clicked => { root.close(); }
+    }
+
+    Rectangle {
+        width: min(720px, parent.width - 80px);
+        height: min(560px, parent.height - 80px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: Theme.border-2;
+
+        // 吞掉点击，避免穿透到背景的关闭逻辑
+        TouchArea { }
+
+        VerticalLayout {
+            // 标题栏
+            Rectangle {
+                height: 48px;
+                background: Theme.titlebar;
+                border-radius: 14px;
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 8px;
+                    Text {
+                        text: "设置";
+                        font-family: Theme.font-ui-semibold;
+                        font-size: 15px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    IconButton {
+                        icon: "✕";
+                        icon-size: 14px;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                // 分类栏
+                Rectangle {
+                    width: 148px;
+                    background: Theme.rail;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 3px;
+                        alignment: start;
+                        for label[i] in ["外观", "字体", "渲染", "更新", "数据", "关于"]: Rectangle {
+                            height: 34px;
+                            border-radius: 8px;
+                            background: i == root.tab
+                                ? Theme.accent-soft
+                                : (cat-ta.has-hover ? Theme.border : transparent);
+                            Text {
+                                x: 12px;
+                                width: parent.width - 12px;
+                                height: 100%;
+                                text: label;
+                                font-family: Theme.font-ui-medium;
+                                font-size: 13px;
+                                color: i == root.tab ? Theme.accent-strong : Theme.fg-soft;
+                                vertical-alignment: center;
+                            }
+                            cat-ta := TouchArea {
+                                clicked => { root.tab = i; }
+                            }
+                        }
+                    }
+                }
+
+                // 内容区
+                ScrollView {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 16px;
+                        alignment: start;
+
+                        // —— 外观 ——
+                        if root.tab == 0: VerticalLayout {
+                            spacing: 10px;
+                            FieldLabel { text: "主题"; }
+                            Segmented {
+                                options: ["跟随系统", "亮色", "暗色"];
+                                current <=> root.theme-mode;
+                            }
+                            FieldLabel { text: "界面缩放"; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: Math.round(root.ui-scale * 100) + "%";
+                                    font-family: Theme.font-mono-medium;
+                                    font-size: 13px;
+                                    color: Theme.fg;
+                                    vertical-alignment: center;
+                                    width: 56px;
+                                }
+                                FerricButton {
+                                    text: "−";
+                                    clicked => {
+                                        root.ui-scale = max(0.8, root.ui-scale - 0.1);
+                                    }
+                                }
+                                FerricButton {
+                                    text: "+";
+                                    clicked => {
+                                        root.ui-scale = min(1.6, root.ui-scale + 0.1);
+                                    }
+                                }
+                                FerricButton {
+                                    text: "重置 100%";
+                                    variant: "subtle";
+                                    clicked => { root.ui-scale = 1.0; }
+                                }
+                            }
+                        }
+
+                        // —— 字体 ——
+                        if root.tab == 1: VerticalLayout {
+                            spacing: 10px;
+                            FieldLabel { text: "内嵌字体"; }
+                            Text {
+                                text: "UI：Plus Jakarta Sans（Regular / Medium / SemiBold / Bold）\n等宽：JetBrains Mono（Regular / Medium）\n图标：Lucide\n中文：从系统加载（微软雅黑 / 苹方 / Noto CJK）";
+                                font-family: Theme.font-ui;
+                                font-size: 12.5px;
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // —— 渲染 ——
+                        if root.tab == 2: VerticalLayout {
+                            spacing: 10px;
+                            FieldLabel { text: "渲染后端"; }
+                            Text {
+                                text: root.backend-label;
+                                font-family: Theme.font-ui-medium;
+                                font-size: 13px;
+                                color: Theme.fg;
+                            }
+                            Text {
+                                text: root.gpu-desc;
+                                font-family: Theme.font-ui;
+                                font-size: 12.5px;
+                                color: root.gpu-software ? Theme.danger : Theme.muted;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "Slint 软件渲染：不建任何 GPU 上下文，进程内存与「一个窗口 + 一块位图」相当。\n这是迁移的主要收益 —— egui/wgpu 时代同一台机器上是 ~611MB。";
+                                font-family: Theme.font-ui;
+                                font-size: 12px;
+                                color: Theme.faint;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // —— 更新 ——
+                        if root.tab == 3: VerticalLayout {
+                            spacing: 10px;
+                            CheckBox {
+                                text: "自动检查更新并后台下载";
+                                checked <=> root.auto-update;
+                            }
+                            FerricButton {
+                                text: "立即检查更新";
+                                variant: "default";
+                                clicked => { root.check-update(); }
+                            }
+                        }
+
+                        // —— 数据 ——
+                        if root.tab == 4: VerticalLayout {
+                            spacing: 10px;
+                            FieldLabel { text: "数据目录"; }
+                            Text {
+                                text: root.data-dir;
+                                font-family: Theme.font-mono-medium;
+                                font-size: 12px;
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                FerricButton {
+                                    text: "打开数据文件夹";
+                                    icon: "⌸";
+                                    clicked => { root.open-data-dir(); }
+                                }
+                                FerricButton {
+                                    text: "记录 30 秒内存";
+                                    clicked => { root.record-memory(); }
+                                }
+                            }
+                            if root.mem-status != "": Text {
+                                text: root.mem-status;
+                                font-family: Theme.font-ui;
+                                font-size: 12px;
+                                color: Theme.accent-strong;
+                            }
+                        }
+
+                        // —— 关于 ——
+                        if root.tab == 5: VerticalLayout {
+                            spacing: 10px;
+                            Text {
+                                text: "Ferric " + root.version;
+                                font-family: Theme.font-ui-semibold;
+                                font-size: 16px;
+                                color: Theme.fg;
+                            }
+                            Text {
+                                text: "跨平台原生 Rust 开发者工具箱。\nGUI：Slint（软件渲染）。";
+                                font-family: Theme.font-ui;
+                                font-size: 12.5px;
+                                color: Theme.muted;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Ferric";
+    // 与原 eframe 版一致的默认尺寸与下限。
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 360px;
+    min-height: 280px;
+    no-frame: true;
+    background: Theme.canvas;
+
+    // ——— 状态（Rust 侧读写） ———
+    in property <[ToolEntry]> tools;
+    in-out property <int> active-tool: 0;
+    in-out property <string> rail-filter: "";
+    in-out property <length> rail-width: 264px;
+    in-out property <bool> settings-open: false;
+    in property <string> version: "0.2.0";
+    in property <string> backend-label: "软渲染（CPU）";
+    in property <string> gpu-desc: "CPU 软渲染（Slint software renderer）";
+    in property <bool> gpu-software: true;
+    in property <string> data-dir: "";
+    in property <string> mem-status: "";
+    in property <[string]> toasts;
+
+    // 设置项（双向）
+    in-out property <int> theme-mode: 0;
+    in-out property <float> ui-scale: 1.0;
+    in-out property <bool> auto-update: true;
+    in-out property <int> settings-tab: 0;
+
+    // UUID 工具状态
+    in-out property <int> uuid-kind: 0;
+    in-out property <int> uuid-count: 10;
+    in-out property <int> uuid-namespace: 0;
+    in-out property <string> uuid-custom-ns: "";
+    in-out property <string> uuid-name: "example.com";
+    in-out property <bool> uuid-upper: false;
+    in-out property <bool> uuid-nohyphen: false;
+    in-out property <bool> uuid-as-json: false;
+    in-out property <int> uuid-hist-keep: 0;
+    in property <string> uuid-output: "";
+    in property <bool> uuid-ok: true;
+    in property <string> uuid-status: "就绪";
+    in property <[UuidHistEntry]> uuid-history;
+
+    // ——— 回调（Rust 侧接管） ———
+    callback window-drag();
+    callback window-minimize();
+    callback window-maximize();
+    callback window-close();
+    callback select-tool(int);
+    callback toggle-favorite(int);
+    callback theme-changed(int);
+    callback scale-changed(float);
+    callback open-data-dir();
+    callback record-memory();
+    callback check-update();
+    callback uuid-regenerate();
+    callback uuid-copy();
+    callback uuid-restore-history(int);
+
+    // 当前工具（tools 可能为空，取值前保护）
+    property <ToolEntry> current: root.tools.length > 0
+        ? root.tools[min(root.active-tool, root.tools.length - 1)]
+        : { id: "", name: "", desc: "", icon: "", group: "", migrated: false, favorite: false, visible: true };
+
+    VerticalLayout {
+        // ===== 标题栏 44px =====
+        Rectangle {
+            height: 44px;
+            background: Theme.titlebar;
+
+            // 拖拽区（按钮覆盖其上）
+            drag-ta := TouchArea {
+                width: parent.width - 140px;
+                height: parent.height;
+                moved => { root.window-drag(); }
+            }
+
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 4px;
+                spacing: 0px;
+
+                Text {
+                    text: "Ferric";
+                    font-family: Theme.font-ui-bold;
+                    font-size: 14.5px;
+                    color: Theme.fg;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: 12px;
+                }
+                Text {
+                    text: root.version;
+                    font-family: Theme.font-mono-medium;
+                    font-size: 11.5px;
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                // 设置入口
+                IconButton {
+                    icon: "⚙";
+                    icon-size: 16px;
+                    clicked => { root.settings-open = true; }
+                }
+                Rectangle { width: 4px; }
+                // 窗口按钮
+                IconButton {
+                    icon: "—";
+                    icon-size: 14px;
+                    clicked => { root.window-minimize(); }
+                }
+                IconButton {
+                    icon: "▢";
+                    icon-size: 13px;
+                    clicked => { root.window-maximize(); }
+                }
+                IconButton {
+                    icon: "✕";
+                    icon-size: 14px;
+                    clicked => { root.window-close(); }
+                }
+            }
+
+            // 底部分隔线
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                width: parent.width;
+                background: Theme.border;
+            }
+        }
+
+        HorizontalLayout {
+            // ===== 侧栏 =====
+            Rectangle {
+                width: root.rail-width;
+                background: Theme.rail;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    // 搜索框
+                    FerricLineEdit {
+                        placeholder: "搜索工具…";
+                        text <=> root.rail-filter;
+                    }
+
+                    // 工具列表
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+                            for t[i] in root.tools: SidebarRow {
+                                entry: t;
+                                active: i == root.active-tool;
+                                // 搜索过滤在 Rust 侧做（Slint 的 string 没有
+                                // contains；且中文匹配要按 char 比，交给 Rust 更稳）。
+                                visible: t.visible;
+                                selected => { root.select-tool(i); }
+                                toggle-favorite => { root.toggle-favorite(i); }
+                            }
+                        }
+                    }
+
+                    // 底部：迁移进度提示
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    Text {
+                        text: "Slint 迁移中 · UUID 已完成";
+                        font-family: Theme.font-ui;
+                        font-size: 11px;
+                        color: Theme.faint;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // 右边缘分隔线
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    height: parent.height;
+                    background: Theme.border;
+                }
+            }
+
+            // ===== 主内容区 =====
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.bg;
+
+                VerticalLayout {
+                    // 工具标题条
+                    Rectangle {
+                        height: 64px;
+                        HorizontalLayout {
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            spacing: 12px;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.current.name;
+                                    font-family: Theme.font-ui-bold;
+                                    font-size: 19px;
+                                    color: Theme.fg;
+                                }
+                                Text {
+                                    text: root.current.desc;
+                                    font-family: Theme.font-ui;
+                                    font-size: 12.5px;
+                                    color: Theme.muted;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            width: parent.width;
+                            background: Theme.border;
+                        }
+                    }
+
+                    // 工具主体：已迁移的走真实视图，其余走占位
+                    if root.current.id == "uuid": UuidView {
+                        vertical-stretch: 1;
+                        kind-index <=> root.uuid-kind;
+                        count <=> root.uuid-count;
+                        namespace-index <=> root.uuid-namespace;
+                        custom-ns <=> root.uuid-custom-ns;
+                        name-input <=> root.uuid-name;
+                        upper <=> root.uuid-upper;
+                        nohyphen <=> root.uuid-nohyphen;
+                        as-json <=> root.uuid-as-json;
+                        hist-keep-index <=> root.uuid-hist-keep;
+                        output: root.uuid-output;
+                        ok: root.uuid-ok;
+                        status: root.uuid-status;
+                        history: root.uuid-history;
+                        regenerate => { root.uuid-regenerate(); }
+                        copy-output => { root.uuid-copy(); }
+                        restore-history(i) => { root.uuid-restore-history(i); }
+                    }
+                    if root.current.id != "uuid": MigrationPlaceholder {
+                        vertical-stretch: 1;
+                        tool-name: root.current.name;
+                        tool-desc: root.current.desc;
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== Toast 区（右下角堆叠） =====
+    VerticalLayout {
+        x: parent.width - self.width - 20px;
+        y: parent.height - self.height - 20px;
+        width: 340px;
+        spacing: 8px;
+        alignment: end;
+        for msg in root.toasts: Toast { text: msg; }
+    }
+
+    // ===== 设置浮层 =====
+    SettingsOverlay {
+        width: parent.width;
+        height: parent.height;
+        open <=> root.settings-open;
+        tab <=> root.settings-tab;
+        theme-mode <=> root.theme-mode;
+        ui-scale <=> root.ui-scale;
+        auto-update <=> root.auto-update;
+        backend-label: root.backend-label;
+        gpu-desc: root.gpu-desc;
+        gpu-software: root.gpu-software;
+        version: root.version;
+        data-dir: root.data-dir;
+        mem-status: root.mem-status;
+        close => { root.settings-open = false; }
+        open-data-dir => { root.open-data-dir(); }
+        record-memory => { root.record-memory(); }
+        check-update => { root.check-update(); }
+    }
+}

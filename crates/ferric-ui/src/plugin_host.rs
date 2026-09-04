@@ -13,9 +13,8 @@
 //! - `ferric_manifest() -> i64`             返回 Manifest JSON
 //! - `ferric_process(ptr: i32, len: i32) -> i64`  ProcessIn JSON → ProcessOut JSON
 
-use crate::tool::{Shared, Tool, ToolMeta};
-use crate::{icons, widgets};
-use egui::{RichText, TextEdit, Ui};
+use crate::icons;
+use crate::tool::{Tool, ToolMeta};
 use ferric_core::plugin::{Manifest, OptionSpec, ProcessIn, ProcessOut};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -315,111 +314,14 @@ impl Tool for PluginTool {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, shared: &mut Shared) {
-        let theme = shared.theme;
-
-        // 选项行（按 manifest 渲染）
-        if !self.manifest.options.is_empty() {
-            let specs = self.manifest.options.clone();
-            ui.horizontal_wrapped(|ui| {
-                for (i, spec) in specs.iter().enumerate() {
-                    match (spec, &mut self.opts[i]) {
-                        (OptionSpec::Seg { label, values, .. }, OptState::Seg(sel)) => {
-                            widgets::field_label(ui, &theme, label);
-                            ui.add_space(4.0);
-                            let vals: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
-                            if let Some(n) = widgets::seg(ui, &theme, &vals, *sel) {
-                                *sel = n;
-                                self.dirty = true;
-                            }
-                        }
-                        (OptionSpec::Toggle { label, .. }, OptState::Toggle(on)) => {
-                            if widgets::pill_toggle(ui, &theme, *on, label) {
-                                *on = !*on;
-                                self.dirty = true;
-                            }
-                        }
-                        (OptionSpec::Text { label, hint, .. }, OptState::Text(text)) => {
-                            widgets::field_label(ui, &theme, label);
-                            ui.add_space(4.0);
-                            if ui
-                                .add(
-                                    TextEdit::singleline(text)
-                                        .desired_width(180.0)
-                                        .hint_text(hint.as_str()),
-                                )
-                                .changed()
-                            {
-                                self.dirty = true;
-                            }
-                        }
-                        _ => {}
-                    }
-                    ui.add_space(10.0);
-                }
-            });
-            ui.add_space(10.0);
-        }
-
-        // 输入 / 输出双栏
-        let in_label = self
-            .manifest
-            .input_label
-            .clone()
-            .unwrap_or_else(|| "输入".to_owned());
-        let out_label = self
-            .manifest
-            .output_label
-            .clone()
-            .unwrap_or_else(|| "输出".to_owned());
-        let out_lines = self.output.lines().count();
-        ui.columns(2, |cols| {
-            cols[0].vertical(|ui| {
-                widgets::panel(
-                    ui,
-                    &theme,
-                    &in_label,
-                    |_ui| {},
-                    |ui| {
-                        if widgets::code_area(ui, self.st_id, &mut self.input, true, 14).changed() {
-                            self.dirty = true;
-                        }
-                    },
-                );
-            });
-            cols[1].vertical(|ui| {
-                widgets::panel(
-                    ui,
-                    &theme,
-                    &out_label,
-                    |ui| {
-                        ui.label(
-                            RichText::new(format!("{out_lines} 行"))
-                                .size(11.0)
-                                .color(theme.faint),
-                        );
-                    },
-                    |ui| {
-                        let id = format!("{}-out", self.st_id);
-                        widgets::code_area(ui, &id, &mut self.output, false, 14);
-                    },
-                );
-            });
-        });
-
-        if self.dirty {
-            self.dirty = false;
-            self.run();
-        }
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制输出").clicked() {
-                shared.copy(ui.ctx(), self.output.clone());
-            }
-            ui.add_space(6.0);
-            widgets::status_line(ui, &theme, self.ok, &self.status);
-        });
+    /// 插件视图尚未迁到 Slint。
+    ///
+    /// 插件的 ABI 是「JSON 进、JSON 出」（`ferric_process`），跟 GUI 框架无关，
+    /// 所以插件本体、签名链、沙箱限额全都不受迁移影响 —— 已装的插件不需要
+    /// 重新签名。缺的只是把 `manifest.options` 声明的控件在 `.slint` 里渲染
+    /// 出来这一层（对位 egui 版的 `OptionSpec` → 分段 / 开关 / 文本框映射）。
+    fn migrated(&self) -> bool {
+        false
     }
 
     fn save_draft(&self) -> Option<String> {
