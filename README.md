@@ -1,6 +1,9 @@
 # Ferric
 
-跨平台原生 **Rust** 开发者工具箱。基于 [egui](https://github.com/emilk/egui) / eframe 的高性能即时模式 GUI（非 Tauri/Web 方案），单二进制，运行于 **Windows / macOS / Linux**。
+跨平台原生 **Rust** 开发者工具箱。基于 [Slint](https://slint.dev) 的声明式 GUI + **纯 CPU 软件渲染**（非 Tauri/Web 方案），单二进制，运行于 **Windows / macOS / Linux**。
+
+不碰任何 GPU API：任何机器（含无显卡驱动的虚拟机、精简版 Windows、远程桌面）都能打开，
+进程内存约 **35MB**。
 
 ![Ferric 截图](docs/screenshot.png)
 
@@ -105,9 +108,26 @@ FERRIC_SERVER_PUBKEY=04… FERRIC_RELEASE_PUBKEY=04… \
 ```
 crates/
   ferric-core/   纯逻辑（无 GUI），带单元测试
-  ferric-ui/     egui 视图与外壳；新增工具 = 加 views/*.rs + registry() 注册一行
-  ferric-app/    eframe 入口
+  ferric-ui/     Slint 视图与外壳
+    ui/*.slint     视图：app（外壳 + 各工具）/ widgets（复用组件）/
+                   theme（设计令牌）/ editor（视口虚拟化编辑区）
+    src/views/*.rs 各工具的状态与业务
+    src/editor.rs  rope 文本缓冲（光标 / 选区 / 撤销），只渲染可见行
+  ferric-app/    入口（选后端 → 建窗 → 跑事件循环）
 ```
+
+新增一个工具：写 `views/<id>.rs` + 在 `ui/app.slint` 加视图组件与分支 +
+在 `views::registry()` 注册一行 + 在 `state.rs` 的 `Shell::with_buffer`
+加编辑区映射。`every_builtin_tool_is_migrated` 会守住「别忘了写视图」。
+
+### 为什么编辑区是自己写的
+
+Slint 的原生 `TextEdit` 对**整篇文档**布局，而软件渲染器的坐标空间是 i16
+（上限 32767 像素）。实测**超过约 2190 行直接 panic**，且内存放大 107×。
+
+所以 `src/editor.rs` + `ui/editor.slint` 自己做视口虚拟化：文本存 rope，
+只把可见的那几十行交给渲染层，布局高度恒等于视口高度、与文档多大无关。
+粘进几十万行 JSON 也不会崩、不会卡。
 
 ## 开发
 
@@ -140,16 +160,19 @@ cargo packager --release --formats nsis   # Windows 安装包；macOS 用 dmg，
 
 x64 模拟工具链虽能编译，但模拟进程无法访问 GPU，GUI 跑不起来——请用原生 aarch64 构建。
 
-#### 渲染后端（DX12）
+#### 渲染后端
 
-GUI 用 wgpu 后端，Windows 走 **DX12**。注意 eframe 0.29 默认没给 wgpu 开 `dx12`
-feature，因此 `ferric-app` 在自己的依赖里**显式启用** `wgpu = { features = ["dx12"] }`
-（feature 会合并进 eframe 共用的 wgpu 构建）。否则在没有 Vulkan 驱动、OpenGL 仅 1.1 的
-环境（如 **QEMU 虚拟机**：只有 “Microsoft Basic Render Driver” 软件 **WARP** 适配器）会
-报 `NoSuitableAdapterFound`。
+GUI 走 Slint 的 **software renderer**：纯 CPU 光栅化，不创建任何 GPU 上下文，
+因此没有「挑不到适配器」这回事 —— 无论有没有显卡驱动，行为一致。
 
-WARP 软件光栅化器只支持 **不透明** 表面，所以窗口默认 `with_transparent(false)`；
-有硬件 GPU 时可在 `crates/ferric-app/src/main.rs` 改回 `true` 获得圆角透明效果。
+egui/wgpu 时代那套「按顺序试 DX12 / Vulkan / OpenGL + 跨启动自愈 + 记住哪个
+成功」的机制随之删除（连同 `WGPU_BACKEND` 环境变量）。同一台机器上的内存对比：
+
+| 渲染路径 | 进程内存 |
+|---|---|
+| egui + wgpu（退化成 WARP 软件光栅化） | ~611 MB |
+| **Slint software renderer** | **~35 MB** |
+
 
 ## 排障
 
@@ -168,30 +191,13 @@ WARP 软件光栅化器只支持 **不透明** 表面，所以窗口默认 `with
    大范围渐变效果保持边缘干净，但整体锐度仍受制于环境 —— 开 3D 加速最有效。
 4. **界面缩放非 100%**：设置 → 界面缩放 调回 100% 对比。
 
-### 画面闪烁 / 撕裂 / 打不开
+### 打不开
 
-同一份二进制在不同机器上走的图形路径完全不同（独显走 DX12/Vulkan，虚拟机与精简系统会
-退化到 WARP 软件光栅化，远程桌面又是另一套），这类毛病高度依赖驱动实现，**换一个渲染
-后端往往立刻就好**：
-
-设置 → 渲染后端 → 自动 / DX12 / Vulkan / OpenGL，**重启后生效**。选择记在
-`launch.json` 里（位置见下），启动时在建窗之前读取。
-
-自愈逻辑：启动前写下「正在尝试 X」，画满 3 帧才算成功并清掉。若上次启动崩在半路，
-下次会自动把 X 排到最后、改用下一个后端 —— 因此**再点一次就能进去**，不会永远卡在
-同一个坑里。一次成功启动会清空黑名单（装了驱动、开了 3D 加速，环境是会变好的）。
-你锁定的后端若在本机根本不可用（如虚拟机里没有 ≥3.3 的 OpenGL、没有 Vulkan），
-失败一次后会由兜底后端跑起来，并**自动把选择改回「自动」**且弹提示 ——
-不会陷入「每隔一次启动就报错」的循环。
-
-也可以临时用环境变量覆盖，不写配置：
-
-```sh
-WGPU_BACKEND=gl ferric      # 可选 dx12 / vulkan / gl / metal
-```
-
-启动彻底失败时会弹窗说明，并把详情写进 `startup.log`（发行版隐藏了控制台，
+启动失败会弹窗说明，并把详情写进 `startup.log`（发行版隐藏了控制台，
 stderr 没有去处，日志文件是唯一线索）。
+
+不再有「换个渲染后端试试」这一步 —— 软件渲染不依赖显卡驱动，
+打不开的原因只会是缺系统库或显示服务器连不上，两者都会写进日志。
 
 ### 状态与日志的位置
 
@@ -201,7 +207,9 @@ stderr 没有去处，日志文件是唯一线索）。
 | macOS | `~/Library/Application Support/ferric/` |
 | Linux | `~/.local/share/ferric/` |
 
-里面有 eframe 的界面状态、`launch.json`（渲染后端）与 `startup.log`。删掉即恢复出厂设置。
+里面有界面状态 `app.ron`、`launch.json`（启动诊断标记）与 `startup.log`。
+删掉即恢复出厂设置 —— 从 egui 版升级上来的用户，那份 `app.ron` 会被直接读取
+（同目录、同文件名、同结构），设置与各工具草稿都不会丢。
 
 ### 界面中文显示成方块
 
@@ -209,32 +217,24 @@ stderr 没有去处，日志文件是唯一线索）。
 目录）、macOS 苹方、Linux 的 Noto CJK / 文泉驿；都找不到时会提示。装一个中文字体
 （如 Noto Sans SC）即可。
 
-### Windows：拖动窗口发花 / Alt+Tab 切回闪一下旧画面 / 切回卡顿
+### Windows：拖动窗口发花 / Alt+Tab 切回闪一下旧画面
 
-前两个是 DX12 flip-model 呈现与窗口合成不同步的老毛病，应用里已做缓解：
-拖动窗口期间临时切到免等垂直同步的呈现模式（松手约 300ms 后恢复）；
-失焦期间保持低频重绘并在拿回焦点的瞬间立即出新帧，切回时看到的旧帧
-与当前状态一致，就不显闪。
+这些是 **DX12 flip-model 呈现与窗口合成不同步**的老毛病，而 Ferric 已经
+不走 GPU 了 —— 软件渲染直接把位图交给系统合成，没有交换链、没有呈现队列，
+因此那一整类问题（连同曾经的「Alt+Tab 卡顿缓解」开关与
+`WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT` 环境变量）都不存在了。
 
-若 Alt+Tab 切回仍有可感知的卡顿：**设置 → 渲染后端 → 「Alt+Tab 卡顿缓解（DX12）」**
-开关开/关各试一次（重启后生效），两次点击即完成 A/B 对比 —— 怀疑对象是
-wgpu DX12 的 frame-latency waitable object 在失焦期间长时间不被唤醒。
-不想动设置也可以用环境变量临时试：
-
-```powershell
-$env:WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT="none"; ferric
-```
-
-开了有效请提 issue 告诉我们，好把它固化成默认值；没效则换渲染后端试试。
-设置页会显示**当前实际使用的适配器**（后端 · 显卡名，软件渲染会红字标出），
-切完对比一眼就能确认生效；同一行也写进 `startup.log`。
+仍然看到拖影，请提 issue 并附上 `startup.log`。
 
 ### CPU 占用偏高
 
-软件光栅化（虚拟机 / 无驱动）下每一次重绘都是整窗的纯 CPU 光栅化，所以关键是**别多画帧**。
-Ferric 里唯一会持续出帧的是时间戳工具的实时时钟，它已经做到：对齐秒边界每秒最多一次、
-失焦 / 最小化 / 被完全遮挡时零调度、静置 90 秒自动停表（动一下即恢复），也可以直接关掉
-「实时刷新」。其余工具不做任何空转重绘。
+Slint 是 retained mode：**只有 property 变化时才重画那一小块脏区域**，
+静置时进程基本不耗 CPU。egui 时代「每帧重建整棵 UI」带来的那些补偿逻辑
+（时间戳挂表要对齐秒边界、失焦零调度、静置自动停表）因此全部删掉了。
+
+时间戳工具的「实时刷新」默认**关**：一个一直在跳的数字容易让人以为界面卡了，
+而多数用户是来做一次换算的。需要挂表时在工具里打开即可。
+
 
 ## 许可
 

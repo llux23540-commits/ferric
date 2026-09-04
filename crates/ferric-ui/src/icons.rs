@@ -1,5 +1,10 @@
 //! Lucide 图标字体的字形常量。
 //!
+//! 下面那张表是一份**可选图标集**，不是「正在用的图标」清单：新增工具或
+//! 按钮时从这里挑一个，而不是去翻 Lucide 上游的 info.json。所以整个模块
+//! 允许存在未被引用的常量 —— 删掉它们只会让下次加界面时再翻一遍码点表。
+#![allow(dead_code)]
+//!
 //! 码点对照 Lucide `info.json`（`lucide-static`），与设计原型所用图标一致。
 //! Slint 侧用 `font-family: "lucide"`（见 `ui/theme.slint` 的 `font-icons`）
 //! 加上这里的字符渲染图标；Rust 侧只提供常量，不再构造富文本。
@@ -8,6 +13,11 @@
 pub const FAMILY: &str = crate::fonts::LUCIDE_FAMILY;
 
 // ---- 字形常量（对照 Lucide info.json）----
+//
+// 这是一份**可选图标集**，不是「正在用的图标」列表：新增工具或按钮时从这里
+// 挑一个，而不是去翻 Lucide 的码点表。因此允许暂时没被引用。
+// 删掉未用的会让下次加界面时又得翻一遍上游 info.json。
+
 pub const CODE: char = '\u{e093}';
 pub const BRACES: char = '\u{e36a}';
 pub const CLOCK: char = '\u{e087}';

@@ -111,13 +111,6 @@ const FIRST_CHECK_DELAY_SECS: f64 = 25.0;
 /// 数据就重绘」（≈33fps）—— 一路都是同一个错误的不同剂量。
 pub(crate) const PROGRESS_BEAT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// 后台任务在跑时的兜底轮询间隔。
-///
-/// 正常路径**不靠它**：每个发消息的地方都紧跟着一次 `request_repaint*`，
-/// 结果一到就会被唤醒。它只是防「某次唤醒丢了就再也醒不过来」的保险，
-/// 因此可以很慢 —— 1 秒醒一次不会让任何人看出延迟。
-pub(crate) const IDLE_BEAT: std::time::Duration = std::time::Duration::from_secs(1);
-
 /// 两次自动检查之间的最小间隔。检查更新会把本机版本号发给服务器，
 /// 没必要频繁 —— 一天四次足够，用户随时可以手动点。
 pub const AUTO_CHECK_INTERVAL_SECS: u64 = 6 * 3600;

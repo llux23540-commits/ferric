@@ -180,6 +180,26 @@ enum OptState {
     Text(String),
 }
 
+/// 选项控件的三种形态。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OptKind {
+    Seg,
+    Toggle,
+    Text,
+}
+
+/// manifest 声明的一个选项，已摊平成界面能直接画的形状。
+pub struct PluginOptionRow {
+    pub kind: OptKind,
+    pub label: String,
+    /// 分段控件的候选值（其余形态为空）。
+    pub values: Vec<String>,
+    pub selected: usize,
+    pub on: bool,
+    pub text: String,
+    pub hint: String,
+}
+
 impl OptState {
     fn value(&self, spec: &OptionSpec) -> String {
         match (self, spec) {
@@ -204,10 +224,12 @@ pub struct PluginTool {
     st_desc: &'static str,
     st_keywords: &'static [&'static str],
     opts: Vec<OptState>,
-    input: String,
-    output: String,
-    ok: bool,
-    status: String,
+    /// 输入 / 输出用虚拟化编辑区：插件可能吐出很长的结果，
+    /// 而 Slint 原生 TextEdit 超过约 2190 行会 panic（见 editor 模块）。
+    pub input: crate::editor::TextBuffer,
+    pub output: crate::editor::TextBuffer,
+    pub ok: bool,
+    pub status: String,
     dirty: bool,
 }
 
@@ -249,12 +271,104 @@ impl PluginTool {
             st_desc,
             st_keywords,
             opts,
-            input: String::new(),
-            output: String::new(),
+            input: crate::editor::TextBuffer::new(""),
+            output: crate::editor::TextBuffer::new(""),
             ok: true,
             status: "就绪".to_owned(),
             dirty: true,
         }
+    }
+
+    /// manifest 声明的选项，摊平成「界面能直接画」的形状。
+    ///
+    /// 三种控件（分段 / 开关 / 文本）在 Slint 侧各有一段渲染分支；
+    /// 这里只负责把 kind、标签、候选值与当前值交出去。
+    pub fn option_rows(&self) -> Vec<PluginOptionRow> {
+        self.manifest
+            .options
+            .iter()
+            .zip(&self.opts)
+            .map(|(spec, st)| match (spec, st) {
+                (
+                    OptionSpec::Seg {
+                        label, values, ..
+                    },
+                    OptState::Seg(sel),
+                ) => PluginOptionRow {
+                    kind: OptKind::Seg,
+                    label: label.clone(),
+                    values: values.clone(),
+                    selected: *sel,
+                    on: false,
+                    text: String::new(),
+                    hint: String::new(),
+                },
+                (OptionSpec::Toggle { label, .. }, OptState::Toggle(on)) => PluginOptionRow {
+                    kind: OptKind::Toggle,
+                    label: label.clone(),
+                    values: Vec::new(),
+                    selected: 0,
+                    on: *on,
+                    text: String::new(),
+                    hint: String::new(),
+                },
+                (OptionSpec::Text { label, hint, .. }, OptState::Text(t)) => PluginOptionRow {
+                    kind: OptKind::Text,
+                    label: label.clone(),
+                    values: Vec::new(),
+                    selected: 0,
+                    on: false,
+                    text: t.clone(),
+                    hint: hint.clone(),
+                },
+                // spec 与 state 对不上说明加载时就错了。给一个惰性行而不是 panic ——
+                // 一个坏插件不该让整个应用打不开。
+                (spec, _) => PluginOptionRow {
+                    kind: OptKind::Text,
+                    label: spec.key().to_owned(),
+                    values: Vec::new(),
+                    selected: 0,
+                    on: false,
+                    text: String::new(),
+                    hint: "（选项类型与插件声明不一致）".to_owned(),
+                },
+            })
+            .collect()
+    }
+
+    /// 改第 `idx` 个选项。分段传索引、开关传 0/1、文本传字符串。
+    /// 越界索引忽略 —— 下标来自界面模型，对不上说明有 bug，静默保持比 panic 好。
+    pub fn set_option(&mut self, idx: usize, num: i32, text: &str) {
+        let Some(st) = self.opts.get_mut(idx) else {
+            return;
+        };
+        match st {
+            OptState::Seg(sel) => *sel = num.max(0) as usize,
+            OptState::Toggle(on) => *on = num != 0,
+            OptState::Text(t) => *t = text.to_owned(),
+        }
+        self.dirty = true;
+    }
+
+    /// 输入变了（外壳在编辑后调）。
+    pub fn on_edited(&mut self) {
+        self.dirty = true;
+    }
+
+    /// 把待处理的改动跑掉。返回是否真的跑了。
+    pub fn run_if_dirty(&mut self) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        self.dirty = false;
+        self.run();
+        true
+    }
+
+    /// 立即处理（点「运行」）。
+    pub fn run_now(&mut self) {
+        self.dirty = false;
+        self.run();
     }
 
     fn plugin_id(&self) -> &str {
@@ -267,7 +381,7 @@ impl PluginTool {
             options.insert(spec.key().to_owned(), st.value(spec));
         }
         let pin = ProcessIn {
-            input: self.input.clone(),
+            input: self.input.text(),
             options,
         };
         let in_json = match serde_json::to_string(&pin) {
@@ -282,7 +396,7 @@ impl PluginTool {
             serde_json::from_str::<ProcessOut>(&s).map_err(|e| format!("插件出参非法：{e}"))
         }) {
             Ok(out) if out.ok => {
-                self.output = out.output;
+                self.output.set_text(&out.output);
                 self.ok = true;
                 self.status = "完成".to_owned();
             }
@@ -314,14 +428,21 @@ impl Tool for PluginTool {
         }
     }
 
-    /// 插件视图尚未迁到 Slint。
+    /// 插件视图已迁到 Slint（见 `ui/app.slint` 的 `PluginView`）。
     ///
-    /// 插件的 ABI 是「JSON 进、JSON 出」（`ferric_process`），跟 GUI 框架无关，
-    /// 所以插件本体、签名链、沙箱限额全都不受迁移影响 —— 已装的插件不需要
-    /// 重新签名。缺的只是把 `manifest.options` 声明的控件在 `.slint` 里渲染
-    /// 出来这一层（对位 egui 版的 `OptionSpec` → 分段 / 开关 / 文本框映射）。
+    /// 插件 ABI 是「JSON 进、JSON 出」（`ferric_process`），跟 GUI 框架无关，
+    /// 所以插件本体、签名链、沙箱限额全都不受迁移影响 ——
+    /// **已装的插件不需要重新签名**。
     fn migrated(&self) -> bool {
-        false
+        true
+    }
+
+    fn as_plugin(&self) -> Option<&PluginTool> {
+        Some(self)
+    }
+
+    fn as_plugin_mut(&mut self) -> Option<&mut PluginTool> {
+        Some(self)
     }
 
     fn save_draft(&self) -> Option<String> {
@@ -330,7 +451,7 @@ impl Tool for PluginTool {
             options.insert(spec.key().to_owned(), st.value(spec));
         }
         serde_json::to_string(&PluginDraft {
-            input: self.input.clone(),
+            input: self.input.text(),
             options,
         })
         .ok()
@@ -338,7 +459,7 @@ impl Tool for PluginTool {
 
     fn load_draft(&mut self, data: &str) {
         if let Ok(d) = serde_json::from_str::<PluginDraft>(data) {
-            self.input = d.input;
+            self.input.set_text(&d.input);
             for (i, spec) in self.manifest.options.clone().iter().enumerate() {
                 let Some(v) = d.options.get(spec.key()) else {
                     continue;

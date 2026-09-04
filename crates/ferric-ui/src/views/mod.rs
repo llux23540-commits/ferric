@@ -3,10 +3,13 @@
 //! 全部 11 个内置工具都已迁到 Slint：视图在 `ui/app.slint`，状态与业务在
 //! 各自的 `views/*.rs`。
 //!
-//! 新增一个工具 = 写 `views/<id>.rs`（形状参照 `views/uuid.rs`：状态 + 业务
-//! + 索引映射 + `migrated() -> true`）+ 在 `ui/app.slint` 里加视图组件与分支
-//! + 在这里注册一行 + 在 `state.rs` 的 `Shell::with_buffer` 里加编辑区映射。
-//! 侧栏顺序 = 此处顺序，与 egui 版逐项对齐，不要重排。
+//! 新增一个工具需要四步：
+//!
+//! 1. 写 `views/<id>.rs`（形状参照 `views/uuid.rs`：状态 + 业务 + 索引映射
+//!    + `migrated() -> true`）；
+//! 2. 在 `ui/app.slint` 里加视图组件与分支；
+//! 3. 在这里注册一行（侧栏顺序 = 此处顺序，与 egui 版逐项对齐，不要重排）；
+//! 4. 若带编辑区，在 `state.rs` 的 `Shell::with_buffer` 里加映射。
 //!
 //! `every_builtin_tool_is_migrated` 守着「新工具别忘了实现视图」。
 
@@ -34,7 +37,6 @@ pub use timestamp::TimestampTool;
 pub use uuid::UuidTool;
 pub use yaml::YamlTool;
 
-use crate::icons;
 use crate::tool::Tool;
 /// 全部工具的注册表。侧栏顺序即此顺序（与 egui 版逐项对齐）。
 pub fn registry() -> Vec<Box<dyn Tool>> {

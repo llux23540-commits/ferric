@@ -198,7 +198,18 @@ impl MarketTool {
                         Ok(listing) => {
                             self.items = listing.items;
                             self.ok = true;
-                            self.status = format!("{} 个插件", self.items.len());
+                            // 取不全必须说出来。以前写死 page=1&size=100，
+                            // 服务端超过 100 个插件时后面的直接消失，界面上还
+                            // 理直气壮写着「共 100 个插件」—— 用户没有任何线索
+                            // 知道自己看到的是残缺的一份。
+                            self.status = if listing.truncated {
+                                format!(
+                                    "{} 个插件（还有更多未取到 —— 用搜索缩小范围）",
+                                    self.items.len()
+                                )
+                            } else {
+                                format!("{} 个插件", self.items.len())
+                            };
                         }
                         Err(e) => {
                             self.ok = false;

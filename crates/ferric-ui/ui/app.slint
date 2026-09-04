@@ -35,6 +35,18 @@ struct RegexMatch {
     groups: [string],
 }
 
+// 插件 manifest 声明的一个选项控件。
+// kind: 0 分段 / 1 开关 / 2 文本
+struct PluginOption {
+    kind: int,
+    label: string,
+    values: [string],
+    selected: int,
+    on: bool,
+    text: string,
+    hint: string,
+}
+
 // 插件市场的一张卡片。
 struct PluginCard {
     slug: string,
@@ -1975,6 +1987,128 @@ component MarketView inherits Rectangle {
     }
 }
 
+// ——— WASM 插件的通用视图（按 manifest 渲染控件） ———
+//
+// 插件 ABI 是「JSON 进、JSON 出」，选项由 manifest 声明。这里按声明的三种
+// 形态（分段 / 开关 / 文本）各画一段，插件本身不需要知道界面长什么样。
+component PluginView inherits Rectangle {
+    in property <[PluginOption]> options;
+    in property <EditorState> input-state;
+    in property <EditorState> output-state;
+    in property <bool> ok: true;
+    in property <string> status;
+
+    callback option-changed(int, int, string);
+    callback do-run();
+    callback copy-output();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // manifest 声明的选项
+        if root.options.length > 0: Card {
+            vertical-stretch: 0;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                for opt[i] in root.options: HorizontalLayout {
+                    spacing: 10px;
+                    height: 38px;
+                    FieldLabel {
+                        text: opt.label;
+                        width: 120px;
+                        vertical-alignment: center;
+                    }
+                    // 分段单选
+                    if opt.kind == 0: Segmented {
+                        options: opt.values;
+                        current: opt.selected;
+                        changed(n) => { root.option-changed(i, n, ""); }
+                    }
+                    // 开关
+                    if opt.kind == 1: Segmented {
+                        options: ["开", "关"];
+                        current: opt.on ? 0 : 1;
+                        changed(n) => { root.option-changed(i, n == 0 ? 1 : 0, ""); }
+                    }
+                    // 单行文本
+                    if opt.kind == 2: FerricLineEdit {
+                        horizontal-stretch: 1;
+                        text: opt.text;
+                        placeholder: opt.hint;
+                        edited(t) => { root.option-changed(i, 0, t); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            FerricButton {
+                text: "运行";
+                variant: "primary";
+                clicked => { root.do-run(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: root.ok ? Theme.muted : Theme.danger;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            FerricButton {
+                text: "复制输出";
+                variant: "subtle";
+                clicked => { root.copy-output(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+            EditorPane {
+                title: "输入";
+                which: "plugin-in";
+                state: root.input-state;
+                horizontal-stretch: 1;
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+            EditorPane {
+                title: "输出";
+                which: "plugin-out";
+                state: root.output-state;
+                read-only: true;
+                hint: "只读";
+                horizontal-stretch: 1;
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
     in property <ToolEntry> entry;
     in property <bool> active;
@@ -2324,6 +2458,7 @@ component SettingsOverlay inherits Rectangle {
     callback open-data-dir();
     callback record-memory();
     callback check-update();
+    callback reset-demo();
 
     visible: root.open;
     background: rgba(0, 0, 0, 0.45);
@@ -2526,6 +2661,11 @@ component SettingsOverlay inherits Rectangle {
                                     text: "记录 30 秒内存";
                                     clicked => { root.record-memory(); }
                                 }
+                                FerricButton {
+                                    text: "重置演示数据";
+                                    variant: "subtle";
+                                    clicked => { root.reset-demo(); }
+                                }
                             }
                             if root.mem-status != "": Text {
                                 text: root.mem-status;
@@ -2725,6 +2865,23 @@ export component AppWindow inherits Window {
     in property <bool> market-installing;
     in property <int> market-pending;
 
+    // 当前选中的 WASM 插件（内置工具时为空）
+    in property <[PluginOption]> plugin-options;
+    in property <EditorState> plugin-in;
+    in property <EditorState> plugin-out;
+    in property <bool> plugin-ok: true;
+    in property <string> plugin-status: "";
+    // 当前工具是不是插件 —— 决定走 PluginView 还是内置分支
+    in property <bool> current-is-plugin;
+
+    // 更新器状态
+    // 0 空闲 / 1 检查中 / 2 已最新 / 3 发现新版 / 4 下载中 / 5 可安装 / 6 失败
+    in property <int> update-phase;
+    in property <string> update-version: "";
+    in property <int> update-progress;
+    in property <string> update-note: "";
+    in-out property <bool> update-dialog-open;
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -2843,6 +3000,16 @@ export component AppWindow inherits Window {
     callback market-uninstall(string);
     callback market-update-all();
 
+    // WASM 插件
+    callback plugin-option-changed(int, int, string);
+    callback plugin-run();
+    callback plugin-copy();
+
+    // 更新器
+    callback update-install();
+    callback update-dismiss();
+    callback reset-demo();
+
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
         ? root.tools[min(root.active-tool, root.tools.length - 1)]
@@ -2854,11 +3021,20 @@ export component AppWindow inherits Window {
             height: 44px;
             background: Theme.titlebar;
 
-            // 拖拽区（按钮覆盖其上）
+            // 拖拽区（右侧留出 180px 给窗口按钮，按钮声明在后面因此覆盖其上）。
+            //
+            // 在**按下瞬间**就交给系统拖动，而不是等 `moved`：winit 的
+            // drag_window 要求在鼠标仍按下时调用，等移动事件到达时那一拍
+            // 已经过去了（实测「拖了没反应」就是这个原因）。
             drag-ta := TouchArea {
-                width: parent.width - 140px;
+                width: parent.width - 180px;
                 height: parent.height;
-                moved => { root.window-drag(); }
+                mouse-cursor: default;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        root.window-drag();
+                    }
+                }
             }
 
             HorizontalLayout {
@@ -2883,6 +3059,21 @@ export component AppWindow inherits Window {
                     color: Theme.faint;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                }
+
+                // 更新就绪时顶栏常驻一个入口。用户点了「稍后」之后
+                // 仍然要能找回来 —— 否则那次更新就等于被丢掉了。
+                if root.update-phase == 5: FerricButton {
+                    text: "安装 v" + root.update-version;
+                    variant: "primary";
+                    clicked => { root.update-dialog-open = true; }
+                }
+                if root.update-phase == 4: Text {
+                    text: "更新下载中 " + root.update-progress + "%";
+                    font-family: Theme.font-ui;
+                    font-size: 11.5px;
+                    color: Theme.muted;
+                    vertical-alignment: center;
                 }
 
                 // 设置入口
@@ -3292,6 +3483,26 @@ export component AppWindow inherits Window {
                         do-uninstall(s) => { root.market-uninstall(s); }
                         do-update-all => { root.market-update-all(); }
                     }
+                    // WASM 插件：按 manifest 渲染控件。所有内置工具的 id 都不会
+                    // 命中这里，所以用一个显式标记而不是「id 不在白名单里」。
+                    if root.current-is-plugin: PluginView {
+                        vertical-stretch: 1;
+                        options: root.plugin-options;
+                        input-state: root.plugin-in;
+                        output-state: root.plugin-out;
+                        ok: root.plugin-ok;
+                        status: root.plugin-status;
+                        option-changed(i, n, t) => { root.plugin-option-changed(i, n, t); }
+                        do-run => { root.plugin-run(); }
+                        copy-output => { root.plugin-copy(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
                     // 未迁移的工具走占位。条件用 `migrated` 而不是逐个列 id ——
                     // 每迁完一个只需把 Tool::migrated 翻成 true 并加上面那样一个分支。
                     if !root.current.migrated: MigrationPlaceholder {
@@ -3314,6 +3525,79 @@ export component AppWindow inherits Window {
         for msg in root.toasts: Toast { text: msg; }
     }
 
+    // ===== 更新框 =====
+    //
+    // 后台**绝不自动安装**：那一步会关掉用户正在用的应用，必须他自己点。
+    if root.update-dialog-open && root.update-phase == 5: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.45);
+        TouchArea {
+            clicked => { root.update-dialog-open = false; }
+        }
+
+        Rectangle {
+            width: min(520px, parent.width - 80px);
+            height: min(360px, parent.height - 80px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.bg;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.border-2;
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: "发现新版本 v" + root.update-version;
+                    font-family: Theme.font-ui-bold;
+                    font-size: 17px;
+                    color: Theme.fg;
+                }
+                Text {
+                    text: "已下载并通过 sha256 + 魔数 + 离线签名三重校验。";
+                    font-family: Theme.font-ui;
+                    font-size: 12.5px;
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+                Rectangle {
+                    background: Theme.code-bg;
+                    border-radius: 8px;
+                    vertical-stretch: 1;
+                    ScrollView {
+                        Text {
+                            x: 10px;
+                            y: 8px;
+                            width: parent.width - 20px;
+                            text: root.update-note;
+                            font-family: Theme.font-ui;
+                            font-size: 12px;
+                            color: Theme.fg-soft;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    FerricButton {
+                        text: "稍后";
+                        variant: "subtle";
+                        clicked => { root.update-dismiss(); }
+                    }
+                    FerricButton {
+                        text: "立即安装并重启";
+                        variant: "primary";
+                        clicked => { root.update-install(); }
+                    }
+                }
+            }
+        }
+    }
+
     // ===== 设置浮层 =====
     SettingsOverlay {
         width: parent.width;
@@ -3333,5 +3617,6 @@ export component AppWindow inherits Window {
         open-data-dir => { root.open-data-dir(); }
         record-memory => { root.record-memory(); }
         check-update => { root.check-update(); }
+        reset-demo => { root.reset-demo(); }
     }
 }

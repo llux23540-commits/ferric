@@ -98,6 +98,12 @@ pub fn browse(source: &Source, query: &str) -> Result<Listing, String> {
 }
 
 /// 问「本地这些插件有没有新版」。
+/// 批量问服务端「哪些已装插件有新版」。
+///
+/// 目前市场页用的是 `browse` 返回的逐项 `has_update`，所以这条没有调用点。
+/// 保留是因为它是**另一种粒度**：不拉整个列表也能只问更新，将来做「后台
+/// 静默检查插件更新」时要用。
+#[allow(dead_code)]
 pub fn check_updates(source: &Source) -> Result<Vec<String>, String> {
     match source {
         Source::Server(p) => check_updates_server(p),
@@ -148,6 +154,10 @@ pub fn reset_demo(source: &Source) {
 ///
 /// 真实安装会落到插件目录，宿主随后热加载即可生效；演示安装**不写**插件目录
 /// （没有可验签的字节），所以它永远不会出现在侧栏 —— 这一点必须如实告诉用户。
+/// 装完是否要立刻热加载侧栏（演示源装的是假插件，不必重载）。
+///
+/// 现在外壳无条件热加载（多一次扫目录，代价可忽略），所以暂无调用点。
+#[allow(dead_code)]
 pub fn takes_effect_in_sidebar(source: &Source) -> bool {
     matches!(source, Source::Server(_))
 }

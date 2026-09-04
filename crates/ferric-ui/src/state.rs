@@ -49,6 +49,12 @@ pub struct AppState {
     pub source_pref: crate::source::SourcePref,
     pub server_override: Option<crate::net::ServerProfile>,
     pub github_override: Option<crate::github::GithubSource>,
+    /// 更新器（检查 / 下载 / 校验，全在后台线程）。
+    pub updater: crate::updater::Updater,
+    /// 更新框是否打开（点「稍后」后关闭，但顶栏入口还在）。
+    pub update_dialog_open: bool,
+    /// 更新器启动至今的秒数 —— `Updater::tick` 用它做「启动后延迟首检」。
+    update_clock: f64,
     /// 30 秒内存采样状态机；None = 不在工作。
     pub mem_recorder: Option<crate::mem::MemoryRecorder>,
     /// 设置页「记录内存」那一行的状态文案。
@@ -116,9 +122,47 @@ impl AppState {
             github_override: persist
                 .github_repo
                 .map(|repo| crate::github::GithubSource { repo }),
+            updater: crate::updater::Updater::default(),
+            update_dialog_open: false,
+            update_clock: 0.0,
             mem_recorder: None,
             mem_status: String::new(),
         }
+    }
+
+    /// 距上次成功检查是否已经够久（跨启动节流）。
+    ///
+    /// 只放内存里的话，开十次应用就查十次 —— 检查会把本机版本号发给服务器。
+    pub fn update_check_is_stale(&self) -> bool {
+        match self.last_update_check {
+            None => true,
+            Some(t) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                now.saturating_sub(t) >= crate::updater::AUTO_CHECK_INTERVAL_SECS as i64
+            }
+        }
+    }
+
+    /// 当前选中项若是 WASM 插件，借出它。
+    ///
+    /// 插件在 `tools` 里内置工具之后那一截（`builtin_tools..`），装卸时整段
+    /// 重建，所以不像内置工具那样有独立字段 —— 按当前选中项现取。
+    pub fn active_plugin(&self) -> Option<&crate::plugin_host::PluginTool> {
+        if self.active < self.builtin_tools {
+            return None;
+        }
+        self.tools.get(self.active)?.as_plugin()
+    }
+
+    pub fn active_plugin_mut(&mut self) -> Option<&mut crate::plugin_host::PluginTool> {
+        if self.active < self.builtin_tools {
+            return None;
+        }
+        let idx = self.active;
+        self.tools.get_mut(idx)?.as_plugin_mut()
     }
 
     /// 当前生效的数据源（自建服务端 / GitHub 发布页 / 演示数据）。
@@ -205,33 +249,13 @@ impl AppState {
         };
         persist::save(&p);
     }
-
-    /// 当前选中的工具是不是 UUID（外壳据此决定要不要同步 UUID 的 property）。
-    fn active_is_uuid(&self) -> bool {
-        self.tools
-            .get(self.active)
-            .map(|t| t.meta().id == "uuid")
-            .unwrap_or(false)
-    }
-
-    /// 取出 UUID 工具的可变引用。注册表里它一定在，但仍按 Option 处理 ——
-    /// 插件热加载会重排 `tools`，硬 unwrap 是给未来埋雷。
-    fn uuid_mut(&mut self) -> Option<&mut views::UuidTool> {
-        let idx = self.tools.iter().position(|t| t.meta().id == "uuid")?;
-        // 这里需要向下转型。`Tool` 是 trait object，标准做法是给 trait 加
-        // `as_any`；但 UUID 是注册表里由我们自己构造的具体类型，位置固定，
-        // 用 `downcast` 不如直接保留一份具体类型的句柄来得干净 ——
-        // 见 `AppState::uuid`（下面用独立字段持有）。
-        let _ = idx;
-        None
-    }
 }
 
 /// 已迁移的工具各持一个具体类型的字段。
 ///
-/// 为什么不从 `Vec<Box<dyn Tool>>` 里向下转型：那需要给 `Tool` 加
-/// `as_any`，一个只服务于转型的接口。迁移期字段会逐个增加；等 10 个工具
-/// 全迁完，再统一收敛成 `enum ToolState { Json(..), Diff(..), … }`。
+/// 为什么不从 `Vec<Box<dyn Tool>>` 里向下转型：那需要给 `Tool` 加一个
+/// 只服务于转型的通用后门。插件是唯一例外（要读 manifest 渲染控件），
+/// 用 `Tool::as_plugin` 把能力限定得刚好够用。
 pub struct Shell {
     pub state: Rc<RefCell<AppState>>,
     pub uuid: Rc<RefCell<views::UuidTool>>,
@@ -245,6 +269,12 @@ pub struct Shell {
     pub json: Rc<RefCell<views::JsonTool>>,
     pub diff: Rc<RefCell<views::DiffTool>>,
     pub market: Rc<RefCell<views::MarketTool>>,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Shell {
@@ -342,6 +372,8 @@ impl Shell {
         self.sync_json(win);
         self.sync_diff(win);
         self.sync_market(win);
+        Self::sync_plugin(&self.state, win);
+        Self::push_update(&self.state, win);
         self.sync_toasts(win);
     }
 
@@ -672,6 +704,73 @@ impl Shell {
         win.set_market_cards(ModelRc::new(VecModel::from(cards)));
     }
 
+    /// 当前选中的 WASM 插件 → property。
+    ///
+    /// 插件不像内置工具那样有专属字段：它们在 `AppState::tools` 里（内置工具
+    /// 之后那一截），装卸时整段重建。所以这里按当前选中项现取，
+    /// 而不是持一个 `Rc<RefCell<PluginTool>>`。
+    fn sync_plugin(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
+        let s = state.borrow();
+        let Some(p) = s.active_plugin() else {
+            win.set_current_is_plugin(false);
+            return;
+        };
+        win.set_current_is_plugin(true);
+        win.set_plugin_ok(p.ok);
+        win.set_plugin_status(SharedString::from(p.status.clone()));
+        win.set_plugin_in(editor_bridge::state_of(&p.input));
+        win.set_plugin_out(editor_bridge::state_of(&p.output));
+
+        let rows: Vec<PluginOption> = p
+            .option_rows()
+            .into_iter()
+            .map(|r| PluginOption {
+                kind: match r.kind {
+                    crate::plugin_host::OptKind::Seg => 0,
+                    crate::plugin_host::OptKind::Toggle => 1,
+                    crate::plugin_host::OptKind::Text => 2,
+                },
+                label: SharedString::from(r.label),
+                values: ModelRc::new(VecModel::from(
+                    r.values.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+                )),
+                selected: r.selected as i32,
+                on: r.on,
+                text: SharedString::from(r.text),
+                hint: SharedString::from(r.hint),
+            })
+            .collect();
+        win.set_plugin_options(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// 更新器状态 → property。
+    fn push_update(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
+        use crate::updater::Phase;
+        let s = state.borrow();
+        let (phase, version, progress, note) = match &s.updater.phase {
+            Phase::Idle => (0, String::new(), 0, String::new()),
+            Phase::Checking => (1, String::new(), 0, String::new()),
+            Phase::UpToDate => (2, String::new(), 0, String::new()),
+            Phase::Available(i) => (3, i.version.clone(), 0, i.notes.clone()),
+            Phase::Downloading { done, total } => {
+                let pct = if *total == 0 {
+                    0
+                } else {
+                    ((*done as f64 / *total as f64) * 100.0).clamp(0.0, 100.0) as i32
+                };
+                (4, String::new(), pct, String::new())
+            }
+            Phase::Ready { info, .. } => (5, info.version.clone(), 100, info.notes.clone()),
+            // 失败**必须与「已最新」分开显示** —— 否则中间人丢包就能伪装成已最新。
+            Phase::Failed(e) => (6, String::new(), 0, e.clone()),
+        };
+        win.set_update_phase(phase);
+        win.set_update_version(SharedString::from(version));
+        win.set_update_progress(progress);
+        win.set_update_note(SharedString::from(note));
+        win.set_update_dialog_open(s.update_dialog_open);
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -701,19 +800,29 @@ impl Shell {
         self.wire_json(win);
         self.wire_diff(win);
         self.wire_market(win);
+        self.wire_plugin(win);
+        self.wire_updater(win);
         self.wire_editors(win);
     }
 
-    /// 窗口按钮：最小化 / 最大化 / 关闭。
+    /// 窗口按钮：拖动 / 最小化 / 最大化 / 关闭。
     ///
-    /// 拖动不在这里：`no-frame` 窗口的拖动 Slint 没给跨平台 API，
-    /// `.slint` 里那个 `window-drag` 回调留着占位，实际拖动交给
-    /// 标题栏 TouchArea 的 `moved` —— winit 后端在 Windows 上会把
-    /// 无边框窗口的标题区当系统拖动区处理。
+    /// 自绘标题栏（`no-frame`）意味着这四件事都得自己接。
     fn wire_window(&self, win: &AppWindow) {
-        win.on_window_drag(|| {
-            // 见上：暂不接系统拖动。留空而不是删掉回调，是为了 .slint 侧
-            // 的结构不用改 —— 接上真实实现时只动这里。
+        let w = win.as_weak();
+        win.on_window_drag(move || {
+            let Some(win) = w.upgrade() else { return };
+            // 交给系统做拖动（winit 的 drag_window）。自己按鼠标位移改窗口
+            // 坐标也能动，但那样拖动期间每帧都要重排 + 重画整窗 ——
+            // 软件渲染的机器上会明显拖影。系统拖动是合成器负责搬运。
+            //
+            // 走 unstable-winit-030：Slint 没有跨平台的「开始拖动窗口」API，
+            // 而无边框窗口（no-frame）没有系统标题栏可拖。失败静默 ——
+            // 拖不动窗口不该变成一条报错。
+            use slint::winit_030::WinitWindowAccessor;
+            win.window().with_winit_window(|ww| {
+                let _ = ww.drag_window();
+            });
         });
 
         let w = win.as_weak();
@@ -754,6 +863,10 @@ impl Shell {
             };
             let Some(win) = w.upgrade() else { return };
             win.set_active_tool(i as i32);
+
+            // 切到插件就把它的 manifest 控件与输入输出灌进去
+            //（插件没有独立字段，是按当前选中项现取的）。
+            Self::sync_plugin(&state, &win);
 
             // 进插件市场就自动拉一次列表。以前必须先点「刷新」才有内容 ——
             // 用户点开「插件市场」本来就是为了看列表。
@@ -853,9 +966,45 @@ impl Shell {
             }
         });
 
+        // 「重置演示数据」：把演示源的已装插件记录清掉。
+        // 只在演示数据源下有意义 —— 它碰不到任何安全边界（那条路只接受
+        // 验签通过的字节），能造成的最坏结果就是界面上少几条假数据。
         let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_reset_demo(move || {
+            let src = state.borrow().source();
+            match src {
+                Some(src) => {
+                    crate::market::reset_demo(&src);
+                    state.borrow_mut().shared.toast("已重置演示数据");
+                }
+                None => state.borrow_mut().shared.toast("当前数据源没有演示数据"),
+            }
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
         win.on_check_update(move || {
-            state.borrow_mut().shared.toast("更新检查已排入后台");
+            let src = state.borrow().source();
+            match src {
+                Some(src) => {
+                    state.borrow_mut().updater.check(src);
+                    state.borrow_mut().shared.toast("正在检查更新…");
+                }
+                None => {
+                    state
+                        .borrow_mut()
+                        .shared
+                        .toast("本构建未配置更新源（设置 → 数据源）");
+                }
+            }
+            if let Some(win) = w.upgrade() {
+                Self::push_update(&state, &win);
+                Self::flush_toasts(&state, &win);
+            }
         });
     }
 
@@ -1621,6 +1770,162 @@ impl Shell {
         market_cb!(on_market_query_edited, |t, _src, q| { t.set_query(&q); });
     }
 
+    /// WASM 插件视图。
+    fn wire_plugin(&self, win: &AppWindow) {
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_plugin_option_changed(move |idx, num, text| {
+            {
+                let mut s = state.borrow_mut();
+                if let Some(p) = s.active_plugin_mut() {
+                    p.set_option(idx.max(0) as usize, num, &text);
+                    p.run_if_dirty();
+                }
+            }
+            state.borrow().save();
+            if let Some(win) = w.upgrade() {
+                Self::sync_plugin(&state, &win);
+            }
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_plugin_run(move || {
+            {
+                let mut s = state.borrow_mut();
+                if let Some(p) = s.active_plugin_mut() {
+                    p.run_now();
+                }
+            }
+            state.borrow().save();
+            if let Some(win) = w.upgrade() {
+                Self::sync_plugin(&state, &win);
+            }
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_plugin_copy(move || {
+            let text = {
+                let s = state.borrow();
+                s.active_plugin().map(|p| p.output.text()).unwrap_or_default()
+            };
+            if text.is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 更新器。
+    ///
+    /// 「检查 → 下载 → 安装」里**只有最后一步需要人点**：后台绝不自动安装，
+    /// 那一步会关掉用户正在用的应用。自动后台下载也只对内置服务器开放
+    ///（判断在 `Source::allows_auto_download`）。
+    fn wire_updater(&self, win: &AppWindow) {
+        // 1 秒心跳：推进 tick（到点自动检查 / 发现新版转下载 / 就绪通知一次）
+        // 并收后台线程的消息。空闲时这两个调用都不碰 property，不产生重绘。
+        let state = self.state.clone();
+        let w = win.as_weak();
+        let beat = Rc::new(slint::Timer::default());
+        let keep = beat.clone();
+        beat.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(win) = w.upgrade() else { return };
+                let before = {
+                    let s = state.borrow();
+                    std::mem::discriminant(&s.updater.phase)
+                };
+
+                let (src, auto, stale, now) = {
+                    let mut s = state.borrow_mut();
+                    s.update_clock += 1.0;
+                    (s.source(), s.auto_update, s.update_check_is_stale(), s.update_clock)
+                };
+
+                let tick = {
+                    let mut s = state.borrow_mut();
+                    s.updater.poll();
+                    s.updater.tick(now, src.as_ref(), auto, stale)
+                };
+
+                if let crate::updater::Tick::ReadyToInstall { version } = tick {
+                    let mut s = state.borrow_mut();
+                    // 记下这次成功检查的时刻（跨启动节流）
+                    s.last_update_check = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    );
+                    s.update_dialog_open = true;
+                    s.shared.toast(format!("v{version} 已就绪，可以安装"));
+                    s.save();
+                    drop(s);
+                    Self::flush_toasts(&state, &win);
+                }
+
+                let after = {
+                    let s = state.borrow();
+                    std::mem::discriminant(&s.updater.phase)
+                };
+                // 只有阶段真的变了才刷 property（下载中每秒进度会变，单独处理）
+                if before != after
+                    || matches!(
+                        state.borrow().updater.phase,
+                        crate::updater::Phase::Downloading { .. }
+                    )
+                {
+                    Self::push_update(&state, &win);
+                }
+            },
+        );
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        let _keep = keep.clone();
+        win.on_update_install(move || {
+            let _hold = &_keep;
+            let file = {
+                let s = state.borrow();
+                match &s.updater.phase {
+                    crate::updater::Phase::Ready { file, .. } => Some(file.clone()),
+                    _ => None,
+                }
+            };
+            let Some(file) = file else { return };
+            // 拉起安装程序并退出 —— 覆盖安装装不了正在运行的自己。
+            match crate::updater::launch(&file) {
+                Ok(()) => {
+                    let _ = slint::quit_event_loop();
+                }
+                Err(e) => {
+                    state.borrow_mut().shared.toast(format!("安装失败：{e}"));
+                    if let Some(win) = w.upgrade() {
+                        Self::flush_toasts(&state, &win);
+                    }
+                }
+            }
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_update_dismiss(move || {
+            state.borrow_mut().update_dialog_open = false;
+            if let Some(win) = w.upgrade() {
+                // 顶栏的「安装 vX」入口仍在 —— 点了「稍后」不等于丢掉这次更新。
+                Self::push_update(&state, &win);
+            }
+        });
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -1730,6 +2035,15 @@ impl Shell {
             "json-in" => Some(f(&mut self.json.borrow_mut().input)),
             "diff-left-in" => Some(f(&mut self.diff.borrow_mut().left)),
             "diff-right-in" => Some(f(&mut self.diff.borrow_mut().right)),
+            // 插件的编辑区在 AppState::tools 里，不是独立字段。
+            "plugin-in" => {
+                let mut s = self.state.borrow_mut();
+                s.active_plugin_mut().map(|p| f(&mut p.input))
+            }
+            "plugin-out" => {
+                let mut s = self.state.borrow_mut();
+                s.active_plugin_mut().map(|p| f(&mut p.output))
+            }
             "rsa-pub-out" => Some(f(&mut self.rsa.borrow_mut().pub_pem)),
             "rsa-priv-out" => Some(f(&mut self.rsa.borrow_mut().priv_pem)),
             "crypto-enc-in" => Some(f(&mut self.crypto.borrow_mut().enc.input)),
@@ -1755,11 +2069,25 @@ impl Shell {
             self.json.borrow_mut().on_edited();
         } else if which.starts_with("diff-") {
             self.diff.borrow_mut().compare();
+        } else if which.starts_with("plugin-") {
+            // 插件的输入变了 → 标脏并立刻跑一次（与 egui 版一致：
+            // 插件是纯计算 + 有燃料上限，实时跑得起）。
+            let mut s = self.state.borrow_mut();
+            if let Some(p) = s.active_plugin_mut() {
+                p.on_edited();
+                p.run_if_dirty();
+            }
         }
     }
 
     /// 把编辑区所属工具的草稿落盘。
     fn persist_tool(&self, which: &str) {
+        if which.starts_with("plugin-") {
+            // 插件草稿按它自己的 id 存。这里直接落整份状态 ——
+            // save() 会遍历 tools 收集每个工具的 save_draft()。
+            self.state.borrow().save();
+            return;
+        }
         let (id, draft) = match which.split('-').next() {
             Some("yaml") => ("yaml", self.yaml.borrow().save_draft()),
             Some("sql") => ("sql", self.sql.borrow().save_draft()),
@@ -1811,6 +2139,8 @@ impl Shell {
             self.sync_json(win);
         } else if which.starts_with("diff-") {
             Self::push_diff(&self.diff, win);
+        } else if which.starts_with("plugin-") {
+            Self::sync_plugin(&self.state, win);
         }
     }
 

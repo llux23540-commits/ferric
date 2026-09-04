@@ -10,7 +10,7 @@ ferric-core = { workspace = true }
 
 # GUI: 从 eframe/egui 切到 Slint 1.17。Software renderer 是默认 + 无 GPU 兜底，
 # 完整保留 ferric 之前的「任何机器都能跑」承诺。
-slint = { version = "1.17", default-features = false, features = ["renderer-software", "backend-winit", "std", "libm", "image-default-formats", "software-renderer-systemfonts", "compat-1-2"] }
+slint = { version = "1.17", default-features = false, features = ["renderer-software", "backend-winit", "std", "libm", "image-default-formats", "software-renderer-systemfonts", "compat-1-2", "unstable-winit-030"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

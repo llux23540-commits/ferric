@@ -128,6 +128,19 @@ pub trait Tool {
         false
     }
 
+    /// 若本工具是 WASM 插件，借出它。内置工具返回 `None`。
+    ///
+    /// 为什么不用 `Any` 向下转型：只有插件一种类型需要被外壳取回具体形态
+    ///（要读 manifest 声明的选项来渲染控件），给整个 trait 加 `as_any`
+    /// 是为一个用例引入一个通用后门。这两个方法把能力限定得刚好够用。
+    fn as_plugin(&self) -> Option<&crate::plugin_host::PluginTool> {
+        None
+    }
+
+    fn as_plugin_mut(&mut self) -> Option<&mut crate::plugin_host::PluginTool> {
+        None
+    }
+
     /// 序列化当前输入草稿以便持久化；返回 `None` 表示该工具不持久化。
     ///
     /// ⚠️ 格式与 egui 版**保持一致** —— 老用户升级后草稿不能丢。

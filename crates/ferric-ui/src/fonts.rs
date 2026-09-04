@@ -20,11 +20,18 @@ pub const JBM_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Reg
 pub const JBM_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
 pub const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
 
-/// 命名字体族。与 `ui/theme.slint` 里的 `font-*` 属性一一对应；
-/// Slint 侧按 TTF 文件名 stem 引用内嵌字体，这些常量供 Rust 侧诊断使用。
+/// 命名字体族。与 `ui/theme.slint` 里的 `font-*` 属性一一对应。
+///
+/// Slint 侧按 TTF 文件名 stem 引用内嵌字体；Rust 侧目前只有 `mem.rs` 的诊断
+/// 会读这几个常量。留着是因为它们是**与 .slint 的命名契约**：改了这里就必须
+/// 同步改那边，反之亦然。写在 Rust 里是为了让「族名从哪来」有一个单一出处。
+#[allow(dead_code)]
 pub const UI_MEDIUM: &str = "PlusJakartaSans-Medium";
+#[allow(dead_code)]
 pub const UI_SEMIBOLD: &str = "PlusJakartaSans-SemiBold";
+#[allow(dead_code)]
 pub const UI_BOLD: &str = "PlusJakartaSans-Bold";
+#[allow(dead_code)]
 pub const MONO_MEDIUM: &str = "JetBrainsMono-Medium";
 pub const LUCIDE_FAMILY: &str = "lucide";
 

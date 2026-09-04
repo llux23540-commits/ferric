@@ -104,7 +104,7 @@ pub fn log(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let lead = if needs_lead_nl { "\n" } else { "" };
-        let _ = write!(f, "{lead}[{ts}] {line}\n");
+        let _ = writeln!(f, "{lead}[{ts}] {line}");
     }
 }
 
