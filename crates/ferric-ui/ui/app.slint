@@ -1390,6 +1390,181 @@ component TimestampView inherits Rectangle {
     }
 }
 
+// ——— JSON 工具（已迁移） ———
+component JsonView inherits Rectangle {
+    in property <EditorState> input-state;
+    in property <int> indent-index;
+    in property <bool> sort;
+    in property <bool> wrap;
+    in property <bool> ok: true;
+    in property <string> status;
+    in-out property <string> find;
+    in property <int> hit-count;
+    in property <int> hit-index;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+
+    callback do-format();
+    callback do-minify();
+    callback do-escape();
+    callback do-unescape();
+    callback toggle-sort();
+    callback toggle-wrap();
+    callback indent-changed(int);
+    callback clear-input();
+    callback copy-output();
+    callback do-undo();
+    callback do-redo();
+    callback find-edited(string);
+    callback do-search();
+    callback next-hit();
+    callback prev-hit();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // 工具条
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            FerricButton {
+                text: "格式化";
+                variant: "primary";
+                clicked => { root.do-format(); }
+            }
+            FerricButton {
+                text: "压缩";
+                clicked => { root.do-minify(); }
+            }
+            FerricButton {
+                text: "转义";
+                clicked => { root.do-escape(); }
+            }
+            FerricButton {
+                text: "去转义";
+                clicked => { root.do-unescape(); }
+            }
+            Rectangle { width: 6px; }
+            Segmented {
+                options: ["2 空格", "4 空格", "Tab"];
+                current: root.indent-index;
+                changed(i) => { root.indent-changed(i); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            IconButton {
+                icon: "↶";
+                icon-size: 15px;
+                enabled: root.can-undo;
+                clicked => { root.do-undo(); }
+            }
+            IconButton {
+                icon: "↷";
+                icon-size: 15px;
+                enabled: root.can-redo;
+                clicked => { root.do-redo(); }
+            }
+        }
+
+        // 第二行：开关 + 状态
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Segmented {
+                options: ["原始键序", "键名排序"];
+                current: root.sort ? 1 : 0;
+                changed(i) => { root.toggle-sort(); }
+            }
+            Segmented {
+                options: ["自动换行", "不换行"];
+                current: root.wrap ? 0 : 1;
+                changed(i) => { root.toggle-wrap(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: root.ok ? Theme.muted : Theme.danger;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            FerricButton {
+                text: "复制";
+                variant: "subtle";
+                clicked => { root.copy-output(); }
+            }
+            FerricButton {
+                text: "清空";
+                variant: "subtle";
+                clicked => { root.clear-input(); }
+            }
+        }
+
+        // 搜索条
+        HorizontalLayout {
+            spacing: 8px;
+            FieldLabel { text: "查找"; vertical-alignment: center; }
+            FerricLineEdit {
+                horizontal-stretch: 1;
+                text <=> root.find;
+                placeholder: "输入后按 Enter 或点「查找」";
+                mono: true;
+                edited(t) => { root.find-edited(t); }
+                accepted(t) => { root.do-search(); }
+            }
+            FerricButton {
+                text: "查找";
+                clicked => { root.do-search(); }
+            }
+            IconButton {
+                icon: "‹";
+                icon-size: 16px;
+                enabled: root.hit-count > 0;
+                clicked => { root.prev-hit(); }
+            }
+            Text {
+                text: root.hit-count > 0
+                    ? (root.hit-index + 1) + " / " + root.hit-count
+                    : "—";
+                font-family: Theme.font-mono;
+                font-size: 12px;
+                color: Theme.muted;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                min-width: 56px;
+            }
+            IconButton {
+                icon: "›";
+                icon-size: 16px;
+                enabled: root.hit-count > 0;
+                clicked => { root.next-hit(); }
+            }
+        }
+
+        EditorPane {
+            title: "JSON";
+            which: "json-in";
+            state: root.input-state;
+            vertical-stretch: 1;
+            editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+            editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+            editor-triple(w) => { root.editor-triple(w); }
+            editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+            editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+            editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
     in property <ToolEntry> entry;
     in property <bool> active;
@@ -2110,6 +2285,19 @@ export component AppWindow inherits Window {
     in property <string> ts-date-output: "";
     in property <bool> ts-date-ok: true;
 
+    // JSON 工具状态
+    in property <EditorState> json-input;
+    in property <int> json-indent;
+    in property <bool> json-sort;
+    in property <bool> json-wrap: true;
+    in property <bool> json-ok: true;
+    in property <string> json-status: "";
+    in-out property <string> json-find;
+    in property <int> json-hit-count;
+    in property <int> json-hit-index;
+    in property <bool> json-can-undo;
+    in property <bool> json-can-redo;
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -2196,6 +2384,23 @@ export component AppWindow inherits Window {
     callback ts-select-tz(string);
     callback ts-input-edited(string);
     callback ts-date-edited(string);
+
+    // JSON 工具
+    callback json-format();
+    callback json-minify();
+    callback json-escape();
+    callback json-unescape();
+    callback json-toggle-sort();
+    callback json-toggle-wrap();
+    callback json-indent-changed(int);
+    callback json-clear();
+    callback json-copy();
+    callback json-undo();
+    callback json-redo();
+    callback json-find-edited(string);
+    callback json-search();
+    callback json-next-hit();
+    callback json-prev-hit();
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -2573,6 +2778,42 @@ export component AppWindow inherits Window {
                         select-tz(n) => { root.ts-select-tz(n); }
                         ts-edited(v) => { root.ts-input-edited(v); }
                         date-edited(v) => { root.ts-date-edited(v); }
+                    }
+                    if root.current.id == "json": JsonView {
+                        vertical-stretch: 1;
+                        input-state: root.json-input;
+                        indent-index: root.json-indent;
+                        sort: root.json-sort;
+                        wrap: root.json-wrap;
+                        ok: root.json-ok;
+                        status: root.json-status;
+                        find <=> root.json-find;
+                        hit-count: root.json-hit-count;
+                        hit-index: root.json-hit-index;
+                        can-undo: root.json-can-undo;
+                        can-redo: root.json-can-redo;
+                        do-format => { root.json-format(); }
+                        do-minify => { root.json-minify(); }
+                        do-escape => { root.json-escape(); }
+                        do-unescape => { root.json-unescape(); }
+                        toggle-sort => { root.json-toggle-sort(); }
+                        toggle-wrap => { root.json-toggle-wrap(); }
+                        indent-changed(i) => { root.json-indent-changed(i); }
+                        clear-input => { root.json-clear(); }
+                        copy-output => { root.json-copy(); }
+                        do-undo => { root.json-undo(); }
+                        do-redo => { root.json-redo(); }
+                        find-edited(f) => { root.json-find-edited(f); }
+                        do-search => { root.json-search(); }
+                        next-hit => { root.json-next-hit(); }
+                        prev-hit => { root.json-prev-hit(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
                     }
                     // 未迁移的工具走占位。条件用 `migrated` 而不是逐个列 id ——
                     // 每迁完一个只需把 Tool::migrated 翻成 true 并加上面那样一个分支。

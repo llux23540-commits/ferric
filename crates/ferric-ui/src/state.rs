@@ -189,6 +189,7 @@ pub struct Shell {
     pub crypto: Rc<RefCell<views::CryptoTool>>,
     pub gm: Rc<RefCell<views::GmTool>>,
     pub ts: Rc<RefCell<views::TimestampTool>>,
+    pub json: Rc<RefCell<views::JsonTool>>,
 }
 
 impl Shell {
@@ -236,6 +237,10 @@ impl Shell {
         if let Some(d) = draft_of("timestamp") {
             ts.load_draft(&d);
         }
+        let mut json = views::JsonTool::default();
+        if let Some(d) = draft_of("json") {
+            json.load_draft(&d);
+        }
 
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -247,6 +252,7 @@ impl Shell {
             crypto: Rc::new(RefCell::new(crypto)),
             gm: Rc::new(RefCell::new(gm)),
             ts: Rc::new(RefCell::new(ts)),
+            json: Rc::new(RefCell::new(json)),
         }
     }
 
@@ -270,6 +276,7 @@ impl Shell {
         self.sync_crypto(win);
         self.sync_gm(win);
         self.sync_ts(win);
+        self.sync_json(win);
         self.sync_toasts(win);
     }
 
@@ -509,6 +516,22 @@ impl Shell {
         }
     }
 
+    /// JSON 工具状态 → property。
+    fn sync_json(&self, win: &AppWindow) {
+        let t = self.json.borrow();
+        win.set_json_input(editor_bridge::state_of(&t.input));
+        win.set_json_indent(t.indent_index());
+        win.set_json_sort(t.sort);
+        win.set_json_wrap(t.wrap);
+        win.set_json_ok(t.ok);
+        win.set_json_status(SharedString::from(t.status.clone()));
+        win.set_json_find(SharedString::from(t.find.clone()));
+        win.set_json_hit_count(t.hits.len() as i32);
+        win.set_json_hit_index(t.hit_idx as i32);
+        win.set_json_can_undo(t.can_undo());
+        win.set_json_can_redo(t.can_redo());
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -535,6 +558,7 @@ impl Shell {
         self.wire_crypto(win);
         self.wire_gm(win);
         self.wire_ts(win);
+        self.wire_json(win);
         self.wire_editors(win);
     }
 
@@ -1237,6 +1261,88 @@ impl Shell {
         });
     }
 
+    /// JSON 工具。
+    fn wire_json(&self, win: &AppWindow) {
+        macro_rules! json_cb {
+            ($setter:ident, |$t:ident| $body:block) => {{
+                let json = self.json.clone();
+                let save = self.draft_saver("json");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = json.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_json(&json, &win);
+                    }
+                    save(&json.borrow().save_draft());
+                });
+            }};
+            ($setter:ident, |$t:ident, $arg:ident| $body:block) => {{
+                let json = self.json.clone();
+                let save = self.draft_saver("json");
+                let w = win.as_weak();
+                win.$setter(move |$arg| {
+                    {
+                        let mut $t = json.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_json(&json, &win);
+                    }
+                    save(&json.borrow().save_draft());
+                });
+            }};
+        }
+
+        json_cb!(on_json_format, |t| { t.format(); });
+        json_cb!(on_json_minify, |t| { t.minify(); });
+        json_cb!(on_json_escape, |t| { t.escape(); });
+        json_cb!(on_json_unescape, |t| { t.unescape(); });
+        json_cb!(on_json_toggle_sort, |t| { t.toggle_sort(); });
+        json_cb!(on_json_toggle_wrap, |t| { t.toggle_wrap(); });
+        json_cb!(on_json_clear, |t| { t.clear(); });
+        json_cb!(on_json_undo, |t| { t.undo(); });
+        json_cb!(on_json_redo, |t| { t.redo(); });
+        json_cb!(on_json_search, |t| { t.search(); });
+        json_cb!(on_json_next_hit, |t| { t.next_hit(); });
+        json_cb!(on_json_prev_hit, |t| { t.prev_hit(); });
+        json_cb!(on_json_indent_changed, |t, i| { t.set_indent_index(i); });
+        json_cb!(on_json_find_edited, |t, f| { t.set_find(&f); });
+
+        let json = self.json.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_json_copy(move || {
+            let text = json.borrow().input.text();
+            if text.is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 把 JSON 工具的状态刷进 Slint（多条路径共用）。
+    fn push_json(json: &Rc<RefCell<views::JsonTool>>, win: &AppWindow) {
+        let t = json.borrow();
+        win.set_json_input(editor_bridge::state_of(&t.input));
+        win.set_json_indent(t.indent_index());
+        win.set_json_sort(t.sort);
+        win.set_json_wrap(t.wrap);
+        win.set_json_ok(t.ok);
+        win.set_json_status(SharedString::from(t.status.clone()));
+        win.set_json_hit_count(t.hits.len() as i32);
+        win.set_json_hit_index(t.hit_idx as i32);
+        win.set_json_can_undo(t.can_undo());
+        win.set_json_can_redo(t.can_redo());
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -1327,6 +1433,7 @@ impl Shell {
             crypto: self.crypto.clone(),
             gm: self.gm.clone(),
             ts: self.ts.clone(),
+            json: self.json.clone(),
         }
     }
 
@@ -1340,6 +1447,7 @@ impl Shell {
             "yaml-out" => Some(f(&mut self.yaml.borrow_mut().output)),
             "sql-in" => Some(f(&mut self.sql.borrow_mut().input)),
             "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
+            "json-in" => Some(f(&mut self.json.borrow_mut().input)),
             "rsa-pub-out" => Some(f(&mut self.rsa.borrow_mut().pub_pem)),
             "rsa-priv-out" => Some(f(&mut self.rsa.borrow_mut().priv_pem)),
             "crypto-enc-in" => Some(f(&mut self.crypto.borrow_mut().enc.input)),
@@ -1361,6 +1469,8 @@ impl Shell {
             self.yaml.borrow_mut().convert();
         } else if which.starts_with("regex-") {
             self.regex.borrow_mut().run();
+        } else if which.starts_with("json-") {
+            self.json.borrow_mut().on_edited();
         }
     }
 
@@ -1374,6 +1484,7 @@ impl Shell {
             Some("crypto") => ("crypto", self.crypto.borrow().save_draft()),
             Some("gm") => ("gm", self.gm.borrow().save_draft()),
             Some("timestamp") => ("timestamp", self.ts.borrow().save_draft()),
+            Some("json") => ("json", self.json.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);
@@ -1411,6 +1522,8 @@ impl Shell {
             self.sync_crypto(win);
         } else if which.starts_with("gm-") {
             Self::push_gm(&self.gm, win);
+        } else if which.starts_with("json-") {
+            self.sync_json(win);
         }
     }
 

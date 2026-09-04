@@ -9,6 +9,7 @@
 
 mod crypto;
 mod gm;
+mod json;
 mod pending;
 mod regex;
 mod rsa;
@@ -19,6 +20,7 @@ mod yaml;
 
 pub use crypto::CryptoTool;
 pub use gm::GmTool;
+pub use json::JsonTool;
 pub use pending::PendingTool;
 pub use regex::RegexTool;
 pub use rsa::RsaTool;
@@ -50,14 +52,7 @@ fn pending(
 /// 全部工具的注册表。侧栏顺序即此顺序（与 egui 版逐项对齐）。
 pub fn registry() -> Vec<Box<dyn Tool>> {
     vec![
-        pending(
-            "json",
-            "JSON 工具",
-            "格式化 / 压缩 / 校验 / 转义 / 去转义 / 键名排序，搜索、折叠树视图、撤销重做",
-            icons::BRACES,
-            "格式",
-            &["json", "format", "beautify", "minify", "美化", "格式化", "压缩"],
-        ),
+        Box::new(JsonTool::default()),
         pending(
             "diff",
             "文本 / 文件对比",
@@ -136,7 +131,7 @@ mod tests {
             .collect();
         assert_eq!(
             migrated,
-            vec!["timestamp", "yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
+            vec!["json", "timestamp", "yaml", "sql", "uuid", "rsa", "crypto", "gm", "regex"],
             "迁完一个就在这里加一项"
         );
     }

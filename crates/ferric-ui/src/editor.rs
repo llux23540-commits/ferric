@@ -382,6 +382,22 @@ impl TextBuffer {
         self.cursor = self.anchor + self.line_len(line);
     }
 
+    /// 选中 `[start, end)`（字符索引），并把选区滚进视野。
+    ///
+    /// 搜索跳转用。越界索引夹到文档范围内 —— 命中位置来自调用方的搜索结果，
+    /// 文本可能已经变了，硬索引会 panic。
+    pub fn select_range(&mut self, start: usize, end: usize) {
+        let n = self.rope.len_chars();
+        self.anchor = start.min(n);
+        self.cursor = end.min(n);
+        self.scroll_to_cursor();
+        // 把命中行尽量放到视口中间：搜索结果贴在最后一行上很难看清上下文。
+        let (line, _) = self.cursor_line_col();
+        let half = self.viewport_lines / 2;
+        self.scroll_line = line.saturating_sub(half);
+        self.clamp_scroll();
+    }
+
     // ——— 编辑 ———
 
     fn push_undo(&mut self) {
