@@ -1,0 +1,290 @@
+// Slint 技术验证：最小可运行的 Ferric 风格窗口。
+// 字体通过 slint_build::embed_resources 自动嵌入；.slint 里通过 font-family: "<stem>"
+// 引用 TTF（stem = 文件名去后缀），例如 "JetBrainsMono-Medium"。
+
+import { TextEdit, Button } from "std-widgets.slint";
+
+component SidebarItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> active;
+
+    height: 36px;
+    border-radius: 8px;
+    background: active ? #1e222a : (ta.has-hover ? #181b21 : transparent);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+
+        Text {
+            text: root.icon;
+            color: root.active ? #4ea3ff : #8a9099;
+            font-family: "lucide";
+            font-size: 16px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? #c8ccd2 : #8a9099;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { }
+}
+
+export component App inherits Window {
+    title: "Ferric · Slint Spike";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 360px;
+    min-height: 280px;
+    no-frame: true;
+    background: #0e1014;
+
+    // 回调：让 main.rs 可以注入"采样 RSS"逻辑。
+    callback refresh-rss();
+    in-out property <string> rss-text: "—";
+
+    // ===== 顶栏（44px） =====
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 44px;
+        background: #14171c;
+
+        Text {
+            x: 18px;
+            y: 0;
+            width: parent.width - 200px;
+            height: parent.height;
+            text: "Ferric · Slint Spike";
+            color: #c8ccd2;
+            font-family: "PlusJakartaSans-SemiBold";
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+
+        // —— Min
+        Rectangle {
+            x: parent.width - 134px;
+            y: 0;
+            width: 44px;
+            height: parent.height;
+            background: min-ta.has-hover ? #1e222a : transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "—";
+                color: #c8ccd2;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            min-ta := TouchArea { }
+        }
+        // —— Max
+        Rectangle {
+            x: parent.width - 90px;
+            y: 0;
+            width: 44px;
+            height: parent.height;
+            background: max-ta.has-hover ? #1e222a : transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "▢";
+                color: #c8ccd2;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            max-ta := TouchArea { }
+        }
+        // —— Close（点了直接关窗）
+        Rectangle {
+            x: parent.width - 46px;
+            y: 0;
+            width: 44px;
+            height: parent.height;
+            background: close-ta.has-hover ? #c14545 : transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "✕";
+                color: #c8ccd2;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            close-ta := TouchArea {
+                // spike 不接真实 close 逻辑；靠 Alt+F4 / 标题栏拖动关闭。
+            }
+        }
+    }
+
+    // ===== 左侧栏 264px =====
+    Rectangle {
+        x: 0;
+        y: 44px;
+        width: 264px;
+        height: parent.height - 44px;
+        background: #14171c;
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            width: parent.width;
+
+            Rectangle {
+                height: 36px;
+                background: #1e222a;
+                border-radius: 8px;
+                Text {
+                    x: 12px;
+                    width: parent.width - 12px;
+                    height: parent.height;
+                    text: "搜索工具…";
+                    color: #6e7480;
+                    font-family: "PlusJakartaSans-Medium";
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+
+            SidebarItem { icon: "{ }"; label: "JSON 工具"; active: true; }
+            SidebarItem { icon: "⇄"; label: "文本对比"; active: false; }
+            SidebarItem { icon: "⏱"; label: "时间戳"; active: false; }
+            SidebarItem { icon: "⚙"; label: "设置"; active: false; }
+        }
+    }
+
+    // ===== 主编辑区 =====
+    Rectangle {
+        x: 264px;
+        y: 44px;
+        width: parent.width - 264px;
+        height: parent.height - 44px;
+        background: #0e1014;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+
+            Rectangle {
+                height: 40px;
+                Text {
+                    text: "JSON 工具";
+                    color: #c8ccd2;
+                    font-family: "PlusJakartaSans-SemiBold";
+                    font-size: 18px;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                background: #14171c;
+                border-radius: 8px;
+                VerticalLayout {
+                    padding: 12px;
+                    Text {
+                        text: "JSON 输入（Slint TextEdit · 等价 ferric 的 egui TextEdit）";
+                        color: #8a9099;
+                        font-family: "PlusJakartaSans-Medium";
+                        font-size: 11px;
+                    }
+                    TextEdit {
+                        text: "{\n  \"name\": \"ferric\",\n  \"spike\": \"slint\",\n  \"memory_target_mb\": 250,\n  \"items\": [1, 2, 3, 4, 5]\n}";
+                        font-family: "JetBrainsMono-Medium";
+                        font-size: 13px;
+                    }
+                }
+            }
+
+            // 底部 diff 视图（左右两栏，只读）
+            Rectangle {
+                height: 160px;
+                background: #14171c;
+                border-radius: 8px;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    Rectangle {
+                        background: #0e1014;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 8px;
+                            Text {
+                                text: "Diff · 左";
+                                color: #8a9099;
+                                font-family: "PlusJakartaSans-Medium";
+                                font-size: 11px;
+                            }
+                            TextEdit {
+                                text: "{\n  \"name\": \"ferric\",\n  \"renderer\": \"slint\"\n}";
+                                font-family: "JetBrainsMono-Medium";
+                                font-size: 13px;
+                                read-only: true;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        background: #0e1014;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            padding: 8px;
+                            Text {
+                                text: "Diff · 右";
+                                color: #8a9099;
+                                font-family: "PlusJakartaSans-Medium";
+                                font-size: 11px;
+                            }
+                            TextEdit {
+                                text: "{\n  \"name\": \"ferric\",\n  \"renderer\": \"wgpu\",\n  \"version\": \"0.2\"\n}";
+                                font-family: "JetBrainsMono-Medium";
+                                font-size: 13px;
+                                read-only: true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 状态条 + 采样按钮
+            Rectangle {
+                height: 36px;
+                background: #14171c;
+                border-radius: 8px;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 12px;
+                    Text {
+                        text: "RSS（进程私有工作集）：";
+                        color: #8a9099;
+                        font-family: "PlusJakartaSans-Medium";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.rss-text;
+                        color: #c8ccd2;
+                        font-family: "JetBrainsMono-Medium";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "采样";
+                        clicked => {
+                            root.refresh-rss();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
