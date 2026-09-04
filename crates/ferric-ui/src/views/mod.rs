@@ -7,6 +7,7 @@
 //! 在 `ui/app.slint` 里加对应的视图组件与分支，然后把这里的 `pending(...)`
 //! 换成真实构造。侧栏顺序 = 此处顺序，与 egui 版一致，不要重排。
 
+mod crypto;
 mod pending;
 mod regex;
 mod rsa;
@@ -14,6 +15,7 @@ mod sql;
 mod uuid;
 mod yaml;
 
+pub use crypto::CryptoTool;
 pub use pending::PendingTool;
 pub use regex::RegexTool;
 pub use rsa::RsaTool;
@@ -74,14 +76,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         // ——— 已迁移 ———
         Box::new(UuidTool::default()),
         Box::new(RsaTool::default()),
-        pending(
-            "crypto",
-            "加密 / 解密文本",
-            "AES / TripleDES / Rabbit / RC4，OpenSSL 盐格式，与 crypto-js 兼容",
-            icons::LOCK,
-            "加密",
-            &["crypto", "aes", "加密", "解密", "encrypt"],
-        ),
+        Box::new(CryptoTool::default()),
         pending(
             "gm",
             "国密 SM",
@@ -151,7 +146,7 @@ mod tests {
             .collect();
         assert_eq!(
             migrated,
-            vec!["yaml", "sql", "uuid", "rsa", "regex"],
+            vec!["yaml", "sql", "uuid", "rsa", "crypto", "regex"],
             "迁完一个就在这里加一项"
         );
     }

@@ -186,6 +186,7 @@ pub struct Shell {
     pub sql: Rc<RefCell<views::SqlTool>>,
     pub regex: Rc<RefCell<views::RegexTool>>,
     pub rsa: Rc<RefCell<views::RsaTool>>,
+    pub crypto: Rc<RefCell<views::CryptoTool>>,
 }
 
 impl Shell {
@@ -221,6 +222,10 @@ impl Shell {
         if let Some(d) = draft_of("rsa") {
             rsa.load_draft(&d);
         }
+        let mut crypto = views::CryptoTool::default();
+        if let Some(d) = draft_of("crypto") {
+            crypto.load_draft(&d);
+        }
 
         Self {
             state: Rc::new(RefCell::new(state)),
@@ -229,6 +234,7 @@ impl Shell {
             sql: Rc::new(RefCell::new(sql)),
             regex: Rc::new(RefCell::new(regex)),
             rsa: Rc::new(RefCell::new(rsa)),
+            crypto: Rc::new(RefCell::new(crypto)),
         }
     }
 
@@ -249,6 +255,7 @@ impl Shell {
         self.sync_sql(win);
         self.sync_regex(win);
         self.sync_rsa(win);
+        self.sync_crypto(win);
         self.sync_toasts(win);
     }
 
@@ -379,6 +386,29 @@ impl Shell {
         win.set_rsa_priv(editor_bridge::state_of(&t.priv_pem));
     }
 
+    /// 加密 / 解密工具状态 → property。
+    fn sync_crypto(&self, win: &AppWindow) {
+        let t = self.crypto.borrow();
+        win.set_crypto_algos(ModelRc::new(VecModel::from(
+            views::CryptoTool::algo_labels()
+                .into_iter()
+                .map(SharedString::from)
+                .collect::<Vec<_>>(),
+        )));
+        win.set_crypto_enc_algo(t.enc.algo_index());
+        win.set_crypto_dec_algo(t.dec.algo_index());
+        win.set_crypto_enc_key(SharedString::from(t.enc.key.clone()));
+        win.set_crypto_dec_key(SharedString::from(t.dec.key.clone()));
+        win.set_crypto_enc_in(editor_bridge::state_of(&t.enc.input));
+        win.set_crypto_enc_out(editor_bridge::state_of(&t.enc.output));
+        win.set_crypto_dec_in(editor_bridge::state_of(&t.dec.input));
+        win.set_crypto_dec_out(editor_bridge::state_of(&t.dec.output));
+        win.set_crypto_enc_ok(t.enc.ok);
+        win.set_crypto_dec_ok(t.dec.ok);
+        win.set_crypto_enc_status(SharedString::from(t.enc.status.clone()));
+        win.set_crypto_dec_status(SharedString::from(t.dec.status.clone()));
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -402,6 +432,7 @@ impl Shell {
         self.wire_sql(win);
         self.wire_regex(win);
         self.wire_rsa(win);
+        self.wire_crypto(win);
         self.wire_editors(win);
     }
 
@@ -873,6 +904,98 @@ impl Shell {
         });
     }
 
+    /// 加密 / 解密工具。
+    fn wire_crypto(&self, win: &AppWindow) {
+        // 九个回调都是「改状态 → 全量刷这个工具 → 落草稿」。
+        macro_rules! crypto_cb {
+            ($setter:ident, |$t:ident| $body:block) => {{
+                let crypto = self.crypto.clone();
+                let save = self.draft_saver("crypto");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = crypto.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_crypto(&crypto, &win);
+                    }
+                    save(&crypto.borrow().save_draft());
+                });
+            }};
+            ($setter:ident, |$t:ident, $arg:ident| $body:block) => {{
+                let crypto = self.crypto.clone();
+                let save = self.draft_saver("crypto");
+                let w = win.as_weak();
+                win.$setter(move |$arg| {
+                    {
+                        let mut $t = crypto.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        Self::push_crypto(&crypto, &win);
+                    }
+                    save(&crypto.borrow().save_draft());
+                });
+            }};
+        }
+
+        crypto_cb!(on_crypto_encrypt, |t| { t.encrypt(); });
+        crypto_cb!(on_crypto_decrypt, |t| { t.decrypt(); });
+        crypto_cb!(on_crypto_send_to_decrypt, |t| { t.send_to_decrypt(); });
+        crypto_cb!(on_crypto_enc_algo_changed, |t, i| { t.set_enc_algo(i); });
+        crypto_cb!(on_crypto_dec_algo_changed, |t, i| { t.set_dec_algo(i); });
+        // 口令只进内存，不落盘（save_draft 本来就不含它）。
+        crypto_cb!(on_crypto_enc_key_edited, |t, k| { t.enc.key = k.to_string(); });
+        crypto_cb!(on_crypto_dec_key_edited, |t, k| { t.dec.key = k.to_string(); });
+
+        let crypto = self.crypto.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_crypto_copy_enc(move || {
+            let text = crypto.borrow().enc.output.text();
+            if text.is_empty() {
+                return;
+            }
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast("已复制密文");
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+
+        let crypto = self.crypto.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_crypto_copy_dec(move || {
+            let text = crypto.borrow().dec.output.text();
+            if text.is_empty() {
+                return;
+            }
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast("已复制明文");
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 把加解密工具的状态刷进 Slint（多条路径共用）。
+    fn push_crypto(crypto: &Rc<RefCell<views::CryptoTool>>, win: &AppWindow) {
+        let t = crypto.borrow();
+        win.set_crypto_enc_algo(t.enc.algo_index());
+        win.set_crypto_dec_algo(t.dec.algo_index());
+        win.set_crypto_dec_key(SharedString::from(t.dec.key.clone()));
+        win.set_crypto_enc_in(editor_bridge::state_of(&t.enc.input));
+        win.set_crypto_enc_out(editor_bridge::state_of(&t.enc.output));
+        win.set_crypto_dec_in(editor_bridge::state_of(&t.dec.input));
+        win.set_crypto_dec_out(editor_bridge::state_of(&t.dec.output));
+        win.set_crypto_enc_ok(t.enc.ok);
+        win.set_crypto_dec_ok(t.dec.ok);
+        win.set_crypto_enc_status(SharedString::from(t.enc.status.clone()));
+        win.set_crypto_dec_status(SharedString::from(t.dec.status.clone()));
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -960,6 +1083,7 @@ impl Shell {
             sql: self.sql.clone(),
             regex: self.regex.clone(),
             rsa: self.rsa.clone(),
+            crypto: self.crypto.clone(),
         }
     }
 
@@ -975,6 +1099,10 @@ impl Shell {
             "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
             "rsa-pub-out" => Some(f(&mut self.rsa.borrow_mut().pub_pem)),
             "rsa-priv-out" => Some(f(&mut self.rsa.borrow_mut().priv_pem)),
+            "crypto-enc-in" => Some(f(&mut self.crypto.borrow_mut().enc.input)),
+            "crypto-enc-out" => Some(f(&mut self.crypto.borrow_mut().enc.output)),
+            "crypto-dec-in" => Some(f(&mut self.crypto.borrow_mut().dec.input)),
+            "crypto-dec-out" => Some(f(&mut self.crypto.borrow_mut().dec.output)),
             _ => None,
         }
     }
@@ -995,6 +1123,7 @@ impl Shell {
             Some("sql") => ("sql", self.sql.borrow().save_draft()),
             Some("regex") => ("regex", self.regex.borrow().save_draft()),
             Some("rsa") => ("rsa", self.rsa.borrow().save_draft()),
+            Some("crypto") => ("crypto", self.crypto.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);
@@ -1028,6 +1157,8 @@ impl Shell {
             self.sync_regex(win);
         } else if which.starts_with("rsa-") {
             self.sync_rsa(win);
+        } else if which.starts_with("crypto-") {
+            self.sync_crypto(win);
         }
     }
 

@@ -578,6 +578,232 @@ component RsaView inherits Rectangle {
     }
 }
 
+// 加密 / 解密的一侧。两侧同构，收成一个组件 —— 散着写等于同一段抄两遍。
+component CryptoSide inherits Rectangle {
+    in property <string> title;
+    in property <string> action-label;
+    in property <string> which-in;
+    in property <string> which-out;
+    in property <[string]> algos;
+    in property <int> algo-index;
+    in-out property <string> key;
+    in property <EditorState> input-state;
+    in property <EditorState> output-state;
+    in property <bool> ok: true;
+    in property <string> status;
+    in property <string> input-title;
+    in property <string> output-title;
+
+    callback algo-changed(int);
+    callback key-edited(string);
+    callback run();
+    callback copy-output();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        spacing: 8px;
+
+        Text {
+            text: root.title;
+            font-family: Theme.font-ui-semibold;
+            font-size: 14px;
+            color: Theme.fg;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                spacing: 4px;
+                width: 40%;
+                FieldLabel { text: "算法"; }
+                ComboBox {
+                    model: root.algos;
+                    current-index: root.algo-index;
+                    selected(v) => { root.algo-changed(self.current-index); }
+                }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                horizontal-stretch: 1;
+                FieldLabel { text: "口令（不持久化）"; }
+                FerricLineEdit {
+                    text <=> root.key;
+                    placeholder: "口令";
+                    edited(t) => { root.key-edited(t); }
+                }
+            }
+        }
+
+        EditorPane {
+            title: root.input-title;
+            which: root.which-in;
+            state: root.input-state;
+            vertical-stretch: 1;
+            editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+            editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+            editor-triple(w) => { root.editor-triple(w); }
+            editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+            editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+            editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            FerricButton {
+                text: root.action-label;
+                variant: "primary";
+                clicked => { root.run(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 11.5px;
+                color: root.ok ? Theme.muted : Theme.danger;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            FerricButton {
+                text: "复制";
+                variant: "subtle";
+                clicked => { root.copy-output(); }
+            }
+        }
+
+        EditorPane {
+            title: root.output-title;
+            which: root.which-out;
+            state: root.output-state;
+            read-only: true;
+            hint: "只读";
+            vertical-stretch: 1;
+            editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+            editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+            editor-triple(w) => { root.editor-triple(w); }
+            editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+            editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+            editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+        }
+    }
+}
+
+// ——— 加密 / 解密文本（已迁移） ———
+component CryptoView inherits Rectangle {
+    in property <[string]> algos;
+    in property <int> enc-algo;
+    in property <int> dec-algo;
+    in-out property <string> enc-key;
+    in-out property <string> dec-key;
+    in property <EditorState> enc-in;
+    in property <EditorState> enc-out;
+    in property <EditorState> dec-in;
+    in property <EditorState> dec-out;
+    in property <bool> enc-ok: true;
+    in property <bool> dec-ok: true;
+    in property <string> enc-status;
+    in property <string> dec-status;
+
+    callback enc-algo-changed(int);
+    callback dec-algo-changed(int);
+    callback enc-key-edited(string);
+    callback dec-key-edited(string);
+    callback do-encrypt();
+    callback do-decrypt();
+    callback send-to-decrypt();
+    callback copy-enc();
+    callback copy-dec();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            alignment: start;
+            FerricButton {
+                text: "把密文送去解密";
+                icon: "→";
+                clicked => { root.send-to-decrypt(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 16px;
+            vertical-stretch: 1;
+
+            CryptoSide {
+                horizontal-stretch: 1;
+                title: "加密";
+                action-label: "加密";
+                which-in: "crypto-enc-in";
+                which-out: "crypto-enc-out";
+                input-title: "明文";
+                output-title: "密文 (Base64)";
+                algos: root.algos;
+                algo-index: root.enc-algo;
+                key <=> root.enc-key;
+                input-state: root.enc-in;
+                output-state: root.enc-out;
+                ok: root.enc-ok;
+                status: root.enc-status;
+                algo-changed(i) => { root.enc-algo-changed(i); }
+                key-edited(k) => { root.enc-key-edited(k); }
+                run => { root.do-encrypt(); }
+                copy-output => { root.copy-enc(); }
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+
+            CryptoSide {
+                horizontal-stretch: 1;
+                title: "解密";
+                action-label: "解密";
+                which-in: "crypto-dec-in";
+                which-out: "crypto-dec-out";
+                input-title: "密文 (Base64)";
+                output-title: "明文";
+                algos: root.algos;
+                algo-index: root.dec-algo;
+                key <=> root.dec-key;
+                input-state: root.dec-in;
+                output-state: root.dec-out;
+                ok: root.dec-ok;
+                status: root.dec-status;
+                algo-changed(i) => { root.dec-algo-changed(i); }
+                key-edited(k) => { root.dec-key-edited(k); }
+                run => { root.do-decrypt(); }
+                copy-output => { root.copy-dec(); }
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
     in property <ToolEntry> entry;
     in property <bool> active;
@@ -1240,6 +1466,21 @@ export component AppWindow inherits Window {
     in property <EditorState> rsa-pub;
     in property <EditorState> rsa-priv;
 
+    // 加密 / 解密工具状态
+    in property <[string]> crypto-algos;
+    in property <int> crypto-enc-algo;
+    in property <int> crypto-dec-algo;
+    in-out property <string> crypto-enc-key;
+    in-out property <string> crypto-dec-key;
+    in property <EditorState> crypto-enc-in;
+    in property <EditorState> crypto-enc-out;
+    in property <EditorState> crypto-dec-in;
+    in property <EditorState> crypto-dec-out;
+    in property <bool> crypto-enc-ok: true;
+    in property <bool> crypto-dec-ok: true;
+    in property <string> crypto-enc-status: "";
+    in property <string> crypto-dec-status: "";
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -1288,6 +1529,17 @@ export component AppWindow inherits Window {
     callback rsa-generate();
     callback rsa-copy-pub();
     callback rsa-copy-priv();
+
+    // 加密 / 解密工具
+    callback crypto-enc-algo-changed(int);
+    callback crypto-dec-algo-changed(int);
+    callback crypto-enc-key-edited(string);
+    callback crypto-dec-key-edited(string);
+    callback crypto-encrypt();
+    callback crypto-decrypt();
+    callback crypto-send-to-decrypt();
+    callback crypto-copy-enc();
+    callback crypto-copy-dec();
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -1551,6 +1803,38 @@ export component AppWindow inherits Window {
                         generate => { root.rsa-generate(); }
                         copy-pub => { root.rsa-copy-pub(); }
                         copy-priv => { root.rsa-copy-priv(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "crypto": CryptoView {
+                        vertical-stretch: 1;
+                        algos: root.crypto-algos;
+                        enc-algo: root.crypto-enc-algo;
+                        dec-algo: root.crypto-dec-algo;
+                        enc-key <=> root.crypto-enc-key;
+                        dec-key <=> root.crypto-dec-key;
+                        enc-in: root.crypto-enc-in;
+                        enc-out: root.crypto-enc-out;
+                        dec-in: root.crypto-dec-in;
+                        dec-out: root.crypto-dec-out;
+                        enc-ok: root.crypto-enc-ok;
+                        dec-ok: root.crypto-dec-ok;
+                        enc-status: root.crypto-enc-status;
+                        dec-status: root.crypto-dec-status;
+                        enc-algo-changed(i) => { root.crypto-enc-algo-changed(i); }
+                        dec-algo-changed(i) => { root.crypto-dec-algo-changed(i); }
+                        enc-key-edited(k) => { root.crypto-enc-key-edited(k); }
+                        dec-key-edited(k) => { root.crypto-dec-key-edited(k); }
+                        do-encrypt => { root.crypto-encrypt(); }
+                        do-decrypt => { root.crypto-decrypt(); }
+                        send-to-decrypt => { root.crypto-send-to-decrypt(); }
+                        copy-enc => { root.crypto-copy-enc(); }
+                        copy-dec => { root.crypto-copy-dec(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
