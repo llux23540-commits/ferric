@@ -183,6 +183,9 @@ pub struct Shell {
     pub state: Rc<RefCell<AppState>>,
     pub uuid: Rc<RefCell<views::UuidTool>>,
     pub yaml: Rc<RefCell<views::YamlTool>>,
+    pub sql: Rc<RefCell<views::SqlTool>>,
+    pub regex: Rc<RefCell<views::RegexTool>>,
+    pub rsa: Rc<RefCell<views::RsaTool>>,
 }
 
 impl Shell {
@@ -206,11 +209,26 @@ impl Shell {
         if let Some(d) = draft_of("yaml") {
             yaml.load_draft(&d);
         }
+        let mut sql = views::SqlTool::default();
+        if let Some(d) = draft_of("sql") {
+            sql.load_draft(&d);
+        }
+        let mut regex = views::RegexTool::default();
+        if let Some(d) = draft_of("regex") {
+            regex.load_draft(&d);
+        }
+        let mut rsa = views::RsaTool::default();
+        if let Some(d) = draft_of("rsa") {
+            rsa.load_draft(&d);
+        }
 
         Self {
             state: Rc::new(RefCell::new(state)),
             uuid: Rc::new(RefCell::new(uuid)),
             yaml: Rc::new(RefCell::new(yaml)),
+            sql: Rc::new(RefCell::new(sql)),
+            regex: Rc::new(RefCell::new(regex)),
+            rsa: Rc::new(RefCell::new(rsa)),
         }
     }
 
@@ -228,6 +246,9 @@ impl Shell {
         self.sync_tools(win);
         self.sync_uuid(win);
         self.sync_yaml(win);
+        self.sync_sql(win);
+        self.sync_regex(win);
+        self.sync_rsa(win);
         self.sync_toasts(win);
     }
 
@@ -309,6 +330,55 @@ impl Shell {
         win.set_yaml_status(SharedString::from(y.status.clone()));
     }
 
+    /// SQL 工具状态 → property。
+    fn sync_sql(&self, win: &AppWindow) {
+        let t = self.sql.borrow();
+        win.set_sql_input(editor_bridge::state_of(&t.input));
+        win.set_sql_uppercase(t.uppercase);
+        win.set_sql_status(SharedString::from(t.status.clone()));
+    }
+
+    /// 正则工具状态 → property。
+    fn sync_regex(&self, win: &AppWindow) {
+        let t = self.regex.borrow();
+        win.set_regex_pattern(SharedString::from(t.pattern.clone()));
+        win.set_regex_fg(t.fg);
+        win.set_regex_fi(t.fi);
+        win.set_regex_fm(t.fm);
+        win.set_regex_fs(t.fs);
+        win.set_regex_fx(t.fx);
+        win.set_regex_text(editor_bridge::state_of(&t.text));
+        win.set_regex_ok(t.ok);
+        win.set_regex_status(SharedString::from(t.status.clone()));
+
+        let rows: Vec<RegexMatch> = t
+            .matches
+            .iter()
+            .map(|m| RegexMatch {
+                label: SharedString::from(m.label.clone()),
+                text: SharedString::from(m.text.clone()),
+                groups: ModelRc::new(VecModel::from(
+                    m.groups
+                        .iter()
+                        .map(|g| SharedString::from(g.clone()))
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        win.set_regex_matches(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// RSA 工具状态 → property。
+    fn sync_rsa(&self, win: &AppWindow) {
+        let t = self.rsa.borrow();
+        win.set_rsa_bits(t.bits_index());
+        win.set_rsa_busy(t.busy);
+        win.set_rsa_ok(t.ok);
+        win.set_rsa_status(SharedString::from(t.status.clone()));
+        win.set_rsa_pub(editor_bridge::state_of(&t.pub_pem));
+        win.set_rsa_priv(editor_bridge::state_of(&t.priv_pem));
+    }
+
     /// 提示队列 → property（先剔除过期的）。
     fn sync_toasts(&self, win: &AppWindow) {
         let mut s = self.state.borrow_mut();
@@ -329,6 +399,9 @@ impl Shell {
         self.wire_settings(win);
         self.wire_uuid(win);
         self.wire_yaml(win);
+        self.wire_sql(win);
+        self.wire_regex(win);
+        self.wire_rsa(win);
         self.wire_editors(win);
     }
 
@@ -610,6 +683,196 @@ impl Shell {
         });
     }
 
+    /// SQL 工具的工具条按钮。
+    fn wire_sql(&self, win: &AppWindow) {
+        // 五个按钮都是「改状态 → 刷 property → 落草稿」，收成一个宏，
+        // 免得同一段五遍复制粘贴。
+        macro_rules! sql_btn {
+            ($setter:ident, |$t:ident| $body:block) => {{
+                let sql = self.sql.clone();
+                let save = self.draft_saver("sql");
+                let w = win.as_weak();
+                win.$setter(move || {
+                    {
+                        let mut $t = sql.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        let t = sql.borrow();
+                        win.set_sql_input(editor_bridge::state_of(&t.input));
+                        win.set_sql_uppercase(t.uppercase);
+                        win.set_sql_status(SharedString::from(t.status.clone()));
+                    }
+                    save(&sql.borrow().save_draft());
+                });
+            }};
+        }
+
+        sql_btn!(on_sql_format, |t| { t.format(); });
+        sql_btn!(on_sql_minify, |t| { t.minify(); });
+        sql_btn!(on_sql_toggle_uppercase, |t| { t.toggle_uppercase(); });
+        sql_btn!(on_sql_clear, |t| { t.clear(); });
+
+        let sql = self.sql.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_sql_copy(move || {
+            let text = sql.borrow().input.text();
+            if text.is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast(format!("已复制 {n} 行 SQL"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
+    /// 正则工具：模式输入与标志开关。
+    fn wire_regex(&self, win: &AppWindow) {
+        let regex = self.regex.clone();
+        let save = self.draft_saver("regex");
+        let w = win.as_weak();
+        win.on_regex_pattern_edited(move |p| {
+            regex.borrow_mut().set_pattern(&p);
+            if let Some(win) = w.upgrade() {
+                Self::push_regex(&regex, &win);
+            }
+            save(&regex.borrow().save_draft());
+        });
+
+        let regex = self.regex.clone();
+        let save = self.draft_saver("regex");
+        let w = win.as_weak();
+        win.on_regex_toggle_flag(move |i| {
+            regex.borrow_mut().toggle_flag(i);
+            if let Some(win) = w.upgrade() {
+                Self::push_regex(&regex, &win);
+            }
+            save(&regex.borrow().save_draft());
+        });
+    }
+
+    /// 把正则工具的结果刷进 Slint。独立成函数：模式输入、标志切换、
+    /// 文本编辑三条路径都要用。
+    fn push_regex(regex: &Rc<RefCell<views::RegexTool>>, win: &AppWindow) {
+        let t = regex.borrow();
+        win.set_regex_fg(t.fg);
+        win.set_regex_fi(t.fi);
+        win.set_regex_fm(t.fm);
+        win.set_regex_fs(t.fs);
+        win.set_regex_fx(t.fx);
+        win.set_regex_ok(t.ok);
+        win.set_regex_status(SharedString::from(t.status.clone()));
+        let rows: Vec<RegexMatch> = t
+            .matches
+            .iter()
+            .map(|m| RegexMatch {
+                label: SharedString::from(m.label.clone()),
+                text: SharedString::from(m.text.clone()),
+                groups: ModelRc::new(VecModel::from(
+                    m.groups
+                        .iter()
+                        .map(|g| SharedString::from(g.clone()))
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        win.set_regex_matches(ModelRc::new(VecModel::from(rows)));
+    }
+
+    /// RSA 工具：位数、生成、复制。
+    ///
+    /// 生成跑在后台线程（4096 位要几秒，UI 线程绝不做大数运算），
+    /// 这里用一个 120ms 的定时器去取结果。egui 时代要 `request_repaint_after`
+    /// 才能让界面在结果到达时更新；Slint 只要 property 变了就重画脏区域，
+    /// 定时器纯粹是「去看看线程有没有结果」。
+    fn wire_rsa(&self, win: &AppWindow) {
+        let rsa = self.rsa.clone();
+        let save = self.draft_saver("rsa");
+        let w = win.as_weak();
+        win.on_rsa_bits_changed(move |i| {
+            rsa.borrow_mut().set_bits_index(i);
+            if let Some(win) = w.upgrade() {
+                let t = rsa.borrow();
+                win.set_rsa_bits(t.bits_index());
+                win.set_rsa_status(SharedString::from(t.status.clone()));
+            }
+            save(&rsa.borrow().save_draft());
+        });
+
+        let rsa = self.rsa.clone();
+        let w = win.as_weak();
+        // 定时器存活期与窗口一致：挂进闭包里由它持有。
+        let poll_timer = Rc::new(slint::Timer::default());
+        let timer_for_cb = poll_timer.clone();
+        win.on_rsa_generate(move || {
+            rsa.borrow_mut().regen();
+            let Some(win) = w.upgrade() else { return };
+            {
+                let t = rsa.borrow();
+                win.set_rsa_busy(t.busy);
+                win.set_rsa_status(SharedString::from(t.status.clone()));
+            }
+
+            let rsa2 = rsa.clone();
+            let w2 = win.as_weak();
+            let stop = timer_for_cb.clone();
+            timer_for_cb.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(120),
+                move || {
+                    let changed = rsa2.borrow_mut().poll();
+                    if !changed {
+                        return;
+                    }
+                    if let Some(win) = w2.upgrade() {
+                        let t = rsa2.borrow();
+                        win.set_rsa_busy(t.busy);
+                        win.set_rsa_ok(t.ok);
+                        win.set_rsa_status(SharedString::from(t.status.clone()));
+                        win.set_rsa_pub(editor_bridge::state_of(&t.pub_pem));
+                        win.set_rsa_priv(editor_bridge::state_of(&t.priv_pem));
+                    }
+                    // 结果到了就停表 —— 空转的定时器在软件渲染的机器上是白烧 CPU。
+                    stop.stop();
+                },
+            );
+        });
+
+        let rsa = self.rsa.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_rsa_copy_pub(move || {
+            let text = rsa.borrow().pub_pem.text();
+            if text.is_empty() {
+                return;
+            }
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast("已复制公钥");
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+
+        let rsa = self.rsa.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_rsa_copy_priv(move || {
+            let text = rsa.borrow().priv_pem.text();
+            if text.is_empty() {
+                return;
+            }
+            state.borrow_mut().shared.copy(text);
+            state.borrow_mut().shared.toast("已复制私钥 —— 注意保管");
+            if let Some(win) = w.upgrade() {
+                Self::flush_toasts(&state, &win);
+            }
+        });
+    }
+
     /// 编辑区的通用回调。
     ///
     /// 所有编辑区共用这一组回调，靠第一个参数（编辑区标识，如 `"yaml-in"`）
@@ -694,6 +957,9 @@ impl Shell {
             state: self.state.clone(),
             uuid: self.uuid.clone(),
             yaml: self.yaml.clone(),
+            sql: self.sql.clone(),
+            regex: self.regex.clone(),
+            rsa: self.rsa.clone(),
         }
     }
 
@@ -705,6 +971,10 @@ impl Shell {
         match which {
             "yaml-in" => Some(f(&mut self.yaml.borrow_mut().input)),
             "yaml-out" => Some(f(&mut self.yaml.borrow_mut().output)),
+            "sql-in" => Some(f(&mut self.sql.borrow_mut().input)),
+            "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
+            "rsa-pub-out" => Some(f(&mut self.rsa.borrow_mut().pub_pem)),
+            "rsa-priv-out" => Some(f(&mut self.rsa.borrow_mut().priv_pem)),
             _ => None,
         }
     }
@@ -713,6 +983,8 @@ impl Shell {
     fn recompute(&self, which: &str) {
         if which.starts_with("yaml-") {
             self.yaml.borrow_mut().convert();
+        } else if which.starts_with("regex-") {
+            self.regex.borrow_mut().run();
         }
     }
 
@@ -720,6 +992,9 @@ impl Shell {
     fn persist_tool(&self, which: &str) {
         let (id, draft) = match which.split('-').next() {
             Some("yaml") => ("yaml", self.yaml.borrow().save_draft()),
+            Some("sql") => ("sql", self.sql.borrow().save_draft()),
+            Some("regex") => ("regex", self.regex.borrow().save_draft()),
+            Some("rsa") => ("rsa", self.rsa.borrow().save_draft()),
             _ => return,
         };
         self.draft_saver(id)(&draft);
@@ -747,6 +1022,12 @@ impl Shell {
     fn sync_editor(&self, win: &AppWindow, which: &str) {
         if which.starts_with("yaml-") {
             self.sync_yaml(win);
+        } else if which.starts_with("sql-") {
+            self.sync_sql(win);
+        } else if which.starts_with("regex-") {
+            self.sync_regex(win);
+        } else if which.starts_with("rsa-") {
+            self.sync_rsa(win);
         }
     }
 

@@ -28,6 +28,13 @@ struct ToolEntry {
     visible: bool,
 }
 
+// 一条正则匹配结果（已由 Rust 侧摊平成可直接显示的形状）。
+struct RegexMatch {
+    label: string,
+    text: string,
+    groups: [string],
+}
+
 // UUID 工具的一次执行记录。
 struct UuidHistEntry {
     label: string,
@@ -203,6 +210,369 @@ component YamlView inherits Rectangle {
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+        }
+    }
+}
+
+// ——— SQL 格式化（已迁移） ———
+component SqlView inherits Rectangle {
+    in property <EditorState> input-state;
+    in property <bool> uppercase: true;
+    in property <string> status;
+
+    callback do-format();
+    callback do-minify();
+    callback toggle-uppercase();
+    callback clear-input();
+    callback copy-input();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            FerricButton {
+                text: "格式化";
+                variant: "primary";
+                clicked => { root.do-format(); }
+            }
+            FerricButton {
+                text: "压缩为单行";
+                clicked => { root.do-minify(); }
+            }
+            // 关键字大写：用分段控件表达开关，与设置页同一套语言
+            Segmented {
+                options: ["关键字大写", "原样"];
+                current: root.uppercase ? 0 : 1;
+                changed(i) => { root.toggle-uppercase(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: Theme.muted;
+                vertical-alignment: center;
+            }
+            FerricButton {
+                text: "复制";
+                variant: "subtle";
+                clicked => { root.copy-input(); }
+            }
+            FerricButton {
+                text: "清空";
+                variant: "subtle";
+                clicked => { root.clear-input(); }
+            }
+        }
+
+        EditorPane {
+            title: "SQL";
+            which: "sql-in";
+            state: root.input-state;
+            vertical-stretch: 1;
+            editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+            editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+            editor-triple(w) => { root.editor-triple(w); }
+            editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+            editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+            editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+        }
+    }
+}
+
+// 正则标志的独立开关。不用分段控件：五个标志可以任意组合，
+// 分段控件表达的是互斥选择，语义不对。
+component FlagChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> on;
+    callback clicked();
+
+    height: 30px;
+    min-width: chip-label.min-width + 20px;
+    border-radius: 7px;
+    background: root.on
+        ? Theme.accent-soft
+        : (ta.has-hover ? Theme.border : Theme.code-bg);
+
+    chip-label := Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: 100%;
+        text: root.label;
+        font-family: Theme.font-ui-medium;
+        font-size: 12px;
+        color: root.on ? Theme.accent-strong : Theme.muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// ——— 正则表达式（已迁移） ———
+component RegexView inherits Rectangle {
+    in-out property <string> pattern;
+    in property <bool> fg;
+    in property <bool> fi;
+    in property <bool> fm;
+    in property <bool> fs;
+    in property <bool> fx;
+    in property <EditorState> text-state;
+    in property <[RegexMatch]> matches;
+    in property <bool> ok: true;
+    in property <string> status;
+
+    callback pattern-edited(string);
+    callback toggle-flag(int);
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        // 模式 + 标志
+        Card {
+            vertical-stretch: 0;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                FieldLabel { text: "模式"; }
+                FerricLineEdit {
+                    text <=> root.pattern;
+                    placeholder: "如 (\\w+)@(\\w+\\.\\w+)";
+                    mono: true;
+                    edited(t) => { root.pattern-edited(t); }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    FieldLabel { text: "标志"; vertical-alignment: center; }
+                    // 五个标志各是一个独立开关（不是互斥分段）
+                    FlagChip { label: "g 全局"; on: root.fg; clicked => { root.toggle-flag(0); } }
+                    FlagChip { label: "i 忽略大小写"; on: root.fi; clicked => { root.toggle-flag(1); } }
+                    FlagChip { label: "m 多行"; on: root.fm; clicked => { root.toggle-flag(2); } }
+                    FlagChip { label: "s 点匹配换行"; on: root.fs; clicked => { root.toggle-flag(3); } }
+                    FlagChip { label: "x 忽略空白"; on: root.fx; clicked => { root.toggle-flag(4); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.status;
+                        font-family: Theme.font-ui;
+                        font-size: 12px;
+                        color: root.ok ? Theme.muted : Theme.danger;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // 待匹配文本 / 匹配结果
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            EditorPane {
+                title: "待匹配文本";
+                which: "regex-in";
+                state: root.text-state;
+                horizontal-stretch: 1;
+                editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                editor-triple(w) => { root.editor-triple(w); }
+                editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                HorizontalLayout {
+                    FieldLabel { text: "匹配结果"; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: root.matches.length + " 处";
+                        font-family: Theme.font-mono;
+                        font-size: 11px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    background: Theme.code-bg;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    vertical-stretch: 1;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 6px;
+                            alignment: start;
+                            for m in root.matches: Rectangle {
+                                background: Theme.bg;
+                                border-radius: 7px;
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 3px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: m.label;
+                                            font-family: Theme.font-mono;
+                                            font-size: 11px;
+                                            color: Theme.faint;
+                                        }
+                                        Text {
+                                            text: m.text;
+                                            font-family: Theme.font-mono-medium;
+                                            font-size: 12.5px;
+                                            color: Theme.accent-strong;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                    for g[gi] in m.groups: Text {
+                                        text: "  $" + (gi + 1) + " = " + g;
+                                        font-family: Theme.font-mono;
+                                        font-size: 11.5px;
+                                        color: Theme.muted;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ——— RSA 密钥对（已迁移） ———
+component RsaView inherits Rectangle {
+    in property <int> bits-index;
+    in property <bool> busy;
+    in property <bool> ok: true;
+    in property <string> status;
+    in property <EditorState> pub-state;
+    in property <EditorState> priv-state;
+
+    callback bits-changed(int);
+    callback generate();
+    callback copy-pub();
+    callback copy-priv();
+    callback editor-viewport(string, int, int);
+    callback editor-click(string, int, int, bool);
+    callback editor-drag(string, int, int);
+    callback editor-triple(string);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            FieldLabel { text: "位数"; vertical-alignment: center; }
+            Segmented {
+                options: ["1024", "2048", "3072", "4096"];
+                current: root.bits-index;
+                changed(i) => { root.bits-changed(i); }
+            }
+            FerricButton {
+                text: root.busy ? "生成中…" : "生成";
+                variant: "primary";
+                enabled: !root.busy;
+                clicked => { root.generate(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: root.ok ? Theme.muted : Theme.danger;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                EditorPane {
+                    title: "公钥 (PEM)";
+                    which: "rsa-pub-out";
+                    state: root.pub-state;
+                    read-only: true;
+                    hint: "只读";
+                    vertical-stretch: 1;
+                    editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                    editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                    editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                    editor-triple(w) => { root.editor-triple(w); }
+                    editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                    editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                    editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                }
+                FerricButton {
+                    text: "复制公钥";
+                    clicked => { root.copy-pub(); }
+                }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                EditorPane {
+                    title: "私钥 (PEM)";
+                    which: "rsa-priv-out";
+                    state: root.priv-state;
+                    read-only: true;
+                    // 提醒用户这东西不会被存下来 —— 关掉窗口就没了
+                    hint: "只读 · 不持久化";
+                    vertical-stretch: 1;
+                    editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                    editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                    editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                    editor-triple(w) => { root.editor-triple(w); }
+                    editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                    editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                    editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                }
+                FerricButton {
+                    text: "复制私钥";
+                    clicked => { root.copy-priv(); }
+                }
             }
         }
     }
@@ -845,6 +1215,31 @@ export component AppWindow inherits Window {
     in property <bool> yaml-ok: true;
     in property <string> yaml-status: "";
 
+    // SQL 工具状态
+    in property <EditorState> sql-input;
+    in property <bool> sql-uppercase: true;
+    in property <string> sql-status: "";
+
+    // 正则工具状态
+    in-out property <string> regex-pattern;
+    in property <bool> regex-fg: true;
+    in property <bool> regex-fi;
+    in property <bool> regex-fm;
+    in property <bool> regex-fs;
+    in property <bool> regex-fx;
+    in property <EditorState> regex-text;
+    in property <[RegexMatch]> regex-matches;
+    in property <bool> regex-ok: true;
+    in property <string> regex-status: "";
+
+    // RSA 工具状态
+    in property <int> rsa-bits: 1;
+    in property <bool> rsa-busy;
+    in property <bool> rsa-ok: true;
+    in property <string> rsa-status: "";
+    in property <EditorState> rsa-pub;
+    in property <EditorState> rsa-priv;
+
     // ——— 回调（Rust 侧接管） ———
     callback window-drag();
     callback window-minimize();
@@ -876,6 +1271,23 @@ export component AppWindow inherits Window {
     callback yaml-sample();
     callback yaml-clear();
     callback yaml-copy();
+
+    // SQL 工具
+    callback sql-format();
+    callback sql-minify();
+    callback sql-toggle-uppercase();
+    callback sql-clear();
+    callback sql-copy();
+
+    // 正则工具
+    callback regex-pattern-edited(string);
+    callback regex-toggle-flag(int);
+
+    // RSA 工具
+    callback rsa-bits-changed(int);
+    callback rsa-generate();
+    callback rsa-copy-pub();
+    callback rsa-copy-priv();
 
     // 当前工具（tools 可能为空，取值前保护）
     property <ToolEntry> current: root.tools.length > 0
@@ -1079,6 +1491,66 @@ export component AppWindow inherits Window {
                         load-sample => { root.yaml-sample(); }
                         clear-input => { root.yaml-clear(); }
                         copy-output => { root.yaml-copy(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "sql": SqlView {
+                        vertical-stretch: 1;
+                        input-state: root.sql-input;
+                        uppercase: root.sql-uppercase;
+                        status: root.sql-status;
+                        do-format => { root.sql-format(); }
+                        do-minify => { root.sql-minify(); }
+                        toggle-uppercase => { root.sql-toggle-uppercase(); }
+                        clear-input => { root.sql-clear(); }
+                        copy-input => { root.sql-copy(); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "regex": RegexView {
+                        vertical-stretch: 1;
+                        pattern <=> root.regex-pattern;
+                        fg: root.regex-fg;
+                        fi: root.regex-fi;
+                        fm: root.regex-fm;
+                        fs: root.regex-fs;
+                        fx: root.regex-fx;
+                        text-state: root.regex-text;
+                        matches: root.regex-matches;
+                        ok: root.regex-ok;
+                        status: root.regex-status;
+                        pattern-edited(t) => { root.regex-pattern-edited(t); }
+                        toggle-flag(i) => { root.regex-toggle-flag(i); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+                    }
+                    if root.current.id == "rsa": RsaView {
+                        vertical-stretch: 1;
+                        bits-index: root.rsa-bits;
+                        busy: root.rsa-busy;
+                        ok: root.rsa-ok;
+                        status: root.rsa-status;
+                        pub-state: root.rsa-pub;
+                        priv-state: root.rsa-priv;
+                        bits-changed(i) => { root.rsa-bits-changed(i); }
+                        generate => { root.rsa-generate(); }
+                        copy-pub => { root.rsa-copy-pub(); }
+                        copy-priv => { root.rsa-copy-priv(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }

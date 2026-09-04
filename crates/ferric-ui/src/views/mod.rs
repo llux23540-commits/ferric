@@ -8,10 +8,16 @@
 //! 换成真实构造。侧栏顺序 = 此处顺序，与 egui 版一致，不要重排。
 
 mod pending;
+mod regex;
+mod rsa;
+mod sql;
 mod uuid;
 mod yaml;
 
 pub use pending::PendingTool;
+pub use regex::RegexTool;
+pub use rsa::RsaTool;
+pub use sql::SqlTool;
 pub use uuid::UuidTool;
 pub use yaml::YamlTool;
 
@@ -64,24 +70,10 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         ),
         // ——— 已迁移 ———
         Box::new(YamlTool::default()),
-        pending(
-            "sql",
-            "SQL 格式化",
-            "格式化 / 压缩为单行，关键字大写开关",
-            icons::DATABASE,
-            "格式",
-            &["sql", "format", "格式化", "美化"],
-        ),
+        Box::new(SqlTool::default()),
         // ——— 已迁移 ———
         Box::new(UuidTool::default()),
-        pending(
-            "rsa",
-            "RSA 密钥对",
-            "256–4096 位，后台线程生成，PEM 输出",
-            icons::KEY,
-            "加密",
-            &["rsa", "key", "密钥", "pem", "公钥", "私钥"],
-        ),
+        Box::new(RsaTool::default()),
         pending(
             "crypto",
             "加密 / 解密文本",
@@ -98,14 +90,7 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
             "加密",
             &["gm", "国密", "sm2", "sm3", "sm4", "国密sm"],
         ),
-        pending(
-            "regex",
-            "正则表达式",
-            "g/i/m/s/x 标志，分组捕获展示，常用语法备忘单",
-            icons::TERMINAL,
-            "文本",
-            &["regex", "正则", "regexp", "match"],
-        ),
+        Box::new(RegexTool::default()),
         pending(
             "market",
             "插件市场",
@@ -164,6 +149,10 @@ mod tests {
             .filter(|t| t.migrated())
             .map(|t| t.meta().id)
             .collect();
-        assert_eq!(migrated, vec!["yaml", "uuid"], "迁完一个就在这里加一项");
+        assert_eq!(
+            migrated,
+            vec!["yaml", "sql", "uuid", "rsa", "regex"],
+            "迁完一个就在这里加一项"
+        );
     }
 }
