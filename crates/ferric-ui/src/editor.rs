@@ -244,6 +244,20 @@ impl TextBuffer {
             .collect()
     }
 
+    /// 某一行的完整文本（不含行尾换行）。
+    ///
+    /// 语法着色要拿**整行**做词法：用横向滚动裁过的那份会从字符串中间开始，
+    /// 引号配对全错，颜色跟着错。
+    pub fn line_text(&self, line: usize) -> String {
+        if line >= self.rope.len_lines() {
+            return String::new();
+        }
+        let start = self.rope.line_to_char(line);
+        self.rope
+            .slice(start..start + self.line_len(line))
+            .to_string()
+    }
+
     /// 单行按横向滚动裁剪后的文本。
     fn sliced_line(&self, line: usize) -> String {
         let len = self.line_len(line);

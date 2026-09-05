@@ -183,6 +183,114 @@ fn write_pretty(value: &Value, indent: Indent) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
+/// 一段高亮的种类。数值直接进 UI（`EditorState.tokens` 的 `kind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Token {
+    /// 对象的键（后面紧跟 `:` 的字符串）
+    Key,
+    /// 字符串值
+    Str,
+    Num,
+    /// `true` / `false` / `null`
+    Lit,
+    /// `{}` `[]` `,` `:`
+    Punct,
+    /// 其它（未闭合的残句、非法字符）
+    Plain,
+}
+
+/// 把**一行** JSON 切成带颜色的片段：`(起始 char, char 数, 种类)`。
+///
+/// 逐行独立着色是安全的：JSON 的字符串不能跨行（换行只能是 `\n` 转义），
+/// 所以一行的词法不依赖上一行。键与字符串值的区别也在同一行内可判断 ——
+/// 闭引号后的第一个非空白字符是 `:` 就是键。
+///
+/// 片段**连续覆盖整行**，空白也算一段（[`Token::Plain`]）：UI 侧是把一行的
+/// 片段顺次排出来渲染的，缺一段就会把后面的内容整体挪位；中文是双宽字符，
+/// 按「一个 char 一格」硬定位会互相压字。
+pub fn highlight_line(line: &str) -> Vec<(usize, usize, Token)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out: Vec<(usize, usize, Token)> = Vec::new();
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            out.push((i, j - i, Token::Plain));
+            i = j;
+            continue;
+        }
+        let start = i;
+        match c {
+            '"' => {
+                // 走到闭引号（转义的引号不算）
+                let mut j = i + 1;
+                let mut closed = false;
+                while j < chars.len() {
+                    match chars[j] {
+                        '\\' => j += 2,
+                        '"' => {
+                            closed = true;
+                            j += 1;
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                let end = j.min(chars.len());
+                let is_key = closed
+                    && chars[end..]
+                        .iter()
+                        .find(|c| !c.is_whitespace())
+                        .is_some_and(|c| *c == ':');
+                out.push((
+                    start,
+                    end - start,
+                    if is_key { Token::Key } else { Token::Str },
+                ));
+                i = end;
+            }
+            '{' | '}' | '[' | ']' | ',' | ':' => {
+                out.push((start, 1, Token::Punct));
+                i += 1;
+            }
+            '-' | '0'..='9' => {
+                let mut j = i + 1;
+                while j < chars.len()
+                    && (chars[j].is_ascii_digit()
+                        || matches!(chars[j], '.' | 'e' | 'E' | '+' | '-'))
+                {
+                    j += 1;
+                }
+                out.push((start, j - start, Token::Num));
+                i = j;
+            }
+            _ if c.is_ascii_alphabetic() => {
+                let mut j = i;
+                while j < chars.len() && chars[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                let word: String = chars[start..j].iter().collect();
+                let kind = match word.as_str() {
+                    "true" | "false" | "null" => Token::Lit,
+                    _ => Token::Plain,
+                };
+                out.push((start, j - start, kind));
+                i = j;
+            }
+            _ => {
+                out.push((start, 1, Token::Plain));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +385,84 @@ mod tests {
         }
         assert!(cur["payload"].is_object(), "深层字段没展开：{out}");
         assert_eq!(cur["payload"]["x"], Value::from(1));
+    }
+
+    fn kinds(line: &str) -> Vec<(String, Token)> {
+        let cs: Vec<char> = line.chars().collect();
+        highlight_line(line)
+            .into_iter()
+            .map(|(col, len, k)| (cs[col..col + len].iter().collect::<String>(), k))
+            .collect()
+    }
+
+    #[test]
+    fn keys_and_string_values_are_told_apart() {
+        // 键与字符串值同形，区别只有「闭引号后是不是 `:`」——
+        // 分不开的话整行一个颜色，等于没高亮。
+        assert_eq!(
+            kinds(r#"  "name": "ferric","#),
+            vec![
+                ("  ".to_owned(), Token::Plain),
+                (r#""name""#.to_owned(), Token::Key),
+                (":".to_owned(), Token::Punct),
+                (" ".to_owned(), Token::Plain),
+                (r#""ferric""#.to_owned(), Token::Str),
+                (",".to_owned(), Token::Punct),
+            ]
+        );
+    }
+
+    #[test]
+    fn escaped_quotes_do_not_end_the_string() {
+        // `"a\":\"b"` 里的转义引号不能当闭引号，否则后半截会被当成键。
+        let got = kinds(r#""a\":\"b": 1"#);
+        assert_eq!(got[0].1, Token::Key);
+        assert_eq!(got[0].0, r#""a\":\"b""#);
+        assert_eq!(got.last().unwrap().1, Token::Num);
+    }
+
+    #[test]
+    fn numbers_literals_and_punctuation_get_their_own_kinds() {
+        // 只看非空白片段的颜色（空白也占一段，见 spans_cover_every_char_of_the_line）
+        let got: Vec<(String, Token)> = kinds("[-1.5e3, true, null]")
+            .into_iter()
+            .filter(|(t, _)| !t.trim().is_empty())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("[".to_owned(), Token::Punct),
+                ("-1.5e3".to_owned(), Token::Num),
+                (",".to_owned(), Token::Punct),
+                ("true".to_owned(), Token::Lit),
+                (",".to_owned(), Token::Punct),
+                ("null".to_owned(), Token::Lit),
+                ("]".to_owned(), Token::Punct),
+            ]
+        );
+    }
+
+    #[test]
+    fn unterminated_string_still_colors_to_end_of_line() {
+        // 用户正在打字的那一行经常是半截的，不能因此 panic 或漏画。
+        let got = kinds(r#"{"half": "oops"#);
+        assert_eq!(got.last().unwrap().0, r#""oops"#);
+        assert_eq!(got.last().unwrap().1, Token::Str);
+    }
+
+    #[test]
+    fn spans_cover_every_char_of_the_line() {
+        // UI 侧把片段顺次排出来渲染，缺一段（比如缩进）后面就整体挪位；
+        // 列坐标按 char 记，按字节记的话中文之后全错。
+        for line in [r#"  "城市": "上海","#, "{", r#"    "a": [1, 2]"#, "", "   "] {
+            let spans = highlight_line(line);
+            let total: usize = spans.iter().map(|(_, len, _)| *len).sum();
+            assert_eq!(total, line.chars().count(), "片段没盖满整行：{line:?}");
+            let mut at = 0usize;
+            for (col, len, _) in &spans {
+                assert_eq!(*col, at, "片段之间有空洞：{line:?}");
+                at += len;
+            }
+        }
     }
 }

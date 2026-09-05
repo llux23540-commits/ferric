@@ -1,5 +1,20 @@
 import { Theme, Icons } from "theme.slint";
 
+// 语法着色：一行的片段顺次排出来（`TokenLine.runs`），颜色种类与
+// `editor_bridge::token_kind` 一一对应：
+// 0 其它（含空白）/ 1 键 / 2 字符串 / 3 数字 / 4 true·false·null / 5 标点。
+//
+// 为什么不是「按 char 列绝对定位」：中文是双宽字符，一个 char 一格会让
+// 相邻片段互相压字（实测中文键名整段糊在一起）。顺次排出来由字体决定宽度。
+export struct TokenRun {
+    text: string,
+    kind: int,
+}
+
+export struct TokenLine {
+    runs: [TokenRun],
+}
+
 export component CodeEditor inherits Rectangle {
     in property <[string]> lines;
     in property <[int]> line-nos;
@@ -21,6 +36,9 @@ export component CodeEditor inherits Rectangle {
     in property <bool> diffed: false;
     // 字符级高亮 (视口行, 起列, 列数)：改动行里被改掉的那几个字
     in property <[[int]]> emph-spans;
+    // 语法着色：每个可见行一份片段序列。空 = 不着色，走纯文本那条。
+    in property <[TokenLine]> tokens;
+    in property <bool> highlighted: false;
 
     callback viewport-changed(int, int);
     callback clicked(int, int, bool);
@@ -171,19 +189,51 @@ export component CodeEditor inherits Rectangle {
             background: Theme.accent-soft;
         }
 
-        for line[i] in root.lines: Text {
-            x: root.pad;
-            y: root.pad + i * root.line-height;
-            width: parent.width - root.pad;
-            height: root.line-height;
-            text: line;
-            font-family: Theme.font-mono;
-            font-size: root.font-size;
-            color: Theme.fg;
-            vertical-alignment: center;
-            // 不换行：换行会让「一行 = 一个 y 坐标」的前提失效，
-            // 光标与选区的坐标换算全部作废。横向滚动由 Rust 侧裁剪。
-            wrap: no-wrap;
+        // 无语法着色：一行一个 Text（绝大多数编辑区走这条）。
+        if !root.highlighted: Rectangle {
+            width: 100%;
+            height: 100%;
+            for line[i] in root.lines: Text {
+                x: root.pad;
+                y: root.pad + i * root.line-height;
+                width: parent.width - root.pad;
+                height: root.line-height;
+                text: line;
+                font-family: Theme.font-mono;
+                font-size: root.font-size;
+                color: Theme.fg;
+                vertical-alignment: center;
+                // 不换行：换行会让「一行 = 一个 y 坐标」的前提失效，
+                // 光标与选区的坐标换算全部作废。横向滚动由 Rust 侧裁剪。
+                wrap: no-wrap;
+            }
+        }
+
+        // 有语法着色：一行的片段顺次排出来。宽度交给字体（中文双宽），
+        // 所以不会像「一个 char 一格」那样把相邻片段压在一起。
+        if root.highlighted: Rectangle {
+            width: 100%;
+            height: 100%;
+            for line[i] in root.tokens: HorizontalLayout {
+                x: root.pad;
+                y: root.pad + i * root.line-height;
+                height: root.line-height;
+                alignment: start;
+                spacing: 0px;
+                for t in line.runs: Text {
+                    text: t.text;
+                    font-family: Theme.font-mono;
+                    font-size: root.font-size;
+                    color: t.kind == 1 ? Theme.code-key
+                        : t.kind == 2 ? Theme.code-str
+                        : t.kind == 3 ? Theme.code-num
+                        : t.kind == 4 ? Theme.code-lit
+                        : t.kind == 5 ? Theme.code-punct
+                        : Theme.fg;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                }
+            }
         }
 
         if root.cursor-visible && focus.has-focus && !root.read-only: Rectangle {

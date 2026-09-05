@@ -698,7 +698,13 @@ impl Shell {
     /// JSON 工具状态 → property。
     fn sync_json(&self, win: &AppWindow) {
         let t = self.json.borrow();
-        win.set_json_input(editor_bridge::state_of(&t.input));
+        win.set_json_input(editor_bridge::state_with_decor(
+            &t.input,
+            editor_bridge::RowDecor {
+                syntax: editor_bridge::Syntax::Json,
+                ..Default::default()
+            },
+        ));
         win.set_json_indent(t.indent_index());
         win.set_json_sort(t.sort);
         win.set_json_wrap(t.wrap);
@@ -728,6 +734,7 @@ impl Shell {
             RowDecor {
                 kinds: &t.left_kinds,
                 emph: &t.left_emph,
+                ..Default::default()
             },
         ));
         win.set_diff_right(editor_bridge::state_with_decor(
@@ -735,6 +742,7 @@ impl Shell {
             RowDecor {
                 kinds: &t.right_kinds,
                 emph: &t.right_emph,
+                ..Default::default()
             },
         ));
         win.set_diff_has_diff(t.stats.added + t.stats.removed > 0);
@@ -2075,7 +2083,13 @@ impl Shell {
     /// 把 JSON 工具的状态刷进 Slint（多条路径共用）。
     fn push_json(json: &Rc<RefCell<views::JsonTool>>, win: &AppWindow) {
         let t = json.borrow();
-        win.set_json_input(editor_bridge::state_of(&t.input));
+        win.set_json_input(editor_bridge::state_with_decor(
+            &t.input,
+            editor_bridge::RowDecor {
+                syntax: editor_bridge::Syntax::Json,
+                ..Default::default()
+            },
+        ));
         win.set_json_indent(t.indent_index());
         win.set_json_sort(t.sort);
         win.set_json_wrap(t.wrap);

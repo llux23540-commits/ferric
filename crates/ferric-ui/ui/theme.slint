@@ -68,6 +68,17 @@ export global Theme {
     out property <color> del-bg: dark ? rgba(224, 107, 103, 0.14) : #fdecec;
     out property <color> del-mark: dark ? rgba(224, 107, 103, 0.33) : #f6c9c7;
 
+    // ——— 语法着色（JSON）———
+    //
+    // 挑色的两条约束：暗底亮底都要过得去，且不能跟主色（绿）打架 ——
+    // 主色在这套界面里表示「已生效 / 结果」，正文里再铺一遍就抢注意力。
+    // 键最重（要能扫着看结构），标点最淡（它只是骨架）。
+    out property <color> code-key: dark ? #7fb3ff : #1d4ed8;
+    out property <color> code-str: dark ? #d99a63 : #a35418;
+    out property <color> code-num: dark ? #c58af9 : #7c3aed;
+    out property <color> code-lit: dark ? #e06b67 : #c2410c;
+    out property <color> code-punct: dark ? #7c8794 : #98a1ab;
+
     // ——— 字体族（取 TTF name 表里的 family，见文件头注释） ———
     out property <string> font-ui: "Plus Jakarta Sans";
     out property <string> font-ui-medium: "Plus Jakarta Sans Medium";

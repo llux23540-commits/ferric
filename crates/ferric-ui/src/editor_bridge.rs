@@ -12,7 +12,7 @@
 //! 在这边 match 反而更清楚，也顺手把 Ctrl 组合键一起收了。
 
 use crate::editor::{Motion, TextBuffer};
-use crate::state::EditorState;
+use crate::state::{EditorState, TokenLine, TokenRun};
 use slint::{ModelRc, SharedString, VecModel};
 
 // Slint 的功能键码点（i-slint-common/key_codes.rs）。
@@ -41,14 +41,24 @@ pub struct KeyOutcome {
     pub paste: bool,
 }
 
-/// 差异装饰：逐行种类 + 字符级高亮。对比工具把算好的结果挂进编辑区。
+/// 语法着色的种类。目前只有 JSON —— 其它工具的正文（SQL / 正则 / 密文）
+/// 要么本来就不该染色，要么词法不是逐行独立的，硬上会给出错的颜色。
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub enum Syntax {
+    #[default]
+    None,
+    Json,
+}
+
+/// 编辑区的装饰：差异（逐行种类 + 字符级高亮）与语法着色。
 ///
 /// 下标语义与编辑区一致 —— `kinds` 按**文档行号**索引，`emph` 是
-/// `(行, 起始 char, 长度)`。两者都在这里被裁到当前视口，与文档多大无关。
+/// `(行, 起始 char, 长度)`。全部在这里被裁到当前视口，与文档多大无关。
 #[derive(Default, Clone, Copy)]
 pub struct RowDecor<'a> {
     pub kinds: &'a [i32],
     pub emph: &'a [(usize, usize, usize)],
+    pub syntax: Syntax,
 }
 
 /// 把缓冲区打包成 Slint 的 `EditorState`。
@@ -112,6 +122,37 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         })
         .collect();
 
+    // 语法着色：**只对这一屏的行**跑词法。每行给出一串片段（文本 + 颜色），
+    // UI 侧顺次排出来 —— 不按 char 列绝对定位，因为中文是双宽字符，
+    // 「一个 char 一格」会让相邻片段互相压字。
+    let tokens: Vec<TokenLine> = if decor.syntax == Syntax::None {
+        Vec::new()
+    } else {
+        rows.iter()
+            .map(|line| {
+                let text = buf.line_text(*line);
+                let chars: Vec<char> = text.chars().collect();
+                let runs: Vec<TokenRun> = ferric_core::json::highlight_line(&text)
+                    .into_iter()
+                    .filter_map(|(col, len, kind)| {
+                        // 裁到横向滚动窗口：整段在窗口外的不画，跨边界的切一刀。
+                        let (a, b) = (col.max(left), (col + len).min(right));
+                        (b > a).then(|| TokenRun {
+                            text: SharedString::from(
+                                chars[a..b].iter().collect::<String>().as_str(),
+                            ),
+                            kind: token_kind(kind),
+                        })
+                    })
+                    .collect();
+                TokenLine {
+                    runs: ModelRc::new(VecModel::from(runs)),
+                }
+            })
+            .collect()
+    };
+    let highlighted = !tokens.is_empty();
+
     EditorState {
         lines: ModelRc::new(VecModel::from(lines)),
         first_line: buf.view_first_row() as i32,
@@ -126,7 +167,23 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         cursor_line: cur_row.unwrap_or(0) as i32,
         cursor_col: cur_col.saturating_sub(buf.scroll_col()) as i32,
         cursor_visible: cur_row.is_some(),
+        tokens: ModelRc::new(VecModel::from(tokens)),
+        highlighted,
         selection_spans: ModelRc::new(VecModel::from(spans)),
+    }
+}
+
+/// `ferric_core::json::Token` → `EditorState.tokens` 的 `kind`。
+/// 数值与 `ui/editor.slint` 里的调色板一一对应，改一边就要改另一边。
+fn token_kind(t: ferric_core::json::Token) -> i32 {
+    use ferric_core::json::Token;
+    match t {
+        Token::Plain => 0,
+        Token::Key => 1,
+        Token::Str => 2,
+        Token::Num => 3,
+        Token::Lit => 4,
+        Token::Punct => 5,
     }
 }
 
@@ -413,6 +470,7 @@ mod tests {
             RowDecor {
                 kinds: &kinds,
                 emph: &emph,
+                ..Default::default()
             },
         );
 
@@ -429,10 +487,73 @@ mod tests {
     }
 
     #[test]
-    fn plain_editors_carry_no_diff_decoration() {
+    fn plain_editors_carry_no_decoration_at_all() {
         use slint::Model;
         let st = state_of(&buf());
         assert!(!st.diffed);
+        assert!(!st.highlighted, "没开语法着色时不该走片段渲染");
         assert_eq!(st.emph_spans.row_count(), 0);
+        assert_eq!(st.tokens.row_count(), 0);
+    }
+
+    /// 某一可见行的片段序列，摊成 `(文本, 种类)` 好断言。
+    fn runs_of(st: &EditorState, row: usize) -> Vec<(String, i32)> {
+        use slint::Model;
+        st.tokens
+            .row_data(row)
+            .expect("这一行应当有片段")
+            .runs
+            .iter()
+            .map(|r| (r.text.to_string(), r.kind))
+            .collect()
+    }
+
+    #[test]
+    fn json_line_is_colored_run_by_run() {
+        let mut b = TextBuffer::new("{\n  \"name\": \"ferric\"\n}\n");
+        b.set_viewport(4, 40);
+        let st = state_with_decor(
+            &b,
+            RowDecor {
+                syntax: Syntax::Json,
+                ..Default::default()
+            },
+        );
+        assert!(st.highlighted);
+        assert_eq!(
+            runs_of(&st, 1),
+            vec![
+                ("  ".to_owned(), 0),
+                ("\"name\"".to_owned(), 1),
+                (":".to_owned(), 5),
+                (" ".to_owned(), 0),
+                ("\"ferric\"".to_owned(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn json_runs_are_clipped_by_horizontal_scroll() {
+        // 片段是顺次排出来的，所以横向滚动必须把左边切掉，
+        // 不切的话滚出去的字还画在行首。
+        let mut b = TextBuffer::new("{\"name\": \"ferric\"}\n");
+        b.set_viewport(4, 6);
+        b.scroll_cols_by(3);
+        let st = state_with_decor(
+            &b,
+            RowDecor {
+                syntax: Syntax::Json,
+                ..Default::default()
+            },
+        );
+        let runs = runs_of(&st, 0);
+        assert_eq!(
+            runs.first().map(|(t, k)| (t.as_str(), *k)),
+            Some(("ame\"", 1)),
+            "`\"name\"` 从第 1 列起，滚 3 列后行首应当是 ame\"，实际 {runs:?}"
+        );
+        // 视口只有 6 列（+1 富余），后面的内容不该整段进模型
+        let total: usize = runs.iter().map(|(t, _)| t.chars().count()).sum();
+        assert!(total <= 7, "裁过头或没裁：{runs:?}");
     }
 }

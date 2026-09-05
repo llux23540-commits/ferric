@@ -11,7 +11,7 @@ import { Theme, Icons } from "theme.slint";
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
 import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast, Tooltip } from "widgets.slint";
-import { CodeEditor } from "editor.slint";
+import { CodeEditor, TokenLine } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
 // 侧栏一行工具。
@@ -104,6 +104,9 @@ struct UuidHistEntry {
     body: string,
 }
 
+// 语法着色片段（`TokenRun`）定义在 editor.slint 里：编辑区是它的唯一消费者，
+// 而 app.slint 已经 import 了那个文件（反过来 import 会成环）。
+
 // 一个编辑区的全部可见状态。
 //
 // 打包成 struct 而不是散成十几个 property：编辑区会被每个文本类工具用到
@@ -134,6 +137,11 @@ struct EditorState {
     cursor-line: int,
     cursor-col: int,
     cursor-visible: bool,
+    // 语法着色的片段（JSON 工具用）。Slint 没有富文本，所以一行不是一个
+    // Text，而是按 char 列定位的一串片段 —— 等宽字体下与光标列天然对齐。
+    tokens: [TokenLine],
+    // 这一屏有没有着色片段（有就不再画整行纯文本，免得画两遍）
+    highlighted: bool,
     // 选区高亮 (视口行, 起列, 列数)，已裁到视口内
     selection-spans: [[int]],
 }
@@ -198,6 +206,8 @@ component EditorPane inherits Rectangle {
             row-kinds: root.state.row-kinds;
             diffed: root.state.diffed;
             emph-spans: root.state.emph-spans;
+            tokens: root.state.tokens;
+            highlighted: root.state.highlighted;
             cursor-line: root.state.cursor-line;
             cursor-col: root.state.cursor-col;
             cursor-visible: root.state.cursor-visible;
