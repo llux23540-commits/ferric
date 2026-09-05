@@ -2455,12 +2455,8 @@ component UuidView inherits Rectangle {
     in-out property <bool> as-json: false;
     in-out property <int> hist-keep-index: 0;
 
-    // 输出侧（只读：Rust 算完写进来）
-    in property <string> output;
-    // 输出按行拆开（一行一条，可单条选中）
-    in property <[string]> lines;
-    // 当前选中的行号，-1 = 没选
-    in property <int> selected: -1;
+    // 输出侧（只读编辑区：可以用鼠标拖选、双击选整行、Ctrl+C）
+    in property <EditorState> out;
     in property <bool> ok: true;
     in property <string> status: "就绪";
     in property <[UuidHistEntry]> history;
@@ -2471,9 +2467,15 @@ component UuidView inherits Rectangle {
     callback regenerate();
     callback copy-output();
     callback restore-history(int);
-    /// 单条选中 / 单条复制（参数是行号）
-    callback select-line(int);
-    callback copy-line(int);
+    callback editor-viewport(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
+    callback editor-triple(string);
+    callback editor-fold(string, int);
+    callback editor-scroll(string, int, int);
+    callback editor-scroll-line(string, int);
+    callback editor-key(string, string, bool, bool);
 
     VerticalLayout {
         padding: 20px;
@@ -2602,58 +2604,39 @@ component UuidView inherits Rectangle {
                     }
                 }
 
-                // 一行一条：可单条选中（点一下高亮，再点取消），行尾的复制
-                // 图标只复制这一条。以前这里是一整块 Text —— 选不中、也没法
-                // 只复制一条，用户拿一个 id 得从十条里手工挑。
-                Rectangle {
-                    background: Theme.code-bg;
-                    border-radius: 9px;
-                    border-width: 1px;
-                    border-color: Theme.border;
+                // 只读编辑区：鼠标可以横跨若干行任意拖选、双击选整行、
+                // Ctrl+A / Ctrl+C 照常。用 CodeEditor 而不是 EditorPane 是
+                // 因为这张卡自己已经有「输出 / 状态 / 复制」那一行标题了。
+                //
+                // 中间做过一版「点一行高亮一行」——只能整行选，用户要拖着选。
+                CodeEditor {
                     vertical-stretch: 1;
-                    clip: true;
+                    read-only: true;
+                    lines: root.out.lines;
+                    line-nos: root.out.line-nos;
+                    first-line: root.out.first-line;
+                    total-lines: root.out.total-lines;
+                    fold-marks: root.out.fold-marks;
+                    foldable: root.out.foldable;
+                    row-kinds: root.out.row-kinds;
+                    diffed: root.out.diffed;
+                    emph-spans: root.out.emph-spans;
+                    tokens: root.out.tokens;
+                    highlighted: root.out.highlighted;
+                    cursor-line: root.out.cursor-line;
+                    cursor-x: root.out.cursor-x;
+                    cursor-visible: root.out.cursor-visible;
+                    selection-spans: root.out.selection-spans;
 
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 6px;
-                            spacing: 1px;
-                            alignment: start;
-                            for line[i] in root.lines: Rectangle {
-                                height: 24px;
-                                border-radius: 5px;
-                                background: i == root.selected
-                                    ? Theme.accent-soft
-                                    : (row-ta.has-hover ? Theme.border : transparent);
-
-                                Text {
-                                    x: 8px;
-                                    width: parent.width - 44px;
-                                    height: 100%;
-                                    text: line;
-                                    font-family: Theme.font-mono-medium;
-                                    font-size: 13px;
-                                    color: i == root.selected ? Theme.accent-strong : Theme.fg;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-
-                                row-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.select-line(i); }
-                                }
-
-                                // 复制图标：悬停或选中时才出现，平时不干扰阅读
-                                if row-ta.has-hover || i == root.selected: IconButton {
-                                    x: parent.width - 32px;
-                                    y: (parent.height - self.height) / 2;
-                                    icon: Icons.copy;
-                                    icon-size: 15px;
-                                    tooltip: "复制这一条";
-                                    clicked => { root.copy-line(i); }
-                                }
-                            }
-                        }
-                    }
+                    viewport-changed(r, c) => { root.editor-viewport("uuid-out", r, c); }
+                    wide-ratio-changed(v) => { root.editor-wide-ratio(v); }
+                    clicked(l, c, e) => { root.editor-click("uuid-out", l, c, e); }
+                    dragged(l, c) => { root.editor-drag("uuid-out", l, c); }
+                    triple-clicked => { root.editor-triple("uuid-out"); }
+                    scrolled(dl, dc) => { root.editor-scroll("uuid-out", dl, dc); }
+                    scroll-to-line(l) => { root.editor-scroll-line("uuid-out", l); }
+                    fold-toggled(r) => { root.editor-fold("uuid-out", r); }
+                    key-pressed(t, ctrl, shift) => { root.editor-key("uuid-out", t, ctrl, shift); }
                 }
             }
         }
@@ -3396,10 +3379,8 @@ export component AppWindow inherits Window {
     in-out property <bool> uuid-nohyphen: false;
     in-out property <bool> uuid-as-json: false;
     in-out property <int> uuid-hist-keep: 0;
-    in property <string> uuid-output: "";
-    // 输出按行拆开 + 当前选中行（-1 = 没选）
-    in property <[string]> uuid-lines;
-    in property <int> uuid-selected: -1;
+    // 输出走只读编辑区（可拖选 / Ctrl+C），与其它工具的输出面板一致
+    in property <EditorState> uuid-out;
     in property <bool> uuid-ok: true;
     in property <string> uuid-status: "就绪";
     in property <[UuidHistEntry]> uuid-history;
@@ -3572,8 +3553,6 @@ export component AppWindow inherits Window {
     callback uuid-regenerate();
     callback uuid-copy();
     callback uuid-restore-history(int);
-    callback uuid-select-line(int);
-    callback uuid-copy-line(int);
 
     // 编辑区通用回调。第一个参数是编辑区标识（如 "yaml-in"），
     // Rust 侧一个 match 分派到对应的 TextBuffer —— 每加一个文本类工具
@@ -4115,17 +4094,22 @@ export component AppWindow inherits Window {
                         nohyphen <=> root.uuid-nohyphen;
                         as-json <=> root.uuid-as-json;
                         hist-keep-index <=> root.uuid-hist-keep;
-                        output: root.uuid-output;
-                        lines: root.uuid-lines;
-                        selected: root.uuid-selected;
+                        out: root.uuid-out;
                         ok: root.uuid-ok;
                         status: root.uuid-status;
                         history: root.uuid-history;
                         regenerate => { root.uuid-regenerate(); }
                         copy-output => { root.uuid-copy(); }
                         restore-history(i) => { root.uuid-restore-history(i); }
-                        select-line(i) => { root.uuid-select-line(i); }
-                        copy-line(i) => { root.uuid-copy-line(i); }
+                        editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
+                        editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
+                        editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
+                        editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
+                        editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
+                        editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
+                        editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
                     }
                     if root.current.id == "yaml": YamlView {
                         vertical-stretch: 1;

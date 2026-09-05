@@ -511,11 +511,8 @@ impl Shell {
         win.set_uuid_nohyphen(u.nohyphen);
         win.set_uuid_as_json(u.as_json);
         win.set_uuid_hist_keep(u.hist_keep_index());
-        win.set_uuid_output(SharedString::from(u.output.clone()));
-        // 输出按行给：界面上一行一条，可单条选中 / 单条复制。
-        let lines: Vec<SharedString> = u.lines().into_iter().map(SharedString::from).collect();
-        win.set_uuid_lines(ModelRc::new(VecModel::from(lines)));
-        win.set_uuid_selected(u.selected.map_or(-1, |i| i as i32));
+        // 输出走只读编辑区：鼠标拖选 / 双击选整行 / Ctrl+C 都由它提供。
+        win.set_uuid_out(editor_bridge::state_of(&u.out));
         win.set_uuid_ok(u.ok);
         win.set_uuid_status(SharedString::from(u.status.clone()));
         let hist: Vec<UuidHistEntry> = u
@@ -1367,11 +1364,7 @@ impl Shell {
             // 回灌输出与历史
             {
                 let u = uuid.borrow();
-                win.set_uuid_output(SharedString::from(u.output.clone()));
-                let lines: Vec<SharedString> =
-                    u.lines().into_iter().map(SharedString::from).collect();
-                win.set_uuid_lines(ModelRc::new(VecModel::from(lines)));
-                win.set_uuid_selected(u.selected.map_or(-1, |n| n as i32));
+                win.set_uuid_out(editor_bridge::state_of(&u.out));
                 win.set_uuid_ok(u.ok);
                 win.set_uuid_status(SharedString::from(u.status.clone()));
                 let hist: Vec<UuidHistEntry> = u
@@ -1415,41 +1408,6 @@ impl Shell {
             }
         });
 
-        // 单条选中 / 单条复制：以前输出是一整块 Text，想拿一个 id 只能
-        // 从十条里手工挑（用户报的「不能单条选中」）。
-        let uuid = self.uuid.clone();
-        let w = win.as_weak();
-        win.on_uuid_select_line(move |i| {
-            uuid.borrow_mut().select_line(i.max(0) as usize);
-            if let Some(win) = w.upgrade() {
-                win.set_uuid_selected(uuid.borrow().selected.map_or(-1, |n| n as i32));
-            }
-        });
-
-        let uuid = self.uuid.clone();
-        let state = self.state.clone();
-        let w = win.as_weak();
-        win.on_uuid_copy_line(move |i| {
-            let text = {
-                let mut u = uuid.borrow_mut();
-                // 点复制就把这一条选上：复制完界面要能看出复制的是哪条
-                u.selected = Some(i.max(0) as usize);
-                u.selected_text()
-            };
-            let Some(text) = text.filter(|t| !t.is_empty()) else {
-                return;
-            };
-            {
-                let mut s = state.borrow_mut();
-                s.shared.copy(text.clone());
-                s.shared.toast(format!("已复制 {text}"));
-            }
-            if let Some(win) = w.upgrade() {
-                win.set_uuid_selected(uuid.borrow().selected.map_or(-1, |n| n as i32));
-                Self::flush_shared(&state, &win);
-            }
-        });
-
         let uuid = self.uuid.clone();
         let w = win.as_weak();
         win.on_uuid_restore_history(move |i| {
@@ -1457,11 +1415,7 @@ impl Shell {
             let restored = uuid.borrow_mut().restore(i.max(0) as usize);
             if restored {
                 let u = uuid.borrow();
-                win.set_uuid_output(SharedString::from(u.output.clone()));
-                let lines: Vec<SharedString> =
-                    u.lines().into_iter().map(SharedString::from).collect();
-                win.set_uuid_lines(ModelRc::new(VecModel::from(lines)));
-                win.set_uuid_selected(u.selected.map_or(-1, |n| n as i32));
+                win.set_uuid_out(editor_bridge::state_of(&u.out));
                 win.set_uuid_ok(u.ok);
                 win.set_uuid_status(SharedString::from(u.status.clone()));
             }
@@ -2626,6 +2580,8 @@ impl Shell {
         match which {
             "yaml-in" => Some(f(&mut self.yaml.borrow_mut().input)),
             "yaml-out" => Some(f(&mut self.yaml.borrow_mut().output)),
+            // UUID 的输出面板：只读，但要能拖选 / Ctrl+C，所以也是个缓冲区
+            "uuid-out" => Some(f(&mut self.uuid.borrow_mut().out)),
             "sql-in" => Some(f(&mut self.sql.borrow_mut().input)),
             "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
             "json-in" => Some(f(&mut self.json.borrow_mut().input)),
@@ -2745,6 +2701,8 @@ impl Shell {
             Self::push_gm(&self.gm, win);
         } else if which.starts_with("json-") {
             self.sync_json(win);
+        } else if which.starts_with("uuid-") {
+            self.sync_uuid(win);
         } else if which.starts_with("diff-") {
             Self::push_diff(&self.diff, win);
         } else if which.starts_with("plugin-") {

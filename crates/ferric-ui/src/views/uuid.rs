@@ -2,7 +2,12 @@
 //!
 //! 视图在 `ui/app.slint` 的 `UuidView`；这里只有状态与业务。生成逻辑全在
 //! `ferric_core::idgen`（无 GUI 依赖，带单测），迁 GUI 框架时完全没动过。
+//!
+//! 输出走**只读编辑区**（[`crate::editor::TextBuffer`] + `CodeEditor`）：
+//! 鼠标能拖选任意一段、双击选整行、Ctrl+C 复制，跟其它工具的输出面板一致。
+//! 中间做过一版「点一行高亮一行」——那只能整行选，用户要的是拖着选。
 
+use crate::editor::TextBuffer;
 use crate::icons;
 use crate::tool::{Tool, ToolMeta};
 use ferric_core::idgen::{self, IdKind, Namespace, Opts};
@@ -44,9 +49,11 @@ pub struct UuidTool {
     pub upper: bool,
     pub nohyphen: bool,
     pub as_json: bool,
+    /// 输出的纯文本（历史、整体复制、导出都用它）。
     pub output: String,
-    /// 当前选中的输出行（界面上高亮那一条）。重新生成 / 恢复历史后清空。
-    pub selected: Option<usize>,
+    /// 界面上那个只读编辑区的缓冲 —— 鼠标拖选 / Ctrl+C 走它。
+    /// 与 `output` 同源，只由 [`UuidTool::set_output`] 一处写。
+    pub out: TextBuffer,
     pub ok: bool,
     pub status: String,
     pub history: Vec<HistEntry>,
@@ -67,7 +74,7 @@ impl Default for UuidTool {
             nohyphen: false,
             as_json: false,
             output: String::new(),
-            selected: None,
+            out: TextBuffer::default(),
             ok: true,
             status: "就绪".to_owned(),
             history: Vec::new(),
@@ -93,17 +100,26 @@ impl UuidTool {
         }
     }
 
+    /// 输出的唯一写入口：纯文本与只读编辑区的缓冲一起更新。
+    ///
+    /// 分成两处存是因为两边的用途不同：`output` 给历史 / 整体复制 / 导出，
+    /// `out` 给界面（拖选、滚动、Ctrl+C）。**只在这里写**，免得两边漂开。
+    fn set_output(&mut self, text: String) {
+        self.out.set_text(&text);
+        self.out.clear_dirty();
+        self.output = text;
+    }
+
     /// 重新生成。失败（如自定义命名空间非法）时不覆盖输出、不记历史，只报状态。
     pub fn regen(&mut self) {
         match idgen::generate(&self.opts()) {
             Ok(items) => {
-                self.output = if self.as_json {
+                let text = if self.as_json {
                     serde_json::to_string_pretty(&items).unwrap_or_default()
                 } else {
                     items.join("\n")
                 };
-                // 内容整批换掉了，「第几行被选中」不再指代同一个 id
-                self.selected = None;
+                self.set_output(text);
                 self.ok = true;
                 self.status = format!("已生成 {} 条", items.len());
             }
@@ -134,42 +150,19 @@ impl UuidTool {
 
     /// 把某条历史恢复成当前输出（不重新生成 —— 用户要的就是那一次的结果）。
     pub fn restore(&mut self, idx: usize) -> bool {
-        match self.history.get(idx) {
-            Some(h) => {
-                self.output = h.body.clone();
-                // 换了一批内容，「第几行被选中」不再指代同一个 id
-                self.selected = None;
-                self.status = format!("已恢复：{}", h.label);
+        match self
+            .history
+            .get(idx)
+            .map(|h| (h.body.clone(), h.label.clone()))
+        {
+            Some((body, label)) => {
+                self.set_output(body);
+                self.status = format!("已恢复：{label}");
                 self.ok = true;
                 true
             }
             None => false,
         }
-    }
-
-    /// 输出按行拆开（界面上一行一条，可单条选中 / 单条复制）。
-    ///
-    /// 以前输出是一整块 `Text`：既选不中一条，也没法只复制一条 ——
-    /// 用户拿一个 UUID 得手工从十条里挑，正是他报的「不能单条选中」。
-    pub fn lines(&self) -> Vec<&str> {
-        self.output.lines().collect()
-    }
-
-    /// 选中第 `i` 行。越界或再点一次同一行都当取消选中。
-    pub fn select_line(&mut self, i: usize) {
-        self.selected = match self.selected {
-            Some(cur) if cur == i => None,
-            _ if i < self.lines().len() => Some(i),
-            _ => None,
-        };
-    }
-
-    /// 当前选中那一行的文本（复制用）。JSON 模式下顺手去掉行尾逗号与引号 ——
-    /// 用户要的是那个 id，不是它在 JSON 里的写法。
-    pub fn selected_text(&self) -> Option<String> {
-        let line = self.lines().get(self.selected?)?.trim().to_owned();
-        let line = line.trim_end_matches(',').trim();
-        Some(line.trim_matches('"').to_owned())
     }
 
     // ——— Slint 侧用索引表达枚举，这里做双向映射 ———
@@ -370,68 +363,71 @@ mod tests {
     }
 
     #[test]
-    fn a_single_line_can_be_selected_and_copied() {
-        // 用户报的「不能单条选中」：输出十条，要能挑出其中一条来复制。
+    fn output_lands_in_the_selectable_buffer() {
+        // 输出要进只读编辑区才能用鼠标拖选 —— 两处必须同源。
         let mut t = UuidTool {
             count: 3,
             ..Default::default()
         };
         t.regen();
-        assert_eq!(t.lines().len(), 3);
-        assert_eq!(t.selected, None, "刚生成不该有选中项");
+        assert_eq!(t.out.text(), t.output);
+        assert_eq!(t.out.total_lines(), 3);
 
-        t.select_line(1);
-        assert_eq!(t.selected, Some(1));
-        assert_eq!(t.selected_text().as_deref(), Some(t.lines()[1]));
-
-        // 再点同一行 = 取消选中
-        t.select_line(1);
-        assert_eq!(t.selected, None);
-        assert_eq!(t.selected_text(), None);
-
-        // 越界不选中、不 panic
-        t.select_line(99);
-        assert_eq!(t.selected, None);
-    }
-
-    #[test]
-    fn json_mode_copies_the_id_not_its_json_syntax() {
-        // JSON 模式下那一行长这样：`  "0190...-...",` —— 用户要的是里面那个 id。
-        let mut t = UuidTool {
-            count: 2,
-            as_json: true,
-            ..Default::default()
-        };
+        // 恢复历史走同一条写入口
         t.regen();
-        let idx = t
-            .lines()
-            .iter()
-            .position(|l| l.contains('-'))
-            .expect("JSON 里应当有 id 行");
-        t.select_line(idx);
-        let copied = t.selected_text().expect("选中了就该有文本");
-        assert!(!copied.starts_with('"'), "不该带引号：{copied}");
-        assert!(!copied.ends_with(','), "不该带行尾逗号：{copied}");
-        assert_eq!(copied.len(), 36, "标准 UUID 是 36 个字符：{copied}");
-    }
-
-    #[test]
-    fn regenerating_and_restoring_clear_the_selection() {
-        // 内容整批换掉之后，「第 2 行」已经不是刚才那个 id 了 ——
-        // 不清的话界面上会高亮一条与用户预期无关的记录。
-        let mut t = UuidTool {
-            count: 3,
-            ..Default::default()
-        };
-        t.regen();
-        t.select_line(2);
-        assert_eq!(t.selected, Some(2));
-
-        t.regen();
-        assert_eq!(t.selected, None);
-
-        t.select_line(0);
         assert!(t.restore(1), "样例里应当有第二条历史");
-        assert_eq!(t.selected, None);
+        assert_eq!(t.out.text(), t.output);
+    }
+
+    #[test]
+    fn dragging_selects_part_of_one_id() {
+        // 用户要的是「拖着选」：从第 2 行第 3 列拖到第 9 列，
+        // 拿到的就是那一段，而不是整行、也不是整篇。
+        let mut t = UuidTool {
+            count: 3,
+            ..Default::default()
+        };
+        t.regen();
+        t.out.set_viewport(10, 80);
+        t.out.click(1, 3.0, false);
+        t.out.click(1, 9.0, true); // 拖动 = extend
+
+        let line = t.output.lines().nth(1).expect("第二行");
+        assert_eq!(t.out.selected_text(), line[3..9]);
+        assert!(t.out.has_selection());
+
+        // 双击整行：这也是「单条选中」的入口
+        t.out.select_line();
+        assert_eq!(t.out.selected_text(), line);
+    }
+
+    #[test]
+    fn the_output_pane_is_read_only() {
+        // 输出面板不该能被改：改了也会被下一次生成冲掉，只会让人困惑。
+        // 只读由外壳按 `-out` 后缀判定（见 `wire_editors`），这里守住前提：
+        // 缓冲区标识必须是 `uuid-out`。
+        let mut t = UuidTool {
+            count: 1,
+            ..Default::default()
+        };
+        t.regen();
+        let before = t.out.text();
+        let outcome = crate::editor_bridge::apply_key(&mut t.out, "X", false, false, true);
+        assert!(!outcome.edited);
+        assert_eq!(t.out.text(), before);
+    }
+
+    #[test]
+    fn a_thousand_ids_stay_virtualized() {
+        // 崩溃守门：Slint 原生 TextEdit 在约 2190 行以上 panic，
+        // 输出面板必须走虚拟化的那条路（只渲染一屏）。
+        let mut t = UuidTool {
+            count: 1000,
+            ..Default::default()
+        };
+        t.regen();
+        t.out.set_viewport(24, 80);
+        assert_eq!(t.out.total_lines(), 1000);
+        assert_eq!(t.out.visible_lines().len(), 24);
     }
 }
