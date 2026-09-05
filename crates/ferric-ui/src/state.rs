@@ -680,6 +680,9 @@ impl Shell {
         win.set_ts_date_output(SharedString::from(t.date_output.clone()));
         win.set_ts_date_ok(t.date_ok);
         if with_list {
+            // 筛选框的文本也跟着走：选完时区之后 Rust 侧把筛选词清了，
+            // 不回灌的话输入框里还留着上次那个词，而列表已经是全量 —— 对不上。
+            win.set_ts_tz_filter(SharedString::from(t.tz_filter.clone()));
             let rows: Vec<TzRow> = t
                 .tz_hits
                 .iter()
@@ -1931,7 +1934,9 @@ impl Shell {
         ts_cb!(on_ts_filter_edited, true, |t, f| {
             t.set_filter(&f);
         });
-        ts_cb!(on_ts_select_tz, false, |t, n| {
+        // 选完要重建列表：`select_tz` 会把筛选词清掉，列表得跟着回到全量，
+        // 否则下次打开还剩上次搜过的那几条。
+        ts_cb!(on_ts_select_tz, true, |t, n| {
             t.select_tz(&n);
         });
 

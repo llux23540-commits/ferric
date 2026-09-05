@@ -1305,6 +1305,8 @@ component TimestampView inherits Rectangle {
     in property <string> tz-label;
     in-out property <string> tz-filter;
     in property <[TzRow]> tz-hits;
+    // 下拉开着没有。默认关 —— 597 行列表平时不该占着半屏。
+    in-out property <bool> tz-open: false;
     in-out property <string> ts-input;
     in property <string> ts-output;
     in property <bool> ts-ok: true;
@@ -1437,13 +1439,125 @@ component TimestampView inherits Rectangle {
                 }
             }
 
-            // ===== 时区选择 =====
+            // ===== 目标时区（下拉筛选选择）=====
+            //
+            // 以前是「搜索框 + 常驻 597 行列表」，占掉整个下半屏，而且那 597 行
+            // 一直挂在布局里。现在收成一个 select：点开才有列表，筛选框钉在顶部。
+            Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 6px;
+                    FieldLabel { text: "目标时区"; }
+                    tzfield := Rectangle {
+                        height: 38px;
+                        border-radius: 9px;
+                        background: Theme.field;
+                        border-width: 1px;
+                        border-color: root.tz-open ? Theme.accent : Theme.field-bd;
+
+                        Text {
+                            x: 12px;
+                            width: parent.width - 44px;
+                            height: 100%;
+                            text: root.tz-label;
+                            font-family: Theme.font-mono-medium;
+                            font-size: 13px;
+                            color: Theme.fg;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            x: parent.width - 28px;
+                            width: 16px;
+                            height: 100%;
+                            text: Icons.chevron-down;
+                            font-family: Theme.font-icons;
+                            font-size: 15px;
+                            color: Theme.muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.tz-open = !root.tz-open; }
+                        }
+                    }
+                }
+            }
+
+            // 下面留白：三张卡靠上，别被拉成半屏高的空卡片。
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+
+    // 下拉浮层。声明在布局**之后** = 画在它上面（Slint 里同一父级按声明顺序绘制）。
+    // 不用 PopupWindow：那东西会抢输入，筛选框在里面拿不到键盘。
+    //
+    // 时区这张卡在最下面，下方经常放不下 300px —— 放不下就朝上开
+    //（真 select 的做法；否则列表被窗口底边裁成两三行，等于不能用）。
+    property <length> tz-field-y: tzfield.absolute-position.y - root.absolute-position.y;
+    property <length> tz-room-below: root.height - root.tz-field-y - tzfield.height - 12px;
+    property <bool> tz-up: root.tz-room-below < 220px;
+    property <length> tz-panel-h: root.tz-up
+        ? min(300px, max(root.tz-field-y - 12px, 120px))
+        : min(300px, root.tz-room-below);
+
+    if root.tz-open: Rectangle {
+        width: 100%;
+        height: 100%;
+
+        // 点浮层外面收起
+        TouchArea {
+            clicked => { root.tz-open = false; }
+        }
+
+        Rectangle {
+            x: tzfield.absolute-position.x - root.absolute-position.x;
+            y: root.tz-up
+                ? root.tz-field-y - root.tz-panel-h - 4px
+                : root.tz-field-y + tzfield.height + 4px;
+            width: tzfield.width;
+            height: root.tz-panel-h;
+            background: Theme.bg;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border-2;
+            clip: true;
+
+            // 吞掉浮层内的点击，否则会穿到上面那层「点外面收起」
+            TouchArea { }
+
             VerticalLayout {
+                padding: 8px;
                 spacing: 6px;
-                vertical-stretch: 1;
+
                 HorizontalLayout {
-                    FieldLabel { text: "目标时区"; vertical-alignment: center; }
-                    Rectangle { horizontal-stretch: 1; }
+                    spacing: 8px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 34px;
+                        FerricLineEdit {
+                            width: 100%;
+                            height: 100%;
+                            pad-left: 32px;
+                            placeholder: "搜索时区（支持中文，如「上海」）";
+                            text <=> root.tz-filter;
+                            // 一打开就聚焦：下拉的用法就是「打开→打字→回车/点选」
+                            init => { self.focus(); }
+                            edited(t) => { root.filter-edited(t); }
+                        }
+                        Text {
+                            x: 10px;
+                            width: 16px;
+                            height: 100%;
+                            text: Icons.search;
+                            font-family: Theme.font-icons;
+                            font-size: 13px;
+                            color: Theme.faint;
+                            vertical-alignment: center;
+                        }
+                    }
                     Text {
                         text: root.tz-hits.length + " / 597";
                         font-family: Theme.font-mono;
@@ -1452,48 +1566,34 @@ component TimestampView inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
-                Text {
-                    text: root.tz-label;
-                    font-family: Theme.font-mono-medium;
-                    font-size: 12.5px;
-                    color: Theme.accent-strong;
-                    overflow: elide;
-                }
-                FerricLineEdit {
-                    placeholder: "搜索时区（支持中文，如「上海」）";
-                    text <=> root.tz-filter;
-                    edited(t) => { root.filter-edited(t); }
-                }
-                Rectangle {
-                    background: Theme.code-bg;
-                    border-radius: 9px;
-                    border-width: 1px;
-                    border-color: Theme.border;
-                    vertical-stretch: 1;
-                    clip: true;
 
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 1px;
-                            alignment: start;
-                            for z in root.tz-hits: Rectangle {
-                                height: 26px;
-                                border-radius: 5px;
-                                background: tz-ta.has-hover ? Theme.border : transparent;
-                                Text {
-                                    x: 8px;
-                                    width: parent.width - 16px;
-                                    height: 100%;
-                                    text: z.label;
-                                    font-family: Theme.font-ui;
-                                    font-size: 12px;
-                                    color: Theme.fg-soft;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                }
-                                tz-ta := TouchArea {
-                                    clicked => { root.select-tz(z.name); }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 1px;
+                        alignment: start;
+                        for z in root.tz-hits: Rectangle {
+                            height: 26px;
+                            border-radius: 5px;
+                            background: tz-ta.has-hover
+                                ? Theme.border
+                                : (z.label == root.tz-label ? Theme.accent-soft : transparent);
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: 100%;
+                                text: z.label;
+                                font-family: Theme.font-ui;
+                                font-size: 12px;
+                                color: z.label == root.tz-label ? Theme.accent-strong : Theme.fg-soft;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            tz-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.select-tz(z.name);
+                                    root.tz-open = false;
                                 }
                             }
                         }

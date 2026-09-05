@@ -115,9 +115,12 @@ impl TimestampTool {
         self.refresh_tz_hits();
     }
 
-    /// 按时区名选中（列表项点击）。名字对不上就不动 ——
+    /// 按时区名选中（下拉列表项点击）。名字对不上就不动 ——
     /// 列表是我们自己生成的，对不上说明有 bug，静默保持原值比 panic 好。
     pub fn select_tz(&mut self, name: &str) {
+        // 选完把筛选词清掉：下拉一关，那个词就没有归属了，
+        // 留着会让下次打开只剩上次搜过的那几条。
+        self.set_filter("");
         if let Ok(tz) = name.parse::<Tz>() {
             self.tz = tz;
             // 换时区后把已有的两个结果按新时区重算，否则界面上留着旧时区的答案。
@@ -340,6 +343,21 @@ mod tests {
         let before = t.tz;
         t.select_tz("Mars/Olympus_Mons");
         assert_eq!(t.tz, before, "认不出的时区名该忽略，不该 panic");
+    }
+
+    #[test]
+    fn picking_a_timezone_resets_the_filter() {
+        // 下拉是「打开 → 搜 → 选」：选完那个筛选词就没有归属了。
+        // 不清的话下次打开只剩上次搜过的那几条，看着像列表丢了。
+        let mut t = TimestampTool::default();
+        let all = t.tz_hits.len();
+        t.set_filter("shanghai");
+        assert!(t.tz_hits.len() < all);
+
+        t.select_tz("Asia/Shanghai");
+        assert_eq!(t.tz_filter, "");
+        assert_eq!(t.tz_hits.len(), all, "选完应当回到全量列表");
+        assert!(t.tz_label_current().contains("Shanghai"));
     }
 
     #[test]
