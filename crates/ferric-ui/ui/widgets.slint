@@ -182,6 +182,57 @@ export global Tooltip {
     in-out property <length> y;
 }
 
+// 过滤标签（tag / chip）。一排独立的胶囊，选中的那个填强调色。
+//
+// 与 `Segmented` 的分工：分段控件是**互斥的一组开关**（一个凹槽里挑一个），
+// 标签是**列表的过滤条件**，各自带计数、可以有不同宽度、还能长短不一地换行。
+// 用分段控件套计数会把凹槽撑得很怪，所以这里另起一个。
+export component FilterTag inherits Rectangle {
+    in property <string> text;
+    // 计数。负数 = 不显示（有些标签没有可数的东西）。
+    in property <int> count: -1;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 30px;
+    border-radius: 15px;
+    horizontal-stretch: 0;
+    min-width: row.min-width;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : (ta.has-hover ? Theme.border-2 : Theme.border);
+    background: root.active
+        ? Theme.accent-soft
+        : (ta.has-hover ? Theme.code-bg : transparent);
+
+    row := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: center;
+
+        Text {
+            text: root.text;
+            font-family: root.active ? Theme.font-ui-semibold : Theme.font-ui-medium;
+            font-size: 12.5px;
+            color: root.active ? Theme.accent-strong : Theme.muted;
+            vertical-alignment: center;
+        }
+        // 计数用等宽字：数字变化时标签宽度不跳。
+        if root.count >= 0: Text {
+            text: root.count;
+            font-family: Theme.font-mono-medium;
+            font-size: 11.5px;
+            color: root.active ? Theme.accent-strong : Theme.faint;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 // 分段控件（segmented pill）。`options` 是标签数组，`current` 双向。
 export component Segmented inherits Rectangle {
     in property <[string]> options;

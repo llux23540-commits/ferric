@@ -17,6 +17,35 @@ use crate::source::Source;
 use crate::tool::{Tool, ToolMeta};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+/// 列表标签：`全部` / `已安装`。
+///
+/// 只是**视图过滤**，不影响拉取 —— 服务端一次给全量列表，
+/// 「已安装」是拿本地 `installed` 字段筛出来的，切标签不发请求。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarketTab {
+    #[default]
+    All,
+    Installed,
+}
+
+impl MarketTab {
+    fn from_index(i: i32) -> Self {
+        // 越界一律回落到「全部」：标签是界面状态，宁可多显示也不要空列表。
+        if i == 1 {
+            Self::Installed
+        } else {
+            Self::All
+        }
+    }
+
+    pub fn index(self) -> i32 {
+        match self {
+            Self::All => 0,
+            Self::Installed => 1,
+        }
+    }
+}
+
 enum Msg {
     Listed(Box<Result<market::Listing, String>>),
     /// 安装进度（已下载, 总字节）
@@ -28,6 +57,8 @@ enum Msg {
 pub struct MarketTool {
     pub query: String,
     pub items: Vec<MarketItem>,
+    /// 当前标签（全部 / 已安装）。
+    pub tab: MarketTab,
     /// 正在安装的 slug。同一时刻只允许一个 —— 并发写同一个插件目录会互相踩。
     pub installing: Option<String>,
     /// 当前安装进度（已下载, 总字节）；总字节 0 表示还没开始报。
@@ -50,6 +81,7 @@ impl Default for MarketTool {
         Self {
             query: String::new(),
             items: Vec::new(),
+            tab: MarketTab::default(),
             installing: None,
             progress: (0, 0),
             queue: Vec::new(),
@@ -96,6 +128,61 @@ impl MarketTool {
 
     pub fn set_query(&mut self, q: &str) {
         self.query = q.to_owned();
+    }
+
+    /// 切标签。不发请求、不动安装队列 —— 纯粹换一个过滤条件。
+    pub fn set_tab(&mut self, index: i32) {
+        self.tab = MarketTab::from_index(index);
+    }
+
+    /// 一条是否命中当前搜索词（名称 / slug / 简介，忽略大小写）。
+    ///
+    /// 搜索词同时也发给服务端（`browse` 带 query），所以刷新回来的列表本身
+    /// 已经筛过；本地这层是为了**打字即时生效** —— 不然每敲一个字都要等一趟
+    /// 网络往返才看到结果。列表被服务端截断时本地筛的是这一页，
+    /// 按回车重新查才是全量（状态栏那句「还有更多未取到」就是提示这件事）。
+    fn hits_query(&self, item: &MarketItem) -> bool {
+        let q = self.query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        item.name.to_lowercase().contains(&q)
+            || item.slug.to_lowercase().contains(&q)
+            || item.desc.to_lowercase().contains(&q)
+    }
+
+    /// 当前标签 + 搜索词下要显示的条目。
+    pub fn visible(&self) -> Vec<&MarketItem> {
+        self.items
+            .iter()
+            .filter(|i| self.hits_query(i))
+            .filter(|i| match self.tab {
+                MarketTab::All => true,
+                MarketTab::Installed => i.installed.is_some(),
+            })
+            .collect()
+    }
+
+    /// 「全部」标签上的计数：搜索命中的总数（不是拉回来的总数 ——
+    /// 标签上的数字必须等于点进去能看到的条数）。
+    pub fn all_count(&self) -> usize {
+        self.items.iter().filter(|i| self.hits_query(i)).count()
+    }
+
+    /// 「已安装」标签上的计数（同样受搜索词约束）。
+    pub fn installed_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| i.installed.is_some() && self.hits_query(i))
+            .count()
+    }
+
+    /// 这个插件是否在待装队列里。
+    ///
+    /// 排队以前只写在状态栏那一句话里，一被下一条状态覆盖就没了 ——
+    /// 卡片自己标出来才看得见「点过了、在等前面装完」。
+    pub fn is_queued(&self, slug: &str) -> bool {
+        self.queue.iter().any(|q| q.slug == slug)
     }
 
     /// 安装 / 更新一个插件。
@@ -203,13 +290,16 @@ impl MarketTool {
                             // 服务端超过 100 个插件时后面的直接消失，界面上还
                             // 理直气壮写着「共 100 个插件」—— 用户没有任何线索
                             // 知道自己看到的是残缺的一份。
+                            // 措辞要说清这是「取回来多少」，不是「现在显示多少」：
+                            // 标签上还有一组 `全部 N / 已安装 M` 的计数，搜索一收窄
+                            // 就会和这句对不上，读者只能以为哪个数字错了。
                             self.status = if listing.truncated {
                                 format!(
-                                    "{} 个插件（还有更多未取到 —— 用搜索缩小范围）",
+                                    "已取到 {} 个（还有更多未取到 —— 用搜索缩小范围）",
                                     self.items.len()
                                 )
                             } else {
-                                format!("{} 个插件", self.items.len())
+                                format!("源里共 {} 个插件", self.items.len())
                             };
                         }
                         Err(e) => {
@@ -310,6 +400,35 @@ mod tests {
         }
     }
 
+    /// 一条列表项。只填过滤用得上的字段，其余给占位值。
+    fn item(slug: &str, name: &str, desc: &str, installed: Option<&str>) -> MarketItem {
+        MarketItem {
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+            desc: desc.to_owned(),
+            version: "1.0.0".to_owned(),
+            api_version: 1,
+            size: 1024,
+            sha256: String::new(),
+            signature: "x".to_owned(),
+            downloads: 7,
+            has_update: installed.is_some_and(|v| v != "1.0.0"),
+            installed: installed.map(str::to_owned),
+        }
+    }
+
+    /// 三条：一条未装、一条已装最新、一条已装旧版。不走网络，过滤是纯本地的。
+    fn filled() -> MarketTool {
+        MarketTool {
+            items: vec![
+                item("json-lint", "JSON 校验", "检查 JSON 语法", None),
+                item("csv-tool", "CSV 工具", "CSV 转换", Some("1.0.0")),
+                item("hash-kit", "哈希工具箱", "常见摘要算法", Some("0.9.0")),
+            ],
+            ..MarketTool::default()
+        }
+    }
+
     #[test]
     fn entering_the_tool_fetches_the_list_once() {
         // 以前必须先点「刷新」才有内容 —— 那一步纯属多余。
@@ -370,6 +489,14 @@ mod tests {
         t.install(Some(&src), &b);
         assert_eq!(t.installing.as_deref(), Some(a.as_str()), "第一个仍在装");
         assert!(t.status.contains("已排队"), "{}", t.status);
+        // 卡片上的「排队中」徽标靠这个：只写在状态栏里的话，
+        // 下一条状态一覆盖就看不出这个插件已经点过了。
+        assert!(t.is_queued(&b), "第二个应当在队列里");
+        assert!(!t.is_queued(&a), "正在装的那个不算排队");
+        // 切标签不该动安装状态（标签只是视图过滤）
+        t.set_tab(1);
+        assert_eq!(t.installing.as_deref(), Some(a.as_str()));
+        assert!(t.is_queued(&b));
     }
 
     #[test]
@@ -426,5 +553,67 @@ mod tests {
     fn market_does_not_persist_a_draft() {
         // 存搜索词只会让下次进来看到一个被过滤的列表却不知道为什么。
         assert_eq!(MarketTool::default().save_draft(), None);
+    }
+
+    #[test]
+    fn installed_tab_shows_only_installed_plugins() {
+        let mut t = filled();
+        let names: Vec<&str> = t.visible().iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(
+            names,
+            ["json-lint", "csv-tool", "hash-kit"],
+            "全部标签给全量"
+        );
+
+        t.set_tab(1);
+        let names: Vec<&str> = t.visible().iter().map(|i| i.slug.as_str()).collect();
+        assert_eq!(names, ["csv-tool", "hash-kit"], "已安装标签只留装过的");
+
+        // 越界的下标不能变成空列表（界面给不出，但 API 挡得住）
+        t.set_tab(9);
+        assert_eq!(t.visible().len(), 3);
+    }
+
+    #[test]
+    fn tag_counts_follow_the_search_word() {
+        // 标签上的数字必须等于点进去看到的条数，否则「已安装 2」点进去
+        // 只有 1 条会让人以为界面坏了。
+        let mut t = filled();
+        assert_eq!(t.all_count(), 3);
+        assert_eq!(t.installed_count(), 2);
+
+        t.set_query("csv");
+        assert_eq!(t.all_count(), 1);
+        assert_eq!(t.installed_count(), 1);
+        assert_eq!(t.visible().len(), t.all_count());
+
+        t.set_tab(1);
+        assert_eq!(t.visible().len(), t.installed_count());
+    }
+
+    #[test]
+    fn search_filters_locally_across_name_slug_and_desc() {
+        // 搜索词也发给服务端，但本地这层让打字即时生效（不用等网络往返）。
+        let mut t = filled();
+        t.set_query("哈希");
+        assert_eq!(t.visible()[0].slug, "hash-kit", "按名称命中");
+        t.set_query("HASH-KIT");
+        assert_eq!(t.visible().len(), 1, "按 slug 命中且忽略大小写");
+        t.set_query("摘要");
+        assert_eq!(t.visible().len(), 1, "按简介命中");
+        t.set_query("  ");
+        assert_eq!(t.visible().len(), 3, "全是空白等于没搜");
+        t.set_query("不存在的东西");
+        assert!(t.visible().is_empty());
+    }
+
+    #[test]
+    fn search_and_installed_tab_apply_together() {
+        let mut t = filled();
+        t.set_tab(1);
+        t.set_query("json");
+        // json-lint 命中搜索但没装：已安装标签下就该是空的
+        assert!(t.visible().is_empty(), "两个条件是与，不是或");
+        assert_eq!(t.all_count(), 1, "同一个搜索词在「全部」下有 1 条");
     }
 }

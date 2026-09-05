@@ -68,6 +68,12 @@ export global Theme {
     out property <color> del-bg: dark ? rgba(224, 107, 103, 0.14) : #fdecec;
     out property <color> del-mark: dark ? rgba(224, 107, 103, 0.33) : #f6c9c7;
 
+    // ——— 窗口边框 ———
+    // 无边框窗口（no-frame）没有系统边框：亮色主题下窗口底色接近白，
+    // 压在浅色桌面 / 白底应用上时分不清窗口边界在哪。比 border-2 再深一档，
+    // 这一条 1px 的线是**唯一**的窗口轮廓。
+    out property <color> window-bd: dark ? rgba(255, 255, 255, 0.16) : #c8ccd2;
+
     // ——— 语法着色（JSON）———
     //
     // 挑色的两条约束：暗底亮底都要过得去，且不能跟主色（绿）打架 ——

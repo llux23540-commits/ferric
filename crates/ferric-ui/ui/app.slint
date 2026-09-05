@@ -10,7 +10,7 @@ import { Theme, Icons } from "theme.slint";
 // 把 Theme 再导出一次：Slint 只为**本文件导出**的 global 生成 Rust 侧类型，
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
-import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast, Tooltip } from "widgets.slint";
+import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast, Tooltip, FilterTag } from "widgets.slint";
 import { CodeEditor, TokenLine, CellSpan } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
@@ -89,6 +89,8 @@ struct PluginCard {
     downloads-text: string,
     // 这张卡正在安装
     busy: bool,
+    // 已点过安装、在等前面那个装完（同一时刻只装一个）
+    queued: bool,
 }
 
 
@@ -2047,7 +2049,45 @@ component DiffView inherits Rectangle {
     }
 }
 
+// 卡片上的状态徽标。内层布局撑宽 + 固定 18px 高 —— 与侧栏那颗更新胶囊
+// 同一个做法：放进 HorizontalLayout 时不会被拉成整行高。
+component MarketBadge inherits Rectangle {
+    in property <string> text;
+    in property <string> icon: "";
+    in property <color> tint;
+    in property <brush> fill;
+
+    height: 18px;
+    horizontal-stretch: 0;
+    border-radius: 9px;
+    background: root.fill;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 7px;
+        spacing: 3px;
+        if root.icon != "": Text {
+            text: root.icon;
+            font-family: Theme.font-icons;
+            font-size: 10px;
+            color: root.tint;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.text;
+            font-family: Theme.font-ui-medium;
+            font-size: 10.5px;
+            color: root.tint;
+            vertical-alignment: center;
+        }
+    }
+}
+
 // ——— 插件市场 ———
+//
+// 三段：搜索 / 操作 → 标签过滤 + 状态 → 卡片列表。
+// 过滤（标签 + 搜索）全在 Rust 侧算完（`MarketTool::visible`），
+// 这里拿到的 `cards` 就是要画的那些 —— 界面不做筛选逻辑。
 component MarketView inherits Rectangle {
     in-out property <string> query;
     in property <[PluginCard]> cards;
@@ -2057,28 +2097,68 @@ component MarketView inherits Rectangle {
     in property <int> progress-pct;
     in property <bool> installing;
     in property <int> pending-updates;
+    // 0 全部 / 1 已安装
+    in property <int> tab;
+    in property <int> count-all;
+    in property <int> count-installed;
 
     callback query-edited(string);
     callback do-refresh();
     callback do-install(string);
     callback do-uninstall(string);
     callback do-update-all();
+    callback tab-changed(int);
 
     VerticalLayout {
         padding: 16px;
-        spacing: 10px;
+        spacing: 12px;
 
+        // ——— 搜索 + 操作 ———
         HorizontalLayout {
             spacing: 8px;
-            FerricLineEdit {
+
+            Rectangle {
                 horizontal-stretch: 1;
-                text <=> root.query;
-                placeholder: "搜索插件，回车刷新";
-                edited(t) => { root.query-edited(t); }
-                accepted(t) => { root.do-refresh(); }
+                height: 38px;
+                FerricLineEdit {
+                    width: 100%;
+                    height: 100%;
+                    pad-left: 34px;
+                    text <=> root.query;
+                    placeholder: "搜索插件（名称 / 简介；回车向服务端重查）";
+                    // 打字即时过滤已拉到的列表，回车才发请求：每敲一个字都
+                    // 等一趟网络往返的话，搜索框会一直「慢半拍」。
+                    edited(t) => { root.query-edited(t); }
+                    accepted(t) => { root.do-refresh(); }
+                }
+                Text {
+                    x: 12px;
+                    width: 16px;
+                    height: 100%;
+                    text: Icons.search;
+                    font-family: Theme.font-icons;
+                    font-size: 14px;
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
+                // 清空：搜索词自己就是个过滤器，得有一键退出的办法
+                if root.query != "": IconButton {
+                    x: parent.width - 32px;
+                    y: 6px;
+                    width: 26px;
+                    height: 26px;
+                    icon: Icons.x;
+                    icon-size: 13px;
+                    tooltip: "清空搜索";
+                    clicked => {
+                        root.query = "";
+                        root.query-edited("");
+                    }
+                }
             }
             FerricButton {
                 text: root.loading ? "获取中…" : "刷新";
+                icon: Icons.refresh;
                 enabled: !root.loading;
                 clicked => { root.do-refresh(); }
             }
@@ -2092,20 +2172,35 @@ component MarketView inherits Rectangle {
             }
         }
 
-        // 状态 + 安装进度
+        // ——— 标签过滤 + 状态 + 安装进度 ———
         HorizontalLayout {
             spacing: 8px;
+
+            FilterTag {
+                text: "全部";
+                count: root.count-all;
+                active: root.tab == 0;
+                clicked => { root.tab-changed(0); }
+            }
+            FilterTag {
+                text: "已安装";
+                count: root.count-installed;
+                active: root.tab == 1;
+                clicked => { root.tab-changed(1); }
+            }
+
             Text {
                 text: root.status;
                 font-family: Theme.font-ui;
                 font-size: 12px;
                 color: root.ok ? Theme.muted : Theme.danger;
                 vertical-alignment: center;
+                horizontal-alignment: right;
                 horizontal-stretch: 1;
                 overflow: elide;
             }
             if root.installing: Rectangle {
-                width: 180px;
+                width: 140px;
                 height: 6px;
                 y: (parent.height - 6px) / 2;
                 border-radius: 3px;
@@ -2120,14 +2215,14 @@ component MarketView inherits Rectangle {
             }
             if root.installing: Text {
                 text: root.progress-pct + "%";
-                font-family: Theme.font-mono;
+                font-family: Theme.font-mono-medium;
                 font-size: 11px;
-                color: Theme.muted;
+                color: Theme.accent-strong;
                 vertical-alignment: center;
             }
         }
 
-        // 卡片列表
+        // ——— 卡片列表 ———
         Rectangle {
             background: Theme.code-bg;
             border-radius: 9px;
@@ -2136,15 +2231,40 @@ component MarketView inherits Rectangle {
             vertical-stretch: 1;
             clip: true;
 
-            if root.cards.length == 0 && !root.loading: Text {
-                width: parent.width;
-                height: parent.height;
-                text: "没有插件";
-                font-family: Theme.font-ui;
-                font-size: 13px;
-                color: Theme.faint;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            // 空列表要说清「为什么空」：没搜到 / 这个标签下没有 / 真的没有。
+            // 一句干巴巴的「没有插件」会让人以为源坏了。
+            if root.cards.length == 0: VerticalLayout {
+                width: 100%;
+                height: 100%;
+                alignment: center;
+                spacing: 8px;
+                Text {
+                    text: root.loading ? Icons.refresh : Icons.box;
+                    font-family: Theme.font-icons;
+                    font-size: 26px;
+                    color: Theme.faint;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.loading
+                        ? "正在获取插件列表…"
+                        : (root.query != ""
+                            ? "没有匹配「" + root.query + "」的插件"
+                            : (root.tab == 1 ? "还没有安装任何插件" : "这个源里没有插件"));
+                    font-family: Theme.font-ui-medium;
+                    font-size: 13px;
+                    color: Theme.muted;
+                    horizontal-alignment: center;
+                }
+                if !root.loading && (root.tab == 1 || root.query != ""): Text {
+                    text: root.tab == 1 && root.query == ""
+                        ? "切到「全部」挑一个装上"
+                        : "换个关键词，或按回车向服务端重查";
+                    font-family: Theme.font-ui;
+                    font-size: 11.5px;
+                    color: Theme.faint;
+                    horizontal-alignment: center;
+                }
             }
 
             ScrollView {
@@ -2154,25 +2274,53 @@ component MarketView inherits Rectangle {
                     alignment: start;
                     for c in root.cards: Rectangle {
                         background: Theme.bg;
-                        border-radius: 9px;
+                        border-radius: 10px;
                         border-width: 1px;
-                        border-color: Theme.border;
-                        height: 78px;
+                        // 正在装的那张卡自己描边：进度条在页顶，列表长了就看不见
+                        // 到底在装哪一个。
+                        border-color: c.busy ? Theme.accent : Theme.border;
+                        height: 86px;
+                        clip: true;
 
                         HorizontalLayout {
                             padding: 12px;
                             spacing: 12px;
 
+                            // 图标方块：每张卡有个视觉锚点，已装的填强调色
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 42px;
+                                    height: 42px;
+                                    border-radius: 11px;
+                                    background: c.is-installed ? Theme.accent-soft : Theme.code-bg;
+                                    Text {
+                                        text: Icons.box;
+                                        font-family: Theme.font-icons;
+                                        font-size: 19px;
+                                        color: c.is-installed ? Theme.accent-strong : Theme.faint;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+                            }
+
                             VerticalLayout {
                                 spacing: 3px;
                                 horizontal-stretch: 1;
+                                alignment: center;
+
                                 HorizontalLayout {
                                     spacing: 8px;
+                                    alignment: start;
                                     Text {
                                         text: c.name;
                                         font-family: Theme.font-ui-semibold;
                                         font-size: 13.5px;
                                         color: Theme.fg;
+                                        vertical-alignment: center;
                                     }
                                     Text {
                                         text: "v" + c.version;
@@ -2181,19 +2329,33 @@ component MarketView inherits Rectangle {
                                         color: Theme.faint;
                                         vertical-alignment: center;
                                     }
-                                    if c.has-update: Text {
-                                        text: "有更新（已装 v" + c.installed + "）";
-                                        font-family: Theme.font-ui-medium;
-                                        font-size: 11px;
-                                        color: Theme.accent-strong;
-                                        vertical-alignment: center;
+                                    // 状态徽标按优先级只出一个：装着 > 排队 >
+                                    // 有更新 > 已安装。四个一起挂会把标题挤没。
+                                    if c.busy: MarketBadge {
+                                        text: root.progress-pct + "%";
+                                        icon: Icons.file-down;
+                                        tint: #ffffff;
+                                        fill: Theme.accent;
                                     }
-                                    if c.is-installed && !c.has-update: Text {
+                                    if !c.busy && c.queued: MarketBadge {
+                                        text: "排队中";
+                                        tint: Theme.muted;
+                                        fill: Theme.code-bg;
+                                    }
+                                    // 「可更新」是要人动手的，用强调色；「已安装」
+                                    // 是静态事实，只给一个灰底绿勾 —— 两个都填
+                                    // accent-soft 的话根本分不出哪个要处理。
+                                    if !c.busy && !c.queued && c.has-update: MarketBadge {
+                                        text: "可更新 · 已装 v" + c.installed;
+                                        icon: Icons.file-down;
+                                        tint: Theme.accent-strong;
+                                        fill: Theme.accent-soft;
+                                    }
+                                    if !c.busy && !c.queued && c.is-installed && !c.has-update: MarketBadge {
                                         text: "已安装";
-                                        font-family: Theme.font-ui-medium;
-                                        font-size: 11px;
-                                        color: Theme.ok;
-                                        vertical-alignment: center;
+                                        icon: Icons.circle-check;
+                                        tint: Theme.ok;
+                                        fill: Theme.border;
                                     }
                                 }
                                 Text {
@@ -2211,22 +2373,37 @@ component MarketView inherits Rectangle {
                                 }
                             }
 
-                            VerticalLayout {
+                            HorizontalLayout {
+                                spacing: 6px;
                                 alignment: center;
-                                spacing: 4px;
                                 FerricButton {
-                                    text: c.has-update ? "更新" : (c.is-installed ? "重装" : "安装");
+                                    text: c.busy
+                                        ? "安装中…"
+                                        : (c.has-update ? "更新" : (c.is-installed ? "重装" : "安装"));
+                                    // 只有「更新」用主色：一屏五张卡全是绿按钮时，
+                                    // 真正需要动手的那一张就淹了。
                                     variant: c.has-update ? "primary" : "default";
-                                    enabled: !c.busy;
+                                    enabled: !c.busy && !c.queued;
                                     clicked => { root.do-install(c.slug); }
                                 }
-                                if c.is-installed: FerricButton {
-                                    text: "卸载";
-                                    variant: "subtle";
+                                if c.is-installed: IconButton {
+                                    icon: Icons.trash;
+                                    icon-size: 16px;
+                                    danger: true;
+                                    tooltip: "卸载 " + c.name;
                                     enabled: !c.busy;
                                     clicked => { root.do-uninstall(c.slug); }
                                 }
                             }
+                        }
+
+                        // 装到哪儿了：贴在卡片下沿的一条细进度
+                        if c.busy: Rectangle {
+                            x: 0;
+                            y: parent.height - 3px;
+                            width: parent.width * (root.progress-pct / 100);
+                            height: 3px;
+                            background: Theme.accent;
                         }
                     }
                 }
@@ -3507,6 +3684,11 @@ export component AppWindow inherits Window {
     in property <int> market-progress;
     in property <bool> market-installing;
     in property <int> market-pending;
+    // 标签过滤（0 全部 / 1 已安装）与两个标签上的计数。计数由 Rust 侧按
+    // 「搜索命中 + 是否已装」算好 —— 标签上的数字必须等于点进去看到的条数。
+    in property <int> market-tab;
+    in property <int> market-count-all;
+    in property <int> market-count-installed;
 
     // 当前选中的 WASM 插件（内置工具时为空）
     in property <[PluginOption]> plugin-options;
@@ -3658,6 +3840,7 @@ export component AppWindow inherits Window {
     callback market-install(string);
     callback market-uninstall(string);
     callback market-update-all();
+    callback market-tab-changed(int);
 
     // WASM 插件
     callback plugin-option-changed(int, int, string);
@@ -3944,24 +4127,26 @@ export component AppWindow inherits Window {
                     }
 
                     // 入口行：主题 / 操作记录 / 关于 / 设置
+                    // 图标比别处大一号：这一排是侧栏最底下的常用入口，
+                    // 15px 在 264px 宽的侧栏里偏小（用户反馈「有点小」）。
                     HorizontalLayout {
                         spacing: 2px;
                         IconButton {
                             icon: Theme.dark ? Icons.sun : Icons.moon;
-                            icon-size: 15px;
+                            icon-size: 19px;
                             // 单击就在亮 / 暗之间来回。「跟随系统」留在设置里 ——
                             // 三态循环按钮点两下才回到原处，反而难用。
                             clicked => { root.theme-mode = Theme.dark ? 1 : 2; }
                         }
                         IconButton {
                             icon: Icons.list-checks;
-                            icon-size: 15px;
+                            icon-size: 19px;
                             active: root.log-open;
                             clicked => { root.log-open = !root.log-open; }
                         }
                         IconButton {
                             icon: Icons.info;
-                            icon-size: 15px;
+                            icon-size: 19px;
                             clicked => {
                                 root.settings-tab = 5;
                                 root.settings-open = true;
@@ -3969,7 +4154,7 @@ export component AppWindow inherits Window {
                         }
                         IconButton {
                             icon: Icons.settings;
-                            icon-size: 15px;
+                            icon-size: 19px;
                             active: root.settings-open;
                             clicked => {
                                 root.settings-tab = 0;
@@ -4379,11 +4564,15 @@ export component AppWindow inherits Window {
                         progress-pct: root.market-progress;
                         installing: root.market-installing;
                         pending-updates: root.market-pending;
+                        tab: root.market-tab;
+                        count-all: root.market-count-all;
+                        count-installed: root.market-count-installed;
                         query-edited(q) => { root.market-query-edited(q); }
                         do-refresh => { root.market-refresh(); }
                         do-install(s) => { root.market-install(s); }
                         do-uninstall(s) => { root.market-uninstall(s); }
                         do-update-all => { root.market-update-all(); }
+                        tab-changed(i) => { root.market-tab-changed(i); }
                     }
                     // WASM 插件：按 manifest 渲染控件。所有内置工具的 id 都不会
                     // 命中这里，所以用一个显式标记而不是「id 不在白名单里」。
@@ -4561,6 +4750,20 @@ export component AppWindow inherits Window {
         rows: root.activity;
         clear => { root.clear-activity(); }
         dismiss => { root.log-open = false; }
+    }
+
+    // ===== 窗口轮廓 =====
+    //
+    // `no-frame: true` 意味着系统不给边框，而亮色主题的窗口底色接近白 ——
+    // 压在浅色桌面或另一个白底窗口上时，边界完全看不出来。
+    // 这一条 1px 描边就是窗口的全部轮廓；画在内容之后（= 最上层），
+    // 且不接输入，所以不会挡住任何点击，也不参与布局。
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        border-width: 1px;
+        border-color: Theme.window-bd;
     }
 
     // ===== 提示气泡层 =====

@@ -765,10 +765,14 @@ impl Shell {
         win.set_market_progress(t.progress_pct());
         win.set_market_installing(t.installing.is_some());
         win.set_market_pending(t.pending_updates() as i32);
+        // 标签与计数：过滤在 Rust 侧做完，Slint 只负责画。
+        win.set_market_tab(t.tab.index());
+        win.set_market_count_all(t.all_count() as i32);
+        win.set_market_count_installed(t.installed_count() as i32);
 
         let cards: Vec<PluginCard> = t
-            .items
-            .iter()
+            .visible()
+            .into_iter()
             .map(|i| PluginCard {
                 slug: SharedString::from(i.slug.clone()),
                 name: SharedString::from(i.name.clone()),
@@ -780,6 +784,7 @@ impl Shell {
                 size_text: SharedString::from(fmt_size(i.size)),
                 downloads_text: SharedString::from(format!("{} 次下载", i.downloads)),
                 busy: t.installing.as_deref() == Some(i.slug.as_str()),
+                queued: t.is_queued(&i.slug),
             })
             .collect();
         win.set_market_cards(ModelRc::new(VecModel::from(cards)));
@@ -2249,6 +2254,22 @@ impl Shell {
         market_cb!(on_market_query_edited, |t, _src, q| {
             t.set_query(&q);
         });
+        market_cb!(on_market_tab_changed, |t, _src, i| {
+            t.set_tab(i);
+        });
+
+        // 启动就停在市场页（上次退出时选的那一页，或首启的默认页）同样要拉列表。
+        // `on_enter` 只挂在「切工具」上，所以启动直接落在这一页时列表是空的，
+        // 界面还写着「这个源里没有插件」—— 看起来像源坏了，其实一次都没请求过。
+        let starts_on_market = {
+            let s = self.state.borrow();
+            s.tools.get(s.active).map(|t| t.meta().id) == Some("market")
+        };
+        if starts_on_market {
+            let src = self.state.borrow().source();
+            self.market.borrow_mut().on_enter(src.as_ref());
+            Self::push_market(&self.market, win);
+        }
     }
 
     /// WASM 插件视图。
