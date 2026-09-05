@@ -42,10 +42,8 @@ pub fn registry() -> Vec<Box<dyn Tool>> {
         Box::new(JsonTool::default()),
         Box::new(DiffTool::default()),
         Box::new(TimestampTool::default()),
-        // ——— 已迁移 ———
         Box::new(YamlTool::default()),
         Box::new(SqlTool::default()),
-        // ——— 已迁移 ———
         Box::new(UuidTool::default()),
         Box::new(RsaTool::default()),
         Box::new(CryptoTool::default()),

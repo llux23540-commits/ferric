@@ -65,6 +65,15 @@ hex = "0.4"
 # 文本缓冲区：Rope 数据结构（编辑器大文本增量编辑与紧凑存储）。
 ropey = "1.6"
 
+# Slint 把 `ui/*.slint` 编译成单文件 Rust：ferric-ui 那份现在是 9.8MB / 97k 行。
+# 默认 `debug = 2` 下，rustc 的多个 LLVM 线程各自为这一个 CGU 建完整 DWARF，
+# 12GB 机器上直接 `rustc-LLVM ERROR: out of memory`（lib 与 lib-test 还会并行编）
+# —— 也就是说默认 `cargo test` 根本构建不出来。line-tables-only 保住 backtrace
+# 的文件/行号，只去掉变量与类型的 DWARF。要单步调试局部变量时临时
+# `CARGO_PROFILE_DEV_DEBUG=2 cargo build -j 1`。
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

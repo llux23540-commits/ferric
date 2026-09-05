@@ -139,6 +139,11 @@ cargo test                  # 核心逻辑单测
 cargo clippy --all-targets  # 静态检查
 ```
 
+`[profile.dev]` 里把 `debug` 压到 `line-tables-only`：`ui/*.slint` 被编译成
+**单个 9.8MB / 97k 行**的 Rust 文件，完整 DWARF 下 rustc 的 LLVM 线程会
+`out of memory`（12GB 机器上默认 `cargo test` 因此构建不出来）。backtrace 的
+文件与行号仍在；确实要看局部变量时临时 `CARGO_PROFILE_DEV_DEBUG=2 cargo build -j 1`。
+
 ### 打包发行版
 
 打包配置在 `crates/ferric-app/Cargo.toml` 的 `[package.metadata.packager]`（cargo-packager）。
