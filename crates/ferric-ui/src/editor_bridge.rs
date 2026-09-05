@@ -52,9 +52,8 @@ pub fn state_of(buf: &TextBuffer) -> EditorState {
         .map(SharedString::from)
         .collect();
 
-    let (cur_line, cur_col) = buf.cursor_line_col();
-    let top = buf.scroll_line();
-    let in_view = cur_line >= top && cur_line < top + buf.viewport_lines();
+    let (_, cur_col) = buf.cursor_line_col();
+    let cur_row = buf.cursor_view_row();
 
     let spans: Vec<ModelRc<i32>> = buf
         .selection_spans()
@@ -64,13 +63,26 @@ pub fn state_of(buf: &TextBuffer) -> EditorState {
         })
         .collect();
 
+    // 行号与折叠标记都按**可见行**对齐：折叠之后行号不再连续
+    //（收起 3..9 的话行号槽是 …2, 3, 10, 11…），必须逐行给。
+    let rows = buf.visible_rows();
+    let line_nos: Vec<i32> = rows.iter().map(|l| (*l + 1) as i32).collect();
+    let marks: Vec<i32> = rows.iter().map(|l| buf.fold_mark_of(*l)).collect();
+    // `foldable` 决定行号槽要不要让出折叠列 —— 一份没有任何区块的文本
+    //（SQL、纯文本）不该白占 16px。
+    let foldable = marks.iter().any(|m| *m != 0);
+
     EditorState {
         lines: ModelRc::new(VecModel::from(lines)),
-        first_line: top as i32,
-        total_lines: buf.total_lines() as i32,
-        cursor_line: if in_view { (cur_line - top) as i32 } else { 0 },
+        first_line: buf.view_first_row() as i32,
+        line_nos: ModelRc::new(VecModel::from(line_nos)),
+        total_lines: buf.view_total_lines() as i32,
+        doc_lines: buf.total_lines() as i32,
+        fold_marks: ModelRc::new(VecModel::from(marks)),
+        foldable,
+        cursor_line: cur_row.unwrap_or(0) as i32,
         cursor_col: cur_col.saturating_sub(buf.scroll_col()) as i32,
-        cursor_visible: in_view,
+        cursor_visible: cur_row.is_some(),
         selection_spans: ModelRc::new(VecModel::from(spans)),
     }
 }

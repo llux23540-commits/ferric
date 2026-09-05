@@ -1,7 +1,8 @@
-import { Theme } from "theme.slint";
+import { Theme, Icons } from "theme.slint";
 
 export component CodeEditor inherits Rectangle {
     in property <[string]> lines;
+    in property <[int]> line-nos;
     in property <int> first-line: 0;
     in property <int> total-lines: 1;
     in property <int> cursor-line: 0;
@@ -12,6 +13,9 @@ export component CodeEditor inherits Rectangle {
     in property <length> line-height: 18px;
     in property <bool> show-gutter: true;
     in property <bool> read-only: false;
+    // 折叠标记（与 `lines` 一一对应）：0 不是区块开头 / 1 可折叠 / 2 已折叠
+    in property <[int]> fold-marks;
+    in property <bool> foldable: false;
 
     callback viewport-changed(int, int);
     callback clicked(int, int, bool);
@@ -19,6 +23,8 @@ export component CodeEditor inherits Rectangle {
     callback triple-clicked();
     callback scrolled(int, int);
     callback scroll-to-line(int);
+    /// 点了行号槽里的折叠箭头。参数是视口内行号。
+    callback fold-toggled(int);
     /// 按键。`text` 是 Slint 的原始按键字符（功能键是约定码点，见文件末尾说明）。
     callback key-pressed(string/* text */, bool/* ctrl */, bool/* shift */);
 
@@ -42,10 +48,12 @@ export component CodeEditor inherits Rectangle {
     changed visible-rows => { root.viewport-changed(root.visible-rows, root.visible-cols); }
     changed visible-cols => { root.viewport-changed(root.visible-rows, root.visible-cols); }
 
+    // 折叠列：只有这一屏真有区块开头时才占位，否则纯文本白让 16px
+    property <length> fold-w: root.show-gutter && root.foldable ? 16px : 0px;
     property <length> gutter-w: root.show-gutter
         ? (root.total-lines >= 100000 ? 62px
             : root.total-lines >= 10000 ? 54px
-            : root.total-lines >= 1000 ? 46px : 38px)
+            : root.total-lines >= 1000 ? 46px : 38px) + root.fold-w
         : 0px;
 
     // ===== 行号槽 =====
@@ -56,17 +64,46 @@ export component CodeEditor inherits Rectangle {
         height: parent.height;
         background: Theme.dark ? #0d1014 : #f1f3f6;
 
-        for _line[i] in root.lines: Text {
-            x: 0;
+        for no[i] in root.line-nos: Text {
+            x: root.fold-w;
             y: root.pad + i * root.line-height;
-            width: root.gutter-w - 8px;
+            width: root.gutter-w - root.fold-w - 8px;
             height: root.line-height;
-            text: root.first-line + i + 1;
+            text: no;
             font-family: Theme.font-mono;
             font-size: root.font-size - 1px;
             color: i == root.cursor-line ? Theme.fg-soft : Theme.faint;
             horizontal-alignment: right;
             vertical-alignment: center;
+        }
+
+        // 折叠箭头。已折叠 → 朝右（还有东西收着），展开 → 朝下。
+        for mark[i] in root.fold-marks: Rectangle {
+            x: 0;
+            y: root.pad + i * root.line-height;
+            width: root.fold-w;
+            height: root.line-height;
+            visible: mark != 0;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: mark == 2 ? Icons.chevron-right : Icons.chevron-down;
+                font-family: Theme.font-icons;
+                font-size: 12px;
+                // 未折叠的箭头平时压得很淡：一屏几十个箭头全画实了会盖过行号。
+                color: fold-ta.has-hover
+                    ? Theme.accent
+                    : (mark == 2 ? Theme.fg-soft : Theme.faint);
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            fold-ta := TouchArea {
+                enabled: mark != 0;
+                mouse-cursor: pointer;
+                clicked => { root.fold-toggled(i); }
+            }
         }
 
         Rectangle {

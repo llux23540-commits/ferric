@@ -10,7 +10,7 @@ import { Theme, Icons } from "theme.slint";
 // 把 Theme 再导出一次：Slint 只为**本文件导出**的 global 生成 Rust 侧类型，
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
-import { FieldLabel, FerricButton, IconButton, Segmented, FerricLineEdit, Card, Toast } from "widgets.slint";
+import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast } from "widgets.slint";
 import { CodeEditor } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
@@ -127,10 +127,18 @@ struct UuidHistEntry {
 struct EditorState {
     // 当前可见的那几十行（已由 Rust 侧按滚动位置与横向偏移裁好）
     lines: [string],
-    // 视口顶端的绝对行号，行号槽显示用
+    // 每个可见行的真实行号（1 基）。折叠之后行号不连续，只能逐行给
+    line-nos: [int],
+    // 视口顶端是第几个可见行，滚动条位置用
     first-line: int,
-    // 文档总行数，滚动条比例用
+    // 可见行总数（折叠算进去了），滚动条比例与拖动刻度用
     total-lines: int,
+    // 文档真实行数，标题栏那句「N 行」用
+    doc-lines: int,
+    // 每个可见行的折叠标记：0 不是区块开头 / 1 可折叠 / 2 已折叠
+    fold-marks: [int],
+    // 这一屏里有没有可折叠的行（决定行号槽要不要让出折叠列）
+    foldable: bool,
     // 光标的视口内坐标
     cursor-line: int,
     cursor-col: int,
@@ -154,9 +162,13 @@ component EditorPane inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
+
+    // 让外面能把焦点交回编辑区（JSON 工具收起查找条时要用）。
+    forward-focus: ed;
 
     VerticalLayout {
         spacing: 6px;
@@ -169,7 +181,7 @@ component EditorPane inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
             Text {
-                text: root.state.total-lines + " 行";
+                text: root.state.doc-lines + " 行";
                 font-family: Theme.font-mono;
                 font-size: 11px;
                 color: Theme.faint;
@@ -184,11 +196,14 @@ component EditorPane inherits Rectangle {
             }
         }
 
-        CodeEditor {
+        ed := CodeEditor {
             vertical-stretch: 1;
             lines: root.state.lines;
+            line-nos: root.state.line-nos;
             first-line: root.state.first-line;
             total-lines: root.state.total-lines;
+            fold-marks: root.state.fold-marks;
+            foldable: root.state.foldable;
             cursor-line: root.state.cursor-line;
             cursor-col: root.state.cursor-col;
             cursor-visible: root.state.cursor-visible;
@@ -201,6 +216,7 @@ component EditorPane inherits Rectangle {
             triple-clicked => { root.editor-triple(root.which); }
             scrolled(dl, dc) => { root.editor-scroll(root.which, dl, dc); }
             scroll-to-line(l) => { root.editor-scroll-line(root.which, l); }
+            fold-toggled(r) => { root.editor-fold(root.which, r); }
             key-pressed(t, ctrl, shift) => { root.editor-key(root.which, t, ctrl, shift); }
         }
     }
@@ -220,6 +236,7 @@ component YamlView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -270,6 +287,7 @@ component YamlView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -285,6 +303,7 @@ component YamlView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -308,6 +327,7 @@ component SqlView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -363,6 +383,7 @@ component SqlView inherits Rectangle {
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
+            editor-fold(w, r) => { root.editor-fold(w, r); }
             editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
             editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
             editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -419,6 +440,7 @@ component RegexView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -478,6 +500,7 @@ component RegexView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -567,6 +590,7 @@ component RsaView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -620,6 +644,7 @@ component RsaView inherits Rectangle {
                     editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                     editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                     editor-triple(w) => { root.editor-triple(w); }
+                    editor-fold(w, r) => { root.editor-fold(w, r); }
                     editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                     editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                     editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -645,6 +670,7 @@ component RsaView inherits Rectangle {
                     editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                     editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                     editor-triple(w) => { root.editor-triple(w); }
+                    editor-fold(w, r) => { root.editor-fold(w, r); }
                     editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                     editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                     editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -682,6 +708,7 @@ component CryptoSide inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -729,6 +756,7 @@ component CryptoSide inherits Rectangle {
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
+            editor-fold(w, r) => { root.editor-fold(w, r); }
             editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
             editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
             editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -768,6 +796,7 @@ component CryptoSide inherits Rectangle {
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
+            editor-fold(w, r) => { root.editor-fold(w, r); }
             editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
             editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
             editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -804,6 +833,7 @@ component CryptoView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -850,6 +880,7 @@ component CryptoView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -878,6 +909,7 @@ component CryptoView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -937,6 +969,7 @@ component GmView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -1083,6 +1116,7 @@ component GmView inherits Rectangle {
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
+                                editor-fold(w, r) => { root.editor-fold(w, r); }
                                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1115,6 +1149,7 @@ component GmView inherits Rectangle {
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
+                                editor-fold(w, r) => { root.editor-fold(w, r); }
                                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1162,6 +1197,7 @@ component GmView inherits Rectangle {
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
+                                editor-fold(w, r) => { root.editor-fold(w, r); }
                                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1194,6 +1230,7 @@ component GmView inherits Rectangle {
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
+                                editor-fold(w, r) => { root.editor-fold(w, r); }
                                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1244,6 +1281,7 @@ component GmView inherits Rectangle {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1481,6 +1519,8 @@ component JsonView inherits Rectangle {
     in property <bool> ok: true;
     in property <string> status;
     in-out property <string> find;
+    // 查找条默认不在：它平时只占地方，Ctrl+F（或工具条上的放大镜）才拉出来。
+    in-out property <bool> find-open: false;
     in property <int> hit-count;
     in property <int> hit-index;
     in property <bool> can-undo;
@@ -1505,133 +1545,239 @@ component JsonView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
+
+    // 每次 Ctrl+F 都要把焦点抓回查找框（哪怕它已经开着）。Slint 里没有
+    // 「从 Rust 直接聚焦某个元素」的入口，用一个自增计数当脉冲：Rust 每按一次
+    // 就 +1，这里的 changed 把焦点交给输入框。
+    in property <int> focus-tick;
+    changed focus-tick => {
+        finder.focus();
+    }
+
+    // 收起时把焦点还给编辑区，否则接着打字会打进一个看不见的输入框。
+    changed find-open => {
+        if (root.find-open) {
+            finder.focus();
+        } else {
+            pane.focus();
+        }
+    }
 
     VerticalLayout {
         padding: 16px;
         spacing: 10px;
 
-        // 工具条
+        // 工具条：一整排图标按钮（对位 egui 版的 toolbar_row）。
+        // 刻意不用文字按钮 —— 十四个中文按钮换行成两排，且每次加一个操作
+        // 都会把这一排挤到下一行。图标 + 悬停提示是原来的形态。
         HorizontalLayout {
-            spacing: 6px;
+            spacing: 2px;
             alignment: start;
-            FerricButton {
-                text: "格式化";
-                variant: "primary";
+
+            IconButton {
+                icon: Icons.align-left;
+                icon-size: 16px;
+                tooltip: "格式化 / 美化";
                 clicked => { root.do-format(); }
             }
-            FerricButton {
-                text: "压缩";
+            IconButton {
+                icon: Icons.fold-vertical;
+                icon-size: 16px;
+                tooltip: "压缩为单行";
                 clicked => { root.do-minify(); }
             }
-            FerricButton {
-                text: "转义";
+            IconButton {
+                icon: Icons.quote;
+                icon-size: 16px;
+                tooltip: "转义为 JSON 字符串";
                 clicked => { root.do-escape(); }
             }
-            FerricButton {
-                text: "去转义";
+            IconButton {
+                icon: Icons.code;
+                icon-size: 16px;
+                tooltip: "去除转义（多层一次剥完）";
                 clicked => { root.do-unescape(); }
             }
-            Rectangle { width: 6px; }
-            Segmented {
-                options: ["2 空格", "4 空格", "Tab"];
-                current: root.indent-index;
-                changed(i) => { root.indent-changed(i); }
-            }
-            Rectangle { horizontal-stretch: 1; }
+
+            VDivider {}
+
             IconButton {
-                icon: "↶";
-                icon-size: 15px;
+                icon: Icons.undo-2;
+                icon-size: 16px;
                 enabled: root.can-undo;
+                tooltip: "撤销（Ctrl+Z）";
                 clicked => { root.do-undo(); }
             }
             IconButton {
-                icon: "↷";
-                icon-size: 15px;
+                icon: Icons.redo-2;
+                icon-size: 16px;
                 enabled: root.can-redo;
+                tooltip: "重做（Ctrl+Y）";
                 clicked => { root.do-redo(); }
             }
-        }
 
-        // 第二行：开关 + 状态
-        HorizontalLayout {
-            spacing: 8px;
-            alignment: start;
-            Segmented {
-                options: ["原始键序", "键名排序"];
-                current: root.sort ? 1 : 0;
-                changed(i) => { root.toggle-sort(); }
+            VDivider {}
+
+            // 缩进档位：2 / 4 / Tab。数字用 label（Lucide 里没有数字字形）。
+            IconButton {
+                label: "2";
+                icon-size: 16px;
+                active: root.indent-index == 0;
+                tooltip: "缩进 2 空格（下次格式化生效）";
+                clicked => { root.indent-changed(0); }
             }
-            Segmented {
-                options: ["自动换行", "不换行"];
-                current: root.wrap ? 0 : 1;
-                changed(i) => { root.toggle-wrap(); }
+            IconButton {
+                label: "4";
+                icon-size: 16px;
+                active: root.indent-index == 1;
+                tooltip: "缩进 4 空格（下次格式化生效）";
+                clicked => { root.indent-changed(1); }
             }
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: root.status;
-                font-family: Theme.font-ui;
-                font-size: 12px;
-                color: root.ok ? Theme.muted : Theme.danger;
-                vertical-alignment: center;
-                overflow: elide;
+            IconButton {
+                icon: Icons.indent-increase;
+                icon-size: 16px;
+                active: root.indent-index == 2;
+                tooltip: "Tab 缩进（下次格式化生效）";
+                clicked => { root.indent-changed(2); }
             }
-            FerricButton {
-                text: "复制";
-                variant: "subtle";
+            IconButton {
+                icon: Icons.arrow-up-a-z;
+                icon-size: 16px;
+                active: root.sort;
+                tooltip: root.sort ? "键名排序：开" : "键名排序：关";
+                clicked => { root.toggle-sort(); }
+            }
+            IconButton {
+                icon: Icons.wrap-text;
+                icon-size: 16px;
+                active: root.wrap;
+                tooltip: root.wrap
+                    ? "自动换行：开"
+                    : "自动换行：关（长行用横向滚动看）";
+                clicked => { root.toggle-wrap(); }
+            }
+
+            VDivider {}
+
+            IconButton {
+                icon: Icons.search;
+                icon-size: 16px;
+                active: root.find-open;
+                tooltip: "查找（Ctrl+F）";
+                clicked => { root.find-open = !root.find-open; }
+            }
+            IconButton {
+                icon: Icons.copy;
+                icon-size: 16px;
+                tooltip: "复制全文";
                 clicked => { root.copy-output(); }
             }
-            FerricButton {
-                text: "清空";
-                variant: "subtle";
+            IconButton {
+                icon: Icons.trash;
+                icon-size: 16px;
+                tooltip: "清空输入";
                 clicked => { root.clear-input(); }
             }
-        }
 
-        // 搜索条
-        HorizontalLayout {
-            spacing: 8px;
-            FieldLabel { text: "查找"; vertical-alignment: center; }
-            FerricLineEdit {
-                horizontal-stretch: 1;
-                text <=> root.find;
-                placeholder: "输入后按 Enter 或点「查找」";
-                mono: true;
-                edited(t) => { root.find-edited(t); }
-                accepted(t) => { root.do-search(); }
-            }
-            FerricButton {
-                text: "查找";
-                clicked => { root.do-search(); }
-            }
-            IconButton {
-                icon: "‹";
-                icon-size: 16px;
-                enabled: root.hit-count > 0;
-                clicked => { root.prev-hit(); }
-            }
-            Text {
-                text: root.hit-count > 0
-                    ? (root.hit-index + 1) + " / " + root.hit-count
-                    : "—";
-                font-family: Theme.font-mono;
-                font-size: 12px;
-                color: Theme.muted;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-                min-width: 56px;
-            }
-            IconButton {
-                icon: "›";
-                icon-size: 16px;
-                enabled: root.hit-count > 0;
-                clicked => { root.next-hit(); }
+            Rectangle { horizontal-stretch: 1; min-width: 12px; }
+
+            // 实时校验结果。工具条右端而不是单独一行：那一行只有这一句话。
+            HorizontalLayout {
+                spacing: 5px;
+                Text {
+                    text: root.ok ? Icons.circle-check : Icons.circle-alert;
+                    font-family: Theme.font-icons;
+                    font-size: 13px;
+                    color: root.ok ? Theme.ok : Theme.danger;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.status;
+                    font-family: Theme.font-ui;
+                    font-size: 12px;
+                    color: root.ok ? Theme.muted : Theme.danger;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
         }
 
-        EditorPane {
+        // 查找条。**始终实例化**、靠高度收放而不是 `if` —— 放在 `if` 里的元素
+        // 拿不到 id（外面 `finder.focus()` 直接编译不过），而「Ctrl+F 之后焦点
+        // 就在查找框里」是这条快捷键的全部意义。
+        Rectangle {
+            height: root.find-open ? 38px : 0px;
+            visible: root.find-open;
+            clip: true;
+
+            HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 38px;
+                    finder := FerricLineEdit {
+                        width: 100%;
+                        height: 100%;
+                        text <=> root.find;
+                        placeholder: "查找（Enter 下一个，Esc 关闭）";
+                        mono: true;
+                        pad-left: 34px;
+                        edited(t) => { root.find-edited(t); }
+                        // Enter 实际是 Rust 的按键钩子接的（单行 TextInput 会把
+                        // 回车吃掉，`accepted` 收不到）；这里保留是为了不依赖那个
+                        // 绕行 —— 哪个先到都是「跳下一个命中」。
+                        accepted(t) => { root.next-hit(); }
+                    }
+                    Text {
+                        x: 12px;
+                        width: 16px;
+                        height: 100%;
+                        text: Icons.search;
+                        font-family: Theme.font-icons;
+                        font-size: 14px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: root.hit-count > 0
+                        ? (root.hit-index + 1) + " / " + root.hit-count
+                        : "—";
+                    font-family: Theme.font-mono;
+                    font-size: 12px;
+                    color: Theme.muted;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    min-width: 64px;
+                }
+                IconButton {
+                    icon: Icons.chevron-left;
+                    icon-size: 15px;
+                    // 刻意不按命中数置灰：第一次点它就是「去搜」的入口
+                    //（Rust 侧 next_hit/prev_hit 在没有命中时会先跑一次搜索）。
+                    tooltip: "上一个匹配（Shift+Enter）";
+                    clicked => { root.prev-hit(); }
+                }
+                IconButton {
+                    icon: Icons.chevron-right;
+                    icon-size: 15px;
+                    tooltip: "下一个匹配（Enter）";
+                    clicked => { root.next-hit(); }
+                }
+                IconButton {
+                    icon: Icons.x;
+                    icon-size: 14px;
+                    tooltip: "关闭查找条（Esc）";
+                    clicked => { root.find-open = false; }
+                }
+            }
+        }
+
+        pane := EditorPane {
             title: "JSON";
             which: "json-in";
             state: root.input-state;
@@ -1640,6 +1786,7 @@ component JsonView inherits Rectangle {
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
+            editor-fold(w, r) => { root.editor-fold(w, r); }
             editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
             editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
             editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1664,6 +1811,7 @@ component DiffView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -1724,6 +1872,7 @@ component DiffView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -1737,6 +1886,7 @@ component DiffView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -2044,6 +2194,7 @@ component PluginView inherits Rectangle {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -2125,6 +2276,7 @@ component PluginView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -2140,6 +2292,7 @@ component PluginView inherits Rectangle {
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
+                editor-fold(w, r) => { root.editor-fold(w, r); }
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3237,12 +3390,16 @@ export component AppWindow inherits Window {
 
     // JSON 工具状态
     in property <EditorState> json-input;
+    // Ctrl+F 的聚焦脉冲（自增即请求聚焦，见 JsonView 的 focus-tick）。
+    in-out property <int> json-find-focus-tick;
     in property <int> json-indent;
     in property <bool> json-sort;
     in property <bool> json-wrap: true;
     in property <bool> json-ok: true;
     in property <string> json-status: "";
     in-out property <string> json-find;
+    // 查找条开着没有。Rust 侧的全局按键钩子（Ctrl+F / Esc）也写这个属性。
+    in-out property <bool> json-find-open: false;
     in property <int> json-hit-count;
     in property <int> json-hit-index;
     in property <bool> json-can-undo;
@@ -3318,6 +3475,7 @@ export component AppWindow inherits Window {
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
     callback editor-triple(string);
+    callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
     callback editor-scroll-line(string, int);
     callback editor-key(string, string, bool, bool);
@@ -3849,6 +4007,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3867,6 +4026,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3889,6 +4049,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3909,6 +4070,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3941,6 +4103,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -3992,6 +4155,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -4029,6 +4193,8 @@ export component AppWindow inherits Window {
                         ok: root.json-ok;
                         status: root.json-status;
                         find <=> root.json-find;
+                        find-open <=> root.json-find-open;
+                        focus-tick: root.json-find-focus-tick;
                         hit-count: root.json-hit-count;
                         hit-index: root.json-hit-index;
                         can-undo: root.json-can-undo;
@@ -4052,6 +4218,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -4072,6 +4239,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
@@ -4108,6 +4276,7 @@ export component AppWindow inherits Window {
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
+                        editor-fold(w, r) => { root.editor-fold(w, r); }
                         editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }

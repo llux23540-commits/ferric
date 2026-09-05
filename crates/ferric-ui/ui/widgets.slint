@@ -10,6 +10,22 @@ export component FieldLabel inherits Text {
     color: Theme.fg-soft;
 }
 
+// 工具条上的竖分隔线（原 widgets::tb_sep）。整块占位、线只画中间那一段 ——
+// 在 HorizontalLayout 里给子元素固定高度会被拉伸，所以线是内层画的。
+export component VDivider inherits Rectangle {
+    in property <length> line-height: 18px;
+    min-width: 9px;
+    horizontal-stretch: 0;
+
+    Rectangle {
+        x: 4px;
+        y: (parent.height - root.line-height) / 2;
+        width: 1px;
+        height: root.line-height;
+        background: Theme.border;
+    }
+}
+
 // ——— 按钮 ———
 // 原 widgets::btn 的三个 variant 合成一个组件，用 `variant` 选。
 // 尺寸沿用原实现：高 38、primary/default 横向 padding 16、subtle 12、圆角 10。
@@ -77,13 +93,18 @@ export component FerricButton inherits Rectangle {
 //
 // `danger` 给关闭按钮用：hover 时整块变红、图标反白，符合平台习惯
 //（误点关闭的代价最大，它必须看起来跟其它按钮不一样）。
-// `active` 给「当前已打开」的入口用（比如设置浮层开着时的齿轮）。
+// `active` 给「当前已打开」/「开关已开」的入口用（设置浮层开着时的齿轮、
+// JSON 工具条上打开的换行开关）。
+// `label` 给「图标字体里没有这个符号」的按钮用（缩进档位的 2 / 4）——
+// Lucide 子集里没有数字，硬塞进 font-icons 会画成空白。
 export component IconButton inherits Rectangle {
     in property <string> icon;
+    in property <string> label: "";
     in property <length> icon-size: 18px;
     in property <bool> enabled: true;
     in property <bool> danger: false;
     in property <bool> active: false;
+    // 悬停提示。图标按钮没有文字，不给提示等于让用户猜。
     in property <string> tooltip: "";
     callback clicked();
 
@@ -103,9 +124,9 @@ export component IconButton inherits Rectangle {
     Text {
         width: 100%;
         height: 100%;
-        text: root.icon;
-        font-family: Theme.font-icons;
-        font-size: root.icon-size;
+        text: root.label != "" ? root.label : root.icon;
+        font-family: root.label != "" ? Theme.font-mono-medium : Theme.font-icons;
+        font-size: root.label != "" ? root.icon-size - 2px : root.icon-size;
         color: !root.enabled
             ? Theme.faint
             : (ta.has-hover
@@ -118,6 +139,48 @@ export component IconButton inherits Rectangle {
     ta := TouchArea {
         enabled: root.enabled;
         clicked => { root.clicked(); }
+    }
+
+    // 提示气泡：悬停 450ms 后出现（立刻出现的话扫过一排按钮会一路闪）。
+    // 画在按钮下方，用 PopupWindow 以免被工具条的布局裁掉。
+    delay := Timer {
+        interval: 450ms;
+        running: root.tooltip != "" && ta.has-hover;
+        triggered => {
+            self.running = false;
+            tip.show();
+        }
+    }
+
+    changed has-hover-tip => {
+        if (!ta.has-hover) {
+            tip.close();
+        }
+    }
+    property <bool> has-hover-tip: ta.has-hover;
+
+    tip := PopupWindow {
+        x: 0;
+        y: root.height + 6px;
+        close-policy: no-auto-close;
+
+        Rectangle {
+            background: Theme.dark ? #1c2128 : #22272e;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: Theme.border;
+            width: txt.preferred-width + 16px;
+            height: txt.preferred-height + 10px;
+
+            txt := Text {
+                text: root.tooltip;
+                font-family: Theme.font-ui;
+                font-size: 12px;
+                color: #f0f3f7;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
     }
 }
 

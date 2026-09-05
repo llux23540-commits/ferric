@@ -298,6 +298,11 @@ pub struct Shell {
     pub json: Rc<RefCell<views::JsonTool>>,
     pub diff: Rc<RefCell<views::DiffTool>>,
     pub market: Rc<RefCell<views::MarketTool>>,
+    /// 键盘最后落在 JSON 查找框（true）还是正文编辑区（false）。
+    ///
+    /// Slint 的 TextInput 在本项目里收不到 Enter（见 `wire_palette` 的按键钩子），
+    /// 所以 Enter 由那个钩子分派 —— 而分派前必须知道它该给谁。
+    pub find_hint: Rc<std::cell::Cell<bool>>,
 }
 
 impl Default for Shell {
@@ -375,6 +380,7 @@ impl Shell {
             json: Rc::new(RefCell::new(json)),
             diff: Rc::new(RefCell::new(diff)),
             market: Rc::new(RefCell::new(market)),
+            find_hint: Rc::new(std::cell::Cell::new(false)),
         }
     }
 
@@ -995,9 +1001,12 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         let ctrl = Rc::new(std::cell::Cell::new(false));
+        let shift = Rc::new(std::cell::Cell::new(false));
+        let find_hint = self.find_hint.clone();
         win.window().on_winit_window_event(move |_, ev| {
             if let WindowEvent::ModifiersChanged(m) = ev {
                 ctrl.set(m.state().control_key());
+                shift.set(m.state().shift_key());
                 return EventResult::Propagate;
             }
             let WindowEvent::KeyboardInput { event, .. } = ev else {
@@ -1019,6 +1028,50 @@ impl Shell {
                 win.set_palette_rows(ModelRc::new(VecModel::from(rows)));
                 win.set_palette_open(true);
                 // 别把 Ctrl+K 再交给 Slint —— 编辑区里它会被当成普通按键。
+                return EventResult::PreventDefault;
+            }
+            // Ctrl+F：只有 JSON 工具有查找条，其它工具下这个键不该被吞掉。
+            // 放在这个全局钩子里而不是编辑区的按键分派里：焦点在工具条按钮或
+            // 查找框上时也要能开合，那些控件的按键根本不走编辑区。
+            if ctrl.get() && matches!(key, Key::Character("f" | "F")) {
+                let on_json = {
+                    let s = state.borrow();
+                    s.tools[s.active].meta().id == "json"
+                };
+                if !on_json {
+                    return EventResult::Propagate;
+                }
+                win.set_json_find_open(true);
+                // 已经开着时 `find-open` 不会再变，靠这个自增脉冲把焦点抓回来。
+                win.set_json_find_focus_tick(win.get_json_find_focus_tick() + 1);
+                // 焦点现在在查找框里 → Enter 归查找，不是正文换行。
+                find_hint.set(true);
+                return EventResult::PreventDefault;
+            }
+            // Esc 收起查找条（命令面板开着时归面板处理，见下面那段）。
+            if matches!(key, Key::Named(NamedKey::Escape))
+                && !win.get_palette_open()
+                && win.get_json_find_open()
+            {
+                win.set_json_find_open(false);
+                return EventResult::PreventDefault;
+            }
+            // 查找框里的 Enter / Shift+Enter = 下一个 / 上一个命中。
+            //
+            // 这里接而不是用 TextInput 的 `accepted`：实测那个回调在本项目的
+            // 输入框上收不到 Enter（与本函数开头注释里说的方向键同一类问题）。
+            //
+            // `find_hint` 记「键盘最后落在查找框还是编辑区」：查找条开着但用户
+            // 已经点回正文时，Enter 必须还是换行，不能被查找抢走。
+            if matches!(key, Key::Named(NamedKey::Enter))
+                && win.get_json_find_open()
+                && find_hint.get()
+            {
+                if shift.get() {
+                    win.invoke_json_prev_hit();
+                } else {
+                    win.invoke_json_next_hit();
+                }
                 return EventResult::PreventDefault;
             }
             if !win.get_palette_open() {
@@ -1979,8 +2032,32 @@ impl Shell {
         json_cb!(on_json_indent_changed, |t, i| {
             t.set_indent_index(i);
         });
-        json_cb!(on_json_find_edited, |t, f| {
-            t.set_find(&f);
+        // 边打边搜，但**延迟 200ms**：5MB 文本上每敲一个字符都全文扫一遍就是
+        // 明显的卡顿源，而「敲完才搜」等于要求用户先按一次 Enter —— Slint 的
+        // TextInput 在这里收不到 Enter（同 `wire_palette` 那段注释里的老问题），
+        // 所以按键不能是唯一的触发方式。
+        // 定时器由这个闭包持有：Timer 一旦被 drop 就不会再触发。
+        let debounce = slint::Timer::default();
+        let json = self.json.clone();
+        let w = win.as_weak();
+        let hint = self.find_hint.clone();
+        win.on_json_find_edited(move |f| {
+            json.borrow_mut().set_find(&f);
+            // 正在往查找框里打字 → Enter 该给查找，不是给正文换行。
+            hint.set(true);
+            let json = json.clone();
+            let w = w.clone();
+            // 每敲一下就重排下一次：连续输入期间只会在停手后搜一次。
+            debounce.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(200),
+                move || {
+                    json.borrow_mut().search();
+                    if let Some(win) = w.upgrade() {
+                        Self::push_json(&json, &win);
+                    }
+                },
+            );
         });
 
         let json = self.json.clone();
@@ -2369,6 +2446,8 @@ impl Shell {
             s.with_buffer(&which, |b| b.scroll_to_line(line.max(0) as usize));
         });
         editor_cb!(on_editor_click, |s, which, line, col, extend| {
+            // 点回正文 = 焦点离开查找框，Enter 重新归换行。
+            s.find_hint.set(false);
             s.with_buffer(&which, |b| {
                 b.click(line.max(0) as usize, col.max(0) as usize, extend);
             });
@@ -2382,6 +2461,11 @@ impl Shell {
         editor_cb!(on_editor_triple, |s, which| {
             s.with_buffer(&which, |b| b.select_line());
         });
+        // 行号槽里的折叠箭头。参数是视口内行号 —— 折叠之后它与文档行号
+        // 不再一致，换算只在 TextBuffer 里做。
+        editor_cb!(on_editor_fold, |s, which, row| {
+            s.with_buffer(&which, |b| b.toggle_fold_view_row(row.max(0) as usize));
+        });
 
         // 按键要额外处理「改过内容」→ 重算 + 落盘，以及剪贴板请求。
         let shell = self.clone_handles();
@@ -2391,6 +2475,7 @@ impl Shell {
             let which = which.to_string();
             let read_only = which.ends_with("-out");
             let text = text.to_string();
+            shell.find_hint.set(false);
 
             let outcome = shell
                 .with_buffer(&which, |b| {
@@ -2454,6 +2539,7 @@ impl Shell {
             json: self.json.clone(),
             diff: self.diff.clone(),
             market: self.market.clone(),
+            find_hint: self.find_hint.clone(),
         }
     }
 
