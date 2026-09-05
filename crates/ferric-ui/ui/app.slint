@@ -10,7 +10,7 @@ import { Theme, Icons } from "theme.slint";
 // 把 Theme 再导出一次：Slint 只为**本文件导出**的 global 生成 Rust 侧类型，
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
-import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast } from "widgets.slint";
+import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast, Tooltip } from "widgets.slint";
 import { CodeEditor } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
@@ -91,21 +91,6 @@ struct PluginCard {
     busy: bool,
 }
 
-// 差异结果的一个行内片段。emph = 被改动的部分（加深底色）。
-struct DiffSeg {
-    text: string,
-    emph: bool,
-}
-
-// 差异结果的一行。
-struct DiffRow {
-    sign: string,
-    left-no: string,
-    right-no: string,
-    segs: [DiffSeg],
-    // 0 相同 / 1 删除 / 2 新增 —— 决定整行底色
-    kind: int,
-}
 
 // 时区列表里的一项。
 struct TzRow {
@@ -139,6 +124,12 @@ struct EditorState {
     fold-marks: [int],
     // 这一屏里有没有可折叠的行（决定行号槽要不要让出折叠列）
     foldable: bool,
+    // 差异种类（每个可见行）：0 相同 / 1 删除 / 2 新增 —— 整行底色按它上
+    row-kinds: [int],
+    // 这一屏里有没有差异行（决定行号槽要不要让出 -/+ 那一列）
+    diffed: bool,
+    // 字符级高亮 (视口行, 起列, 列数)：改动行里「改了哪几个字」
+    emph-spans: [[int]],
     // 光标的视口内坐标
     cursor-line: int,
     cursor-col: int,
@@ -204,6 +195,9 @@ component EditorPane inherits Rectangle {
             total-lines: root.state.total-lines;
             fold-marks: root.state.fold-marks;
             foldable: root.state.foldable;
+            row-kinds: root.state.row-kinds;
+            diffed: root.state.diffed;
+            emph-spans: root.state.emph-spans;
             cursor-line: root.state.cursor-line;
             cursor-col: root.state.cursor-col;
             cursor-visible: root.state.cursor-visible;
@@ -1798,15 +1792,15 @@ component JsonView inherits Rectangle {
 component DiffView inherits Rectangle {
     in property <EditorState> left-state;
     in property <EditorState> right-state;
-    in property <[DiffRow]> rows;
-    in property <bool> only-changes;
     in property <string> status;
+    in property <bool> has-diff: false;
 
     callback do-compare();
-    callback toggle-only-changes();
     callback do-swap();
     callback clear-input();
     callback copy-result();
+    callback next-hunk();
+    callback prev-hunk();
     callback editor-viewport(string, int, int);
     callback editor-click(string, int, int, bool);
     callback editor-drag(string, int, int);
@@ -1831,38 +1825,57 @@ component DiffView inherits Rectangle {
             }
             FerricButton {
                 text: "左右互换";
-                icon: "⇄";
                 clicked => { root.do-swap(); }
             }
-            Segmented {
-                options: ["含上下文", "只看差异"];
-                current: root.only-changes ? 1 : 0;
-                changed(i) => { root.toggle-only-changes(); }
+
+            VDivider {}
+
+            // 跳 hunk 取代了从前那份「只看差异」的清单：差异现在就画在原文上，
+            // 需要的是「带我去下一处」，而不是把上下文摘掉。
+            IconButton {
+                icon: Icons.chevron-up;
+                icon-size: 18px;
+                enabled: root.has-diff;
+                tooltip: "上一处差异";
+                clicked => { root.prev-hunk(); }
             }
-            Rectangle { horizontal-stretch: 1; }
+            IconButton {
+                icon: Icons.chevron-down;
+                icon-size: 18px;
+                enabled: root.has-diff;
+                tooltip: "下一处差异";
+                clicked => { root.next-hunk(); }
+            }
+
+            Rectangle { horizontal-stretch: 1; min-width: 12px; }
+
             Text {
                 text: root.status;
                 font-family: Theme.font-mono;
                 font-size: 12px;
                 color: Theme.muted;
                 vertical-alignment: center;
+                overflow: elide;
             }
-            FerricButton {
-                text: "复制结果";
-                variant: "subtle";
+            IconButton {
+                icon: Icons.copy;
+                icon-size: 19px;
+                tooltip: "复制统一 diff 文本";
                 clicked => { root.copy-result(); }
             }
-            FerricButton {
-                text: "清空";
-                variant: "subtle";
+            IconButton {
+                icon: Icons.trash;
+                icon-size: 19px;
+                tooltip: "清空两侧";
                 clicked => { root.clear-input(); }
             }
         }
 
-        // 上：左右输入
+        // 左右并排，差异直接画在原文上：删除行偏红、新增行偏绿、
+        // 改动的字加深底色，行号槽跟 `-` / `+`。滚一侧另一侧跟着对位。
         HorizontalLayout {
             spacing: 12px;
-            height: 34%;
+            vertical-stretch: 1;
             EditorPane {
                 title: "左侧（原文）";
                 which: "diff-left-in";
@@ -1890,99 +1903,6 @@ component DiffView inherits Rectangle {
                 editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
-            }
-        }
-
-        // 下：统一差异视图
-        VerticalLayout {
-            spacing: 6px;
-            vertical-stretch: 1;
-            HorizontalLayout {
-                FieldLabel { text: "差异"; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
-                Text {
-                    text: root.rows.length + " 行";
-                    font-family: Theme.font-mono;
-                    font-size: 11px;
-                    color: Theme.faint;
-                    vertical-alignment: center;
-                }
-            }
-            Rectangle {
-                background: Theme.code-bg;
-                border-radius: 9px;
-                border-width: 1px;
-                border-color: Theme.border;
-                vertical-stretch: 1;
-                clip: true;
-
-                ScrollView {
-                    VerticalLayout {
-                        padding: 6px;
-                        spacing: 0px;
-                        alignment: start;
-                        for row in root.rows: Rectangle {
-                            height: 18px;
-                            // 整行底色按 kind：删除偏红、新增偏绿、相同透明
-                            background: row.kind == 1 ? Theme.del-bg
-                                : row.kind == 2 ? Theme.add-bg
-                                : transparent;
-
-                            HorizontalLayout {
-                                spacing: 0px;
-                                // 左右行号槽
-                                Text {
-                                    width: 42px;
-                                    text: row.left-no;
-                                    font-family: Theme.font-mono;
-                                    font-size: 11px;
-                                    color: Theme.faint;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    width: 42px;
-                                    text: row.right-no;
-                                    font-family: Theme.font-mono;
-                                    font-size: 11px;
-                                    color: Theme.faint;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    width: 18px;
-                                    text: row.sign;
-                                    font-family: Theme.font-mono-medium;
-                                    font-size: 12px;
-                                    color: row.kind == 1 ? Theme.danger
-                                        : row.kind == 2 ? Theme.ok : Theme.faint;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                // 行内片段：改动部分加深底色（字符级高亮）
-                                HorizontalLayout {
-                                    spacing: 0px;
-                                    alignment: start;
-                                    horizontal-stretch: 1;
-                                    for seg in row.segs: Rectangle {
-                                        background: seg.emph
-                                            ? (row.kind == 1 ? Theme.del-mark : Theme.add-mark)
-                                            : transparent;
-                                        min-width: seg-text.min-width;
-                                        seg-text := Text {
-                                            text: seg.text;
-                                            font-family: Theme.font-mono;
-                                            font-size: 12px;
-                                            color: Theme.fg;
-                                            vertical-alignment: center;
-                                            wrap: no-wrap;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -3408,8 +3328,8 @@ export component AppWindow inherits Window {
     // 对比工具状态
     in property <EditorState> diff-left;
     in property <EditorState> diff-right;
-    in property <[DiffRow]> diff-rows;
-    in property <bool> diff-only-changes;
+    // 有没有差异（决定「上一处 / 下一处」两个按钮能不能点）
+    in property <bool> diff-has-diff;
     in property <string> diff-status: "";
 
     // 插件市场状态
@@ -3559,7 +3479,8 @@ export component AppWindow inherits Window {
 
     // 对比工具
     callback diff-compare();
-    callback diff-toggle-only-changes();
+    callback diff-next-hunk();
+    callback diff-prev-hunk();
     callback diff-swap();
     callback diff-clear();
     callback diff-copy();
@@ -4227,11 +4148,11 @@ export component AppWindow inherits Window {
                         vertical-stretch: 1;
                         left-state: root.diff-left;
                         right-state: root.diff-right;
-                        rows: root.diff-rows;
-                        only-changes: root.diff-only-changes;
+                        has-diff: root.diff-has-diff;
                         status: root.diff-status;
                         do-compare => { root.diff-compare(); }
-                        toggle-only-changes => { root.diff-toggle-only-changes(); }
+                        next-hunk => { root.diff-next-hunk(); }
+                        prev-hunk => { root.diff-prev-hunk(); }
                         do-swap => { root.diff-swap(); }
                         clear-input => { root.diff-clear(); }
                         copy-result => { root.diff-copy(); }
@@ -4437,6 +4358,33 @@ export component AppWindow inherits Window {
         dismiss => { root.log-open = false; }
     }
 
+    // ===== 提示气泡层 =====
+    //
+    // 放在所有内容之后 = 画在最上层。图标按钮把文字与坐标写进 `Tooltip`
+    // global（见 widgets.slint），这里只负责画 —— 全程不接输入，
+    // 所以不会像 PopupWindow 那样把按钮的下一次点击吃掉。
+    if Tooltip.text != "": Rectangle {
+        x: min(Tooltip.x, parent.width - self.width - 8px);
+        y: Tooltip.y;
+        width: tip-text.preferred-width + 16px;
+        height: tip-text.preferred-height + 10px;
+        background: Theme.dark ? #0f1319 : #22272e;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Theme.border-2;
+
+        tip-text := Text {
+            width: 100%;
+            height: 100%;
+            text: Tooltip.text;
+            font-family: Theme.font-ui;
+            font-size: 12px;
+            color: #f0f3f7;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
     // ===== 剪贴板出口 =====
     //
     // Slint 的公开 Rust API 没有剪贴板（`Platform::set_clipboard_text` 是后端
@@ -4455,5 +4403,16 @@ export component AppWindow inherits Window {
         clip.text = text;
         clip.select-all();
         clip.copy();
+    }
+
+    // 读剪贴板走同一个 0×0 输入框：Slint 的 Rust API 也没有「读剪贴板」的入口，
+    // 但 TextInput 自己有 `paste()`。清空 → 粘贴 → 把文本交回 Rust。
+    // 少了这一段，Ctrl+V 在所有编辑区里都是**静默无效**（`KeyOutcome.paste`
+    // 一直没有消费者）。
+    public function paste-from-clipboard() -> string {
+        clip.text = "";
+        clip.select-all();
+        clip.paste();
+        return clip.text;
     }
 }

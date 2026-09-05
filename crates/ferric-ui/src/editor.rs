@@ -149,6 +149,10 @@ impl TextBuffer {
         self.viewport_lines
     }
 
+    pub fn viewport_cols(&self) -> usize {
+        self.viewport_cols
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }
@@ -564,6 +568,15 @@ impl TextBuffer {
     /// 可见行数 [`Self::view_total_lines`]，不是文档行数）。
     pub fn scroll_to_line(&mut self, row: usize) {
         self.scroll_line = self.doc_of_view_row(row);
+        self.clamp_scroll();
+    }
+
+    /// 把视口顶端设到**文档**某一行。
+    ///
+    /// 与 [`Self::scroll_to_line`] 的区别是刻度：那个收的是可见行序号
+    ///（滚动条给的），这个收的是文档行号（对比工具的左右同步滚动用）。
+    pub fn scroll_to_doc_line(&mut self, line: usize) {
+        self.scroll_line = line;
         self.clamp_scroll();
     }
 

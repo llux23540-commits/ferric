@@ -16,6 +16,11 @@ export component CodeEditor inherits Rectangle {
     // 折叠标记（与 `lines` 一一对应）：0 不是区块开头 / 1 可折叠 / 2 已折叠
     in property <[int]> fold-marks;
     in property <bool> foldable: false;
+    // 差异种类（与 `lines` 一一对应）：0 相同 / 1 删除 / 2 新增
+    in property <[int]> row-kinds;
+    in property <bool> diffed: false;
+    // 字符级高亮 (视口行, 起列, 列数)：改动行里被改掉的那几个字
+    in property <[[int]]> emph-spans;
 
     callback viewport-changed(int, int);
     callback clicked(int, int, bool);
@@ -50,10 +55,12 @@ export component CodeEditor inherits Rectangle {
 
     // 折叠列：只有这一屏真有区块开头时才占位，否则纯文本白让 18px
     property <length> fold-w: root.show-gutter && root.foldable ? 18px : 0px;
+    // 差异符号列（-/+）：只有对比工具的编辑区会用到
+    property <length> sign-w: root.show-gutter && root.diffed ? 14px : 0px;
     property <length> gutter-w: root.show-gutter
         ? (root.total-lines >= 100000 ? 62px
             : root.total-lines >= 10000 ? 54px
-            : root.total-lines >= 1000 ? 46px : 38px) + root.fold-w
+            : root.total-lines >= 1000 ? 46px : 38px) + root.fold-w + root.sign-w
         : 0px;
 
     // ===== 行号槽 =====
@@ -67,7 +74,7 @@ export component CodeEditor inherits Rectangle {
         for no[i] in root.line-nos: Text {
             x: root.fold-w;
             y: root.pad + i * root.line-height;
-            width: root.gutter-w - root.fold-w - 8px;
+            width: root.gutter-w - root.fold-w - root.sign-w - 8px;
             height: root.line-height;
             text: no;
             font-family: Theme.font-mono;
@@ -106,6 +113,20 @@ export component CodeEditor inherits Rectangle {
             }
         }
 
+        // 差异符号：删除 `-`、新增 `+`（git 的记号）。
+        for kind[i] in root.row-kinds: Text {
+            x: root.gutter-w - root.sign-w - 3px;
+            y: root.pad + i * root.line-height;
+            width: root.sign-w;
+            height: root.line-height;
+            text: kind == 1 ? "-" : kind == 2 ? "+" : "";
+            font-family: Theme.font-mono-medium;
+            font-size: root.font-size;
+            color: kind == 1 ? Theme.danger : Theme.ok;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
         Rectangle {
             x: parent.width - 1px;
             width: 1px;
@@ -121,6 +142,25 @@ export component CodeEditor inherits Rectangle {
         width: parent.width - root.gutter-w;
         height: parent.height;
         clip: true;
+
+        // 差异底色：删除行偏红、新增行偏绿，整行铺满（git 的读法）。
+        // 画在最底层 —— 选区与字符级高亮要能盖在它上面。
+        for kind[i] in root.row-kinds: Rectangle {
+            x: 0;
+            y: root.pad + i * root.line-height;
+            width: parent.width;
+            height: root.line-height;
+            background: kind == 1 ? Theme.del-bg : kind == 2 ? Theme.add-bg : transparent;
+        }
+
+        // 字符级高亮：改动行里被改掉的那几个字，底色比整行再深一档。
+        for span[i] in root.emph-spans: Rectangle {
+            x: root.pad + span[1] * root.char-w;
+            y: root.pad + span[0] * root.line-height;
+            width: span[2] * root.char-w;
+            height: root.line-height;
+            background: root.row-kinds[span[0]] == 1 ? Theme.del-mark : Theme.add-mark;
+        }
 
         // 选区高亮（画在文本下面）
         for span[i] in root.selection-spans: Rectangle {

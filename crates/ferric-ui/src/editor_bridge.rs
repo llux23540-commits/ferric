@@ -41,11 +41,26 @@ pub struct KeyOutcome {
     pub paste: bool,
 }
 
+/// 差异装饰：逐行种类 + 字符级高亮。对比工具把算好的结果挂进编辑区。
+///
+/// 下标语义与编辑区一致 —— `kinds` 按**文档行号**索引，`emph` 是
+/// `(行, 起始 char, 长度)`。两者都在这里被裁到当前视口，与文档多大无关。
+#[derive(Default, Clone, Copy)]
+pub struct RowDecor<'a> {
+    pub kinds: &'a [i32],
+    pub emph: &'a [(usize, usize, usize)],
+}
+
 /// 把缓冲区打包成 Slint 的 `EditorState`。
 ///
 /// 只有**可见的那几十行**进这里 —— 这正是虚拟化的出口，布局高度因此恒等于
 /// 视口高度，与文档多大无关（Slint 原生 TextEdit 超过约 2190 行会 panic）。
 pub fn state_of(buf: &TextBuffer) -> EditorState {
+    state_with_decor(buf, RowDecor::default())
+}
+
+/// 带差异装饰的版本（对比工具用）。
+pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
     let lines: Vec<SharedString> = buf
         .visible_lines()
         .into_iter()
@@ -72,6 +87,31 @@ pub fn state_of(buf: &TextBuffer) -> EditorState {
     //（SQL、纯文本）不该白占 16px。
     let foldable = marks.iter().any(|m| *m != 0);
 
+    let kinds: Vec<i32> = rows
+        .iter()
+        .map(|l| decor.kinds.get(*l).copied().unwrap_or(0))
+        .collect();
+    let diffed = kinds.iter().any(|k| *k != 0);
+
+    // 字符级高亮裁到视口：行不在这一屏、或整段被横向滚动推出去的都不画。
+    let left = buf.scroll_col();
+    let right = left + buf.viewport_cols() + 1;
+    let emph: Vec<ModelRc<i32>> = decor
+        .emph
+        .iter()
+        .filter_map(|(line, col, len)| {
+            let row = rows.iter().position(|l| l == line)?;
+            let (a, b) = ((*col).max(left), (col + len).min(right));
+            (b > a).then(|| {
+                ModelRc::new(VecModel::from(vec![
+                    row as i32,
+                    (a - left) as i32,
+                    (b - a) as i32,
+                ]))
+            })
+        })
+        .collect();
+
     EditorState {
         lines: ModelRc::new(VecModel::from(lines)),
         first_line: buf.view_first_row() as i32,
@@ -80,6 +120,9 @@ pub fn state_of(buf: &TextBuffer) -> EditorState {
         doc_lines: buf.total_lines() as i32,
         fold_marks: ModelRc::new(VecModel::from(marks)),
         foldable,
+        row_kinds: ModelRc::new(VecModel::from(kinds)),
+        diffed,
+        emph_spans: ModelRc::new(VecModel::from(emph)),
         cursor_line: cur_row.unwrap_or(0) as i32,
         cursor_col: cur_col.saturating_sub(buf.scroll_col()) as i32,
         cursor_visible: cur_row.is_some(),
@@ -349,5 +392,47 @@ mod tests {
         b.scroll_to_line(500); // 视野挪到 500
         let st = state_of(&b);
         assert!(!st.cursor_visible);
+    }
+
+    #[test]
+    fn diff_decoration_is_clipped_to_the_viewport() {
+        // 差异高亮跟正文走同一条虚拟化出口：只有这一屏的行进 Slint，
+        // 且坐标是**视口内**行号 —— 用文档行号会把颜色画到别的行上。
+        use slint::Model;
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let mut b = TextBuffer::new(&text);
+        b.set_viewport(10, 80);
+        b.scroll_to_doc_line(500);
+
+        let mut kinds = vec![0; 1001];
+        kinds[3] = 1; // 视野外
+        kinds[502] = 2; // 视野内第 2 行
+        let emph = [(502usize, 5usize, 3usize), (3, 0, 4)];
+        let st = state_with_decor(
+            &b,
+            RowDecor {
+                kinds: &kinds,
+                emph: &emph,
+            },
+        );
+
+        assert_eq!(st.row_kinds.row_count(), 10, "逐行种类要与可见行一一对应");
+        assert_eq!(st.row_kinds.row_data(2), Some(2));
+        assert_eq!(st.row_kinds.row_data(0), Some(0));
+        assert!(st.diffed);
+
+        assert_eq!(st.emph_spans.row_count(), 1, "视野外的高亮不该进模型");
+        let span = st.emph_spans.row_data(0).expect("这一屏有一处字符级高亮");
+        assert_eq!(span.row_data(0), Some(2), "行号必须换算成视口内坐标");
+        assert_eq!(span.row_data(1), Some(5));
+        assert_eq!(span.row_data(2), Some(3));
+    }
+
+    #[test]
+    fn plain_editors_carry_no_diff_decoration() {
+        use slint::Model;
+        let st = state_of(&buf());
+        assert!(!st.diffed);
+        assert_eq!(st.emph_spans.row_count(), 0);
     }
 }

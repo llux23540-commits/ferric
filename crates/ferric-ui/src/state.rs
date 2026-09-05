@@ -714,38 +714,28 @@ impl Shell {
     }
 
     /// 把对比结果刷进 Slint。
+    ///
+    /// 差异不再单独列一份，而是作为「装饰」挂在左右两个编辑区上
+    ///（逐行种类 + 字符级高亮，见 `views::diff` 的模块头）。
     fn push_diff(diff: &Rc<RefCell<views::DiffTool>>, win: &AppWindow) {
-        use ferric_core::diff::Tag;
+        use crate::editor_bridge::RowDecor;
         let t = diff.borrow();
-        win.set_diff_left(editor_bridge::state_of(&t.left));
-        win.set_diff_right(editor_bridge::state_of(&t.right));
-        win.set_diff_only_changes(t.only_changes);
+        win.set_diff_left(editor_bridge::state_with_decor(
+            &t.left,
+            RowDecor {
+                kinds: &t.left_kinds,
+                emph: &t.left_emph,
+            },
+        ));
+        win.set_diff_right(editor_bridge::state_with_decor(
+            &t.right,
+            RowDecor {
+                kinds: &t.right_kinds,
+                emph: &t.right_emph,
+            },
+        ));
+        win.set_diff_has_diff(t.stats.added + t.stats.removed > 0);
         win.set_diff_status(SharedString::from(t.status.clone()));
-
-        let rows: Vec<DiffRow> = t
-            .rows
-            .iter()
-            .map(|r| DiffRow {
-                sign: SharedString::from(r.sign),
-                left_no: SharedString::from(r.left_no.clone()),
-                right_no: SharedString::from(r.right_no.clone()),
-                kind: match r.tag {
-                    Tag::Equal => 0,
-                    Tag::Delete => 1,
-                    Tag::Insert => 2,
-                },
-                segs: ModelRc::new(VecModel::from(
-                    r.segs
-                        .iter()
-                        .map(|(text, emph)| DiffSeg {
-                            text: SharedString::from(text.clone()),
-                            emph: *emph,
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-            })
-            .collect();
-        win.set_diff_rows(ModelRc::new(VecModel::from(rows)));
     }
 
     /// 插件市场状态 → property。
@@ -2115,8 +2105,11 @@ impl Shell {
         diff_cb!(on_diff_compare, |t| {
             t.compare();
         });
-        diff_cb!(on_diff_toggle_only_changes, |t| {
-            t.toggle_only_changes();
+        diff_cb!(on_diff_next_hunk, |t| {
+            t.next_hunk();
+        });
+        diff_cb!(on_diff_prev_hunk, |t| {
+            t.prev_hunk();
         });
         diff_cb!(on_diff_swap, |t| {
             t.swap();
@@ -2441,9 +2434,11 @@ impl Shell {
                 b.scroll_by(dl);
                 b.scroll_cols_by(dc);
             });
+            s.mirror_diff_scroll(&which);
         });
         editor_cb!(on_editor_scroll_line, |s, which, line| {
             s.with_buffer(&which, |b| b.scroll_to_line(line.max(0) as usize));
+            s.mirror_diff_scroll(&which);
         });
         editor_cb!(on_editor_click, |s, which, line, col, extend| {
             // 点回正文 = 焦点离开查找框，Enter 重新归换行。
@@ -2493,7 +2488,18 @@ impl Shell {
                     .toast(format!("已复制 {n} 行"));
                 Self::flush_shared(&shell.state, &win);
             }
-            if outcome.edited {
+            // Ctrl+V：`KeyOutcome.paste` 以前没有消费者 —— 粘贴在所有编辑区里
+            // 静默无效。剪贴板的读取绕 `.slint` 里那个 0×0 TextInput 的
+            // `paste()`（Slint 的 Rust API 不给读剪贴板的入口）。
+            let mut pasted = false;
+            if outcome.paste {
+                let text = win.invoke_paste_from_clipboard().to_string();
+                if !text.is_empty() {
+                    shell.with_buffer(&which, |b| b.insert_str(&text));
+                    pasted = true;
+                }
+            }
+            if outcome.edited || pasted {
                 shell.recompute(&which);
                 shell.persist_tool(&which);
             }
@@ -2599,6 +2605,18 @@ impl Shell {
                 p.run_if_dirty();
             }
         }
+    }
+
+    /// 对比工具的左右同步滚动：滚一侧，另一侧跳到同一处 diff 行。
+    ///
+    /// 别的工具没有「对侧」，直接返回 —— 这个函数挂在通用的滚动回调上。
+    fn mirror_diff_scroll(&self, which: &str) {
+        let from_left = match which {
+            "diff-left-in" => true,
+            "diff-right-in" => false,
+            _ => return,
+        };
+        self.diff.borrow_mut().mirror_scroll(from_left);
     }
 
     /// 把编辑区所属工具的草稿落盘。

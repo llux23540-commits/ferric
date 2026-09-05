@@ -138,50 +138,48 @@ export component IconButton inherits Rectangle {
 
     ta := TouchArea {
         enabled: root.enabled;
-        clicked => { root.clicked(); }
+        clicked => {
+            // 点下去就把气泡收掉：点完还悬着一句说明反而挡住刚变化的界面。
+            Tooltip.text = "";
+            root.clicked();
+        }
     }
 
     // 提示气泡：悬停 450ms 后出现（立刻出现的话扫过一排按钮会一路闪）。
-    // 画在按钮下方，用 PopupWindow 以免被工具条的布局裁掉。
+    //
+    // 气泡本体由 `AppWindow` 画在**最上层**（见下面的 `Tooltip` global）。
+    // 曾经用 PopupWindow：弹层会抢输入 —— 悬停出气泡之后按钮的下一次点击
+    // 被弹层吃掉，表现为「同一个按钮点第二下没反应」。
+    // 定时器**不能**在 triggered 里写 `self.running = false` —— 那会把上面的
+    // 绑定顶掉，气泡从此只出现一次。让它照常重复即可：每次触发写的是同一份
+    // 内容，幂等。
     delay := Timer {
         interval: 450ms;
-        running: root.tooltip != "" && ta.has-hover;
+        running: root.tooltip != "" && root.enabled && ta.has-hover;
         triggered => {
-            self.running = false;
-            tip.show();
+            Tooltip.text = root.tooltip;
+            Tooltip.x = root.absolute-position.x;
+            Tooltip.y = root.absolute-position.y + root.height + 6px;
         }
     }
 
-    changed has-hover-tip => {
-        if (!ta.has-hover) {
-            tip.close();
+    property <bool> hovering: ta.has-hover;
+    changed hovering => {
+        if (!root.hovering && Tooltip.text == root.tooltip) {
+            Tooltip.text = "";
         }
     }
-    property <bool> has-hover-tip: ta.has-hover;
+}
 
-    tip := PopupWindow {
-        x: 0;
-        y: root.height + 6px;
-        close-policy: no-auto-close;
-
-        Rectangle {
-            background: Theme.dark ? #1c2128 : #22272e;
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.border;
-            width: txt.preferred-width + 16px;
-            height: txt.preferred-height + 10px;
-
-            txt := Text {
-                text: root.tooltip;
-                font-family: Theme.font-ui;
-                font-size: 12px;
-                color: #f0f3f7;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-    }
+// 提示气泡的传声筒。
+//
+// 气泡必须画在所有内容之上，而 Slint 里「画在最上层」= 出现在根组件的最后 ——
+// 按钮自己画不到那儿去。于是按钮往这个 global 里写内容与坐标，
+// `AppWindow` 末尾照它渲染一层。
+export global Tooltip {
+    in-out property <string> text;
+    in-out property <length> x;
+    in-out property <length> y;
 }
 
 // 分段控件（segmented pill）。`options` 是标签数组，`current` 双向。
