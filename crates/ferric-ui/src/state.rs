@@ -39,7 +39,13 @@ pub struct AppState {
     pub mode: ThemeMode,
     pub dark: bool,
     pub ui_scale: f32,
+    /// 系统 DPI 给出的基准缩放（窗口建出来时读一次）。用户的 `ui_scale` 是
+    /// 在它之上的倍率 —— 不记住基准，第二次调整就会拿自己下发的值再乘一遍。
+    pub base_scale: f32,
     pub rail_width: f32,
+    /// 侧栏搜索词。只活在内存里（不持久化）—— 过滤在 Rust 侧算，
+    /// Slint 那边只负责显示输入框里的字。
+    pub rail_filter: String,
     pub auto_update: bool,
     pub shared: Shared,
     /// 内置工具数量。插件工具一律追加其后，热加载时按这个位置截断。
@@ -95,10 +101,10 @@ impl AppState {
             ThemeMode::System => persist.dark,
         };
 
-        let mut shared = Shared::new();
-        shared.lang = persist.lang;
-        // Slint 走 renderer-software，恒为软件渲染。
-        shared.gpu_software = true;
+        let mut shared = Shared {
+            lang: persist.lang,
+            ..Default::default()
+        };
         for w in plugin_warns {
             shared.toast(format!("插件加载失败 · {w}"));
         }
@@ -110,7 +116,9 @@ impl AppState {
             mode,
             dark,
             ui_scale: persist.ui_scale.clamp(0.8, 1.6),
+            base_scale: 1.0,
             rail_width: persist.rail_width.clamp(RAIL_MIN, RAIL_MAX),
+            rail_filter: String::new(),
             auto_update: persist.auto_update,
             shared,
             builtin_tools,
@@ -352,9 +360,46 @@ impl Shell {
     /// 建窗、灌初值、接回调，然后交出窗口句柄由调用方 `run()`。
     pub fn build_window(&self) -> Result<AppWindow, slint::PlatformError> {
         let win = AppWindow::new()?;
+        // 基准缩放必须在我们自己下发之前读：`scale_factor()` 之后返回的就是
+        // 下发过的值，再拿它当基准，每次调整都会在上一次的结果上再乘一遍。
+        self.state.borrow_mut().base_scale = win.window().scale_factor();
         self.sync_all(&win);
         self.wire(&win);
         Ok(win)
+    }
+
+    /// 把「界面缩放」落到窗口的 scale factor 上。
+    ///
+    /// Slint 没有 egui 的 `set_zoom_factor`：软件渲染器就是按窗口 scale factor
+    /// 光栅化的，所以用户倍率 × 系统 DPI 基准整体下发一次，字号、间距、编辑区
+    /// 行高全跟着走（各处写死的 px 一样被缩放）。
+    ///
+    /// ⚠️ 两个事件必须成对下发。`ScaleFactorChanged` 的语义是「DPI 变了，
+    /// 逻辑尺寸不变、物理尺寸跟着乘」—— 但窗口是 winit 的，物理尺寸压根没变，
+    /// 于是渲染器拿着 1280×800 的缓冲去画 1408×880 的窗口，直接 panic
+    ///（`buffer of size … is too small`，实测调到 110% 就崩）。
+    /// 紧跟一条 `Resized`（逻辑尺寸 = 物理 / 新 scale）把逻辑尺寸改小，
+    /// 物理尺寸就还是原样 —— 这也正是「同一个窗口里内容变大」要的效果。
+    /// 用 `set_size` 不行：那是给 winit 提请求，本帧 Slint 内部尺寸不会变。
+    ///
+    /// 幂等 —— 一次下发就是整窗重排，值没变时不动。
+    fn apply_scale(win: &AppWindow, base: f32, ui_scale: f32) {
+        let target = base * ui_scale;
+        if (win.window().scale_factor() - target).abs() < 0.001 {
+            return;
+        }
+        let physical = win.window().size();
+        win.window()
+            .dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+                scale_factor: target,
+            });
+        win.window()
+            .dispatch_event(slint::platform::WindowEvent::Resized {
+                size: slint::LogicalSize::new(
+                    physical.width as f32 / target,
+                    physical.height as f32 / target,
+                ),
+            });
     }
 
     /// 把全部状态灌进 Slint。
@@ -386,28 +431,18 @@ impl Shell {
         win.set_auto_update(s.auto_update);
         win.set_rail_width(s.rail_width);
         win.set_version(SharedString::from(crate::version()));
-        win.set_backend_label(SharedString::from("软渲染（CPU · Slint）"));
-        win.set_gpu_desc(SharedString::from(
-            "Slint software renderer —— 不建任何 GPU 上下文",
-        ));
-        win.set_gpu_software(true);
         win.set_data_dir(SharedString::from(
             crate::launch::data_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "（取不到数据目录）".to_owned()),
         ));
         win.set_mem_status(SharedString::from(s.mem_status.clone()));
-
-        // 侧栏底部的迁移进度。写成算出来的而不是硬编码文案 ——
-        // 每迁完一个工具只要 `Tool::migrated` 翻成 true，这里自动跟上。
-        let done = s.tools.iter().filter(|t| t.migrated()).count();
-        let total = s.tools.len();
-        win.set_migration_note(SharedString::from(if done == total {
-            "Slint 迁移已完成".to_owned()
-        } else {
-            format!("Slint 迁移中 · {done}/{total} 个工具已完成")
-        }));
         win.set_active_tool(s.active as i32);
+        let (base, scale) = (s.base_scale, s.ui_scale);
+        // 借用必须先放掉：下发 scale 会同步触发重排，重排里的回调（编辑区视口
+        // 变化等）要 borrow_mut 状态。
+        drop(s);
+        Self::apply_scale(win, base, scale);
     }
 
     /// 工具列表 → 侧栏模型。`filter` 为空则全部可见。
@@ -416,8 +451,20 @@ impl Shell {
     /// char 比（不能按字节切），交给 Rust 更稳。
     fn sync_tools(&self, win: &AppWindow) {
         let s = self.state.borrow();
-        let filter = win.get_rail_filter().to_string();
-        win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &filter))));
+        win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &s.rail_filter))));
+        drop(s);
+        Self::push_current(&self.state, win);
+    }
+
+    /// 灌「当前工具」（标题条 + 视图分派都看它）。
+    ///
+    /// 侧栏模型被搜索过滤后不再与 `AppState::tools` 下标一一对应，所以当前
+    /// 工具不能再由 Slint 从模型里按下标取，只能由 Rust 直接给。
+    fn push_current(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
+        let s = state.borrow();
+        if let Some(t) = s.tools.get(s.active) {
+            win.set_current(tool_entry(&s, s.active, t.as_ref()));
+        }
     }
 
     /// UUID 工具状态 → property。
@@ -732,7 +779,10 @@ impl Shell {
                 },
                 label: SharedString::from(r.label),
                 values: ModelRc::new(VecModel::from(
-                    r.values.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+                    r.values
+                        .into_iter()
+                        .map(SharedString::from)
+                        .collect::<Vec<_>>(),
                 )),
                 selected: r.selected as i32,
                 on: r.on,
@@ -788,6 +838,7 @@ impl Shell {
     fn wire(&self, win: &AppWindow) {
         self.wire_window(win);
         self.wire_navigation(win);
+        self.wire_palette(win);
         self.wire_settings(win);
         self.wire_uuid(win);
         self.wire_yaml(win);
@@ -863,6 +914,7 @@ impl Shell {
             };
             let Some(win) = w.upgrade() else { return };
             win.set_active_tool(i as i32);
+            Self::push_current(&state, &win);
 
             // 切到插件就把它的 manifest 控件与输入输出灌进去
             //（插件没有独立字段，是按当前选中项现取的）。
@@ -894,14 +946,112 @@ impl Shell {
             }
             shell_tools();
         });
+
+        // 搜索框：过滤在 Rust 侧算（见 `tool_rows`），词也存在 Rust 侧 ——
+        // 内建 TextInput 的 text 只是显示用的那一份。
+        let state = self.state.clone();
+        let shell_tools = self.clone_tools_syncer(win);
+        win.on_filter_changed(move |t| {
+            state.borrow_mut().rail_filter = t.to_string();
+            shell_tools();
+        });
+    }
+
+    /// 命令面板：Ctrl+K 打开，输入即过滤（与侧栏同一套匹配规则），
+    /// ↑↓ 选择、回车打开、Esc 关闭。
+    ///
+    /// 全部按键都拦在 winit 的窗口事件上，而不是 `.slint` 的 `FocusScope`：
+    /// - Ctrl+K 要「焦点在哪都生效」，挂 FocusScope 就得让它包住整棵内容树
+    ///   （编辑区打字时焦点正落在 TextInput 上）；
+    /// - ↑↓ 与回车会被单行 TextInput 自己吃掉，根本冒泡不到祖先。
+    ///
+    /// winit 这一层在 Slint 之前看到按键。`KeyEvent` 不带修饰键状态，
+    /// 所以 Ctrl 得自己跟着 `ModifiersChanged` 记。
+    fn wire_palette(&self, win: &AppWindow) {
+        use slint::winit_030::winit::event::{ElementState, WindowEvent};
+        use slint::winit_030::winit::keyboard::{Key, NamedKey};
+        use slint::winit_030::{EventResult, WinitWindowAccessor};
+        // 面板的行是个 Model：读 row_count / row_data 要这个 trait 在作用域里。
+        use slint::Model;
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        let ctrl = Rc::new(std::cell::Cell::new(false));
+        win.window().on_winit_window_event(move |_, ev| {
+            if let WindowEvent::ModifiersChanged(m) = ev {
+                ctrl.set(m.state().control_key());
+                return EventResult::Propagate;
+            }
+            let WindowEvent::KeyboardInput { event, .. } = ev else {
+                return EventResult::Propagate;
+            };
+            if event.state != ElementState::Pressed {
+                return EventResult::Propagate;
+            }
+            let Some(win) = w.upgrade() else {
+                return EventResult::Propagate;
+            };
+
+            let key = event.logical_key.as_ref();
+            if ctrl.get() && matches!(key, Key::Character("k" | "K")) {
+                // 每次打开都从空词开始：上一次的搜索词留着更碍事。
+                let rows = tool_rows(&state.borrow(), "");
+                win.set_palette_query(SharedString::new());
+                win.set_palette_sel(0);
+                win.set_palette_rows(ModelRc::new(VecModel::from(rows)));
+                win.set_palette_open(true);
+                // 别把 Ctrl+K 再交给 Slint —— 编辑区里它会被当成普通按键。
+                return EventResult::PreventDefault;
+            }
+            if !win.get_palette_open() {
+                return EventResult::Propagate;
+            }
+
+            let rows = win.get_palette_rows();
+            let last = rows.row_count().saturating_sub(1) as i32;
+            let sel = win.get_palette_sel().clamp(0, last.max(0));
+            match key {
+                Key::Named(NamedKey::Escape) => win.set_palette_open(false),
+                Key::Named(NamedKey::ArrowUp) => win.set_palette_sel((sel - 1).max(0)),
+                Key::Named(NamedKey::ArrowDown) => win.set_palette_sel((sel + 1).min(last)),
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(row) = rows.row_data(sel.max(0) as usize) {
+                        win.set_palette_open(false);
+                        win.invoke_select_tool(row.idx);
+                    }
+                }
+                _ => return EventResult::Propagate,
+            }
+            EventResult::PreventDefault
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_palette_query_changed(move |t| {
+            let Some(win) = w.upgrade() else { return };
+            let rows = {
+                let s = state.borrow();
+                tool_rows(&s, t.as_str())
+            };
+            win.set_palette_rows(ModelRc::new(VecModel::from(rows)));
+            // 词一变，上一次的高亮下标就没意义了。
+            win.set_palette_sel(0);
+        });
     }
 
     /// 设置：主题、缩放、更新、数据目录、内存采样。
+    ///
+    /// 这些回调由 `.slint` 里的 `changed <属性>` 触发，因此 **Rust 自己灌值那一拍
+    /// 也会走进来**（`sync_shell` 一次 set_* 就是一次 changed）。每个回调开头
+    /// 都按值相等提前返回：否则每次同步都会重写一遍 app.ron。
     fn wire_settings(&self, win: &AppWindow) {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_theme_changed(move |idx| {
             let mut s = state.borrow_mut();
+            if s.mode.index() == idx {
+                return;
+            }
             s.mode = ThemeMode::from_index(idx);
             s.dark = match s.mode {
                 ThemeMode::Light => false,
@@ -919,10 +1069,48 @@ impl Shell {
         });
 
         let state = self.state.clone();
+        let w = win.as_weak();
         win.on_scale_changed(move |v| {
             let mut s = state.borrow_mut();
-            s.ui_scale = v.clamp(0.8, 1.6);
+            let v = v.clamp(0.8, 1.6);
+            if (s.ui_scale - v).abs() < f32::EPSILON {
+                return;
+            }
+            s.ui_scale = v;
             s.save();
+            let base = s.base_scale;
+            drop(s);
+            if let Some(win) = w.upgrade() {
+                Self::apply_scale(&win, base, v);
+            }
+        });
+
+        let state = self.state.clone();
+        win.on_auto_update_changed(move |on| {
+            let mut s = state.borrow_mut();
+            if s.auto_update == on {
+                return;
+            }
+            // 只落到状态里：心跳 `tick` 每秒读它，关掉的下一拍就不再自动检查。
+            s.auto_update = on;
+            s.save();
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_rail_width_changed(move |px| {
+            let mut s = state.borrow_mut();
+            let px = px.clamp(RAIL_MIN, RAIL_MAX);
+            if (s.rail_width - px).abs() < f32::EPSILON {
+                return;
+            }
+            s.rail_width = px;
+            s.save();
+            drop(s);
+            // 界面上拖过界时把夹住后的值推回去（推回来的那一拍会因值相等返回）。
+            if let Some(win) = w.upgrade() {
+                win.set_rail_width(px);
+            }
         });
 
         let state = self.state.clone();
@@ -1135,7 +1323,10 @@ impl Shell {
             }
             let n = text.lines().count();
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast(format!("已复制 {n} 行 YAML"));
+            state
+                .borrow_mut()
+                .shared
+                .toast(format!("已复制 {n} 行 YAML"));
             if let Some(win) = w.upgrade() {
                 Self::flush_toasts(&state, &win);
             }
@@ -1167,10 +1358,18 @@ impl Shell {
             }};
         }
 
-        sql_btn!(on_sql_format, |t| { t.format(); });
-        sql_btn!(on_sql_minify, |t| { t.minify(); });
-        sql_btn!(on_sql_toggle_uppercase, |t| { t.toggle_uppercase(); });
-        sql_btn!(on_sql_clear, |t| { t.clear(); });
+        sql_btn!(on_sql_format, |t| {
+            t.format();
+        });
+        sql_btn!(on_sql_minify, |t| {
+            t.minify();
+        });
+        sql_btn!(on_sql_toggle_uppercase, |t| {
+            t.toggle_uppercase();
+        });
+        sql_btn!(on_sql_clear, |t| {
+            t.clear();
+        });
 
         let sql = self.sql.clone();
         let state = self.state.clone();
@@ -1182,7 +1381,10 @@ impl Shell {
             }
             let n = text.lines().count();
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast(format!("已复制 {n} 行 SQL"));
+            state
+                .borrow_mut()
+                .shared
+                .toast(format!("已复制 {n} 行 SQL"));
             if let Some(win) = w.upgrade() {
                 Self::flush_toasts(&state, &win);
             }
@@ -1368,14 +1570,28 @@ impl Shell {
             }};
         }
 
-        crypto_cb!(on_crypto_encrypt, |t| { t.encrypt(); });
-        crypto_cb!(on_crypto_decrypt, |t| { t.decrypt(); });
-        crypto_cb!(on_crypto_send_to_decrypt, |t| { t.send_to_decrypt(); });
-        crypto_cb!(on_crypto_enc_algo_changed, |t, i| { t.set_enc_algo(i); });
-        crypto_cb!(on_crypto_dec_algo_changed, |t, i| { t.set_dec_algo(i); });
+        crypto_cb!(on_crypto_encrypt, |t| {
+            t.encrypt();
+        });
+        crypto_cb!(on_crypto_decrypt, |t| {
+            t.decrypt();
+        });
+        crypto_cb!(on_crypto_send_to_decrypt, |t| {
+            t.send_to_decrypt();
+        });
+        crypto_cb!(on_crypto_enc_algo_changed, |t, i| {
+            t.set_enc_algo(i);
+        });
+        crypto_cb!(on_crypto_dec_algo_changed, |t, i| {
+            t.set_dec_algo(i);
+        });
         // 口令只进内存，不落盘（save_draft 本来就不含它）。
-        crypto_cb!(on_crypto_enc_key_edited, |t, k| { t.enc.key = k.to_string(); });
-        crypto_cb!(on_crypto_dec_key_edited, |t, k| { t.dec.key = k.to_string(); });
+        crypto_cb!(on_crypto_enc_key_edited, |t, k| {
+            t.enc.key = k.to_string();
+        });
+        crypto_cb!(on_crypto_dec_key_edited, |t, k| {
+            t.dec.key = k.to_string();
+        });
 
         let crypto = self.crypto.clone();
         let state = self.state.clone();
@@ -1459,21 +1675,51 @@ impl Shell {
             }};
         }
 
-        gm_cb!(on_gm_gen_keypair, |t| { t.gen_keypair(); });
-        gm_cb!(on_gm_derive_pub, |t| { t.derive_pub(); });
-        gm_cb!(on_gm_encrypt, |t| { t.encrypt(); });
-        gm_cb!(on_gm_decrypt, |t| { t.decrypt(); });
-        gm_cb!(on_gm_send_to_decrypt, |t| { t.send_to_decrypt(); });
-        gm_cb!(on_gm_sign, |t| { t.sign(); });
-        gm_cb!(on_gm_verify, |t| { t.verify(); });
-        gm_cb!(on_gm_enc_algo_changed, |t, i| { t.set_enc_algo(i); });
-        gm_cb!(on_gm_dec_algo_changed, |t, i| { t.set_dec_algo(i); });
-        gm_cb!(on_gm_fmt_changed, |t, i| { t.set_fmt(i); });
-        gm_cb!(on_gm_enc_key_edited, |t, k| { t.enc_key = k.to_string(); });
-        gm_cb!(on_gm_dec_key_edited, |t, k| { t.dec_key = k.to_string(); });
-        gm_cb!(on_gm_pub_key_edited, |t, k| { t.pub_key = k.to_string(); });
-        gm_cb!(on_gm_priv_key_edited, |t, k| { t.priv_key = k.to_string(); });
-        gm_cb!(on_gm_sig_hex_edited, |t, h| { t.sig_hex = h.to_string(); });
+        gm_cb!(on_gm_gen_keypair, |t| {
+            t.gen_keypair();
+        });
+        gm_cb!(on_gm_derive_pub, |t| {
+            t.derive_pub();
+        });
+        gm_cb!(on_gm_encrypt, |t| {
+            t.encrypt();
+        });
+        gm_cb!(on_gm_decrypt, |t| {
+            t.decrypt();
+        });
+        gm_cb!(on_gm_send_to_decrypt, |t| {
+            t.send_to_decrypt();
+        });
+        gm_cb!(on_gm_sign, |t| {
+            t.sign();
+        });
+        gm_cb!(on_gm_verify, |t| {
+            t.verify();
+        });
+        gm_cb!(on_gm_enc_algo_changed, |t, i| {
+            t.set_enc_algo(i);
+        });
+        gm_cb!(on_gm_dec_algo_changed, |t, i| {
+            t.set_dec_algo(i);
+        });
+        gm_cb!(on_gm_fmt_changed, |t, i| {
+            t.set_fmt(i);
+        });
+        gm_cb!(on_gm_enc_key_edited, |t, k| {
+            t.enc_key = k.to_string();
+        });
+        gm_cb!(on_gm_dec_key_edited, |t, k| {
+            t.dec_key = k.to_string();
+        });
+        gm_cb!(on_gm_pub_key_edited, |t, k| {
+            t.pub_key = k.to_string();
+        });
+        gm_cb!(on_gm_priv_key_edited, |t, k| {
+            t.priv_key = k.to_string();
+        });
+        gm_cb!(on_gm_sig_hex_edited, |t, h| {
+            t.sig_hex = h.to_string();
+        });
     }
 
     /// 时间戳工具。
@@ -1542,13 +1788,25 @@ impl Shell {
             }};
         }
 
-        ts_cb!(on_ts_toggle_running, false, |t| { t.toggle_running(); });
-        ts_cb!(on_ts_use_now, false, |t| { t.use_now(); });
-        ts_cb!(on_ts_input_edited, false, |t, v| { t.set_ts_input(&v); });
-        ts_cb!(on_ts_date_edited, false, |t, v| { t.set_date_input(&v); });
+        ts_cb!(on_ts_toggle_running, false, |t| {
+            t.toggle_running();
+        });
+        ts_cb!(on_ts_use_now, false, |t| {
+            t.use_now();
+        });
+        ts_cb!(on_ts_input_edited, false, |t, v| {
+            t.set_ts_input(&v);
+        });
+        ts_cb!(on_ts_date_edited, false, |t, v| {
+            t.set_date_input(&v);
+        });
         // 这两个会改时区列表 / 选中项，要重建列表
-        ts_cb!(on_ts_filter_edited, true, |t, f| { t.set_filter(&f); });
-        ts_cb!(on_ts_select_tz, false, |t, n| { t.select_tz(&n); });
+        ts_cb!(on_ts_filter_edited, true, |t, f| {
+            t.set_filter(&f);
+        });
+        ts_cb!(on_ts_select_tz, false, |t, n| {
+            t.select_tz(&n);
+        });
 
         let ts = self.ts.clone();
         let state = self.state.clone();
@@ -1598,20 +1856,48 @@ impl Shell {
             }};
         }
 
-        json_cb!(on_json_format, |t| { t.format(); });
-        json_cb!(on_json_minify, |t| { t.minify(); });
-        json_cb!(on_json_escape, |t| { t.escape(); });
-        json_cb!(on_json_unescape, |t| { t.unescape(); });
-        json_cb!(on_json_toggle_sort, |t| { t.toggle_sort(); });
-        json_cb!(on_json_toggle_wrap, |t| { t.toggle_wrap(); });
-        json_cb!(on_json_clear, |t| { t.clear(); });
-        json_cb!(on_json_undo, |t| { t.undo(); });
-        json_cb!(on_json_redo, |t| { t.redo(); });
-        json_cb!(on_json_search, |t| { t.search(); });
-        json_cb!(on_json_next_hit, |t| { t.next_hit(); });
-        json_cb!(on_json_prev_hit, |t| { t.prev_hit(); });
-        json_cb!(on_json_indent_changed, |t, i| { t.set_indent_index(i); });
-        json_cb!(on_json_find_edited, |t, f| { t.set_find(&f); });
+        json_cb!(on_json_format, |t| {
+            t.format();
+        });
+        json_cb!(on_json_minify, |t| {
+            t.minify();
+        });
+        json_cb!(on_json_escape, |t| {
+            t.escape();
+        });
+        json_cb!(on_json_unescape, |t| {
+            t.unescape();
+        });
+        json_cb!(on_json_toggle_sort, |t| {
+            t.toggle_sort();
+        });
+        json_cb!(on_json_toggle_wrap, |t| {
+            t.toggle_wrap();
+        });
+        json_cb!(on_json_clear, |t| {
+            t.clear();
+        });
+        json_cb!(on_json_undo, |t| {
+            t.undo();
+        });
+        json_cb!(on_json_redo, |t| {
+            t.redo();
+        });
+        json_cb!(on_json_search, |t| {
+            t.search();
+        });
+        json_cb!(on_json_next_hit, |t| {
+            t.next_hit();
+        });
+        json_cb!(on_json_prev_hit, |t| {
+            t.prev_hit();
+        });
+        json_cb!(on_json_indent_changed, |t, i| {
+            t.set_indent_index(i);
+        });
+        json_cb!(on_json_find_edited, |t, f| {
+            t.set_find(&f);
+        });
 
         let json = self.json.clone();
         let state = self.state.clone();
@@ -1665,10 +1951,18 @@ impl Shell {
             }};
         }
 
-        diff_cb!(on_diff_compare, |t| { t.compare(); });
-        diff_cb!(on_diff_toggle_only_changes, |t| { t.toggle_only_changes(); });
-        diff_cb!(on_diff_swap, |t| { t.swap(); });
-        diff_cb!(on_diff_clear, |t| { t.clear(); });
+        diff_cb!(on_diff_compare, |t| {
+            t.compare();
+        });
+        diff_cb!(on_diff_toggle_only_changes, |t| {
+            t.toggle_only_changes();
+        });
+        diff_cb!(on_diff_swap, |t| {
+            t.swap();
+        });
+        diff_cb!(on_diff_clear, |t| {
+            t.clear();
+        });
 
         let diff = self.diff.clone();
         let state = self.state.clone();
@@ -1680,7 +1974,10 @@ impl Shell {
             }
             let n = text.lines().count();
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast(format!("已复制 {n} 行差异"));
+            state
+                .borrow_mut()
+                .shared
+                .toast(format!("已复制 {n} 行差异"));
             if let Some(win) = w.upgrade() {
                 Self::flush_toasts(&state, &win);
             }
@@ -1763,11 +2060,21 @@ impl Shell {
             }};
         }
 
-        market_cb!(on_market_refresh, |t, src| { t.refresh(src.as_ref()); });
-        market_cb!(on_market_update_all, |t, src| { t.update_all(src.as_ref()); });
-        market_cb!(on_market_install, |t, src, slug| { t.install(src.as_ref(), &slug); });
-        market_cb!(on_market_uninstall, |t, src, slug| { t.uninstall(src.as_ref(), &slug); });
-        market_cb!(on_market_query_edited, |t, _src, q| { t.set_query(&q); });
+        market_cb!(on_market_refresh, |t, src| {
+            t.refresh(src.as_ref());
+        });
+        market_cb!(on_market_update_all, |t, src| {
+            t.update_all(src.as_ref());
+        });
+        market_cb!(on_market_install, |t, src, slug| {
+            t.install(src.as_ref(), &slug);
+        });
+        market_cb!(on_market_uninstall, |t, src, slug| {
+            t.uninstall(src.as_ref(), &slug);
+        });
+        market_cb!(on_market_query_edited, |t, _src, q| {
+            t.set_query(&q);
+        });
     }
 
     /// WASM 插件视图。
@@ -1808,7 +2115,9 @@ impl Shell {
         win.on_plugin_copy(move || {
             let text = {
                 let s = state.borrow();
-                s.active_plugin().map(|p| p.output.text()).unwrap_or_default()
+                s.active_plugin()
+                    .map(|p| p.output.text())
+                    .unwrap_or_default()
             };
             if text.is_empty() {
                 return;
@@ -1847,7 +2156,12 @@ impl Shell {
                 let (src, auto, stale, now) = {
                     let mut s = state.borrow_mut();
                     s.update_clock += 1.0;
-                    (s.source(), s.auto_update, s.update_check_is_stale(), s.update_clock)
+                    (
+                        s.source(),
+                        s.auto_update,
+                        s.update_check_is_stale(),
+                        s.update_clock,
+                    )
                 };
 
                 let tick = {
@@ -1993,7 +2307,11 @@ impl Shell {
             if let Some(payload) = outcome.copy {
                 let n = payload.lines().count();
                 shell.state.borrow_mut().shared.copy(payload);
-                shell.state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+                shell
+                    .state
+                    .borrow_mut()
+                    .shared
+                    .toast(format!("已复制 {n} 行"));
                 Self::flush_toasts(&shell.state, &win);
             }
             if outcome.edited {
@@ -2164,9 +2482,12 @@ impl Shell {
         let w = win.as_weak();
         move || {
             let Some(win) = w.upgrade() else { return };
-            let s = state.borrow();
-            let filter = win.get_rail_filter().to_string();
-            win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &filter))));
+            {
+                let s = state.borrow();
+                win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &s.rail_filter))));
+            }
+            // 收藏星标也画在「当前工具」上，模型重建后它得跟着更新。
+            Self::push_current(&state, &win);
         }
     }
 }
@@ -2183,35 +2504,44 @@ fn fmt_size(bytes: i64) -> String {
     }
 }
 
-/// 工具列表 → Slint 侧栏模型行。
+/// 工具列表 → Slint 侧栏模型行。**只产出命中搜索的行**。
 ///
-/// `filter` 空串 = 全部可见；否则按 **名称 / 描述 / 关键词** 三处做
-/// 大小写无关的包含匹配（关键词是拼音缩写等别名的入口，例如 `sjc` → 时间戳）。
+/// `filter` 空串 = 全部；否则按 **名称 / 描述 / 关键词** 三处做大小写无关的
+/// 包含匹配（关键词是拼音缩写等别名的入口，例如 `sjc` → 时间戳）。
+///
+/// 不命中的行直接不进模型，而不是给一个 `visible: false` —— Slint 的布局
+/// 不会跳过隐藏子项，那样过滤完侧栏里全是等高的空洞。行里带 `idx`
+/// （在 `AppState::tools` 里的下标）供选中 / 收藏回调使用。
 fn tool_rows(s: &AppState, filter: &str) -> Vec<ToolEntry> {
     let needle = filter.trim().to_lowercase();
     s.tools
         .iter()
-        .map(|t| {
+        .enumerate()
+        .filter(|(_, t)| {
             let m = t.meta();
-            let visible = needle.is_empty()
+            needle.is_empty()
                 || m.name.to_lowercase().contains(&needle)
                 || m.desc.to_lowercase().contains(&needle)
-                || m
-                    .keywords
+                || m.keywords
                     .iter()
-                    .any(|k| k.to_lowercase().contains(&needle));
-            ToolEntry {
-                id: SharedString::from(m.id),
-                name: SharedString::from(m.name),
-                desc: SharedString::from(m.desc),
-                icon: SharedString::from(m.icon.to_string()),
-                group: SharedString::from(m.group),
-                migrated: t.migrated(),
-                favorite: s.favorites.contains(m.id),
-                visible,
-            }
+                    .any(|k| k.to_lowercase().contains(&needle))
         })
+        .map(|(i, t)| tool_entry(s, i, t.as_ref()))
         .collect()
+}
+
+/// 单行工具元信息 → Slint 结构体。侧栏与「当前工具」标题共用。
+fn tool_entry(s: &AppState, idx: usize, t: &dyn Tool) -> ToolEntry {
+    let m = t.meta();
+    ToolEntry {
+        idx: idx as i32,
+        id: SharedString::from(m.id),
+        name: SharedString::from(m.name),
+        desc: SharedString::from(m.desc),
+        icon: SharedString::from(m.icon.to_string()),
+        group: SharedString::from(m.group),
+        favorite: s.favorites.contains(m.id),
+    }
 }
 
 #[cfg(test)]
@@ -2228,18 +2558,30 @@ mod tests {
     }
 
     #[test]
-    fn rail_width_is_clamped_into_usable_range() {
-        // 侧栏宽度来自可写的状态文件，越界值必须夹住，否则侧栏可能被拖没或占满。
-        let mut p = Persist::default();
-        p.rail_width = 5000.0;
-        assert!(p.rail_width.clamp(RAIL_MIN, RAIL_MAX) <= RAIL_MAX);
-        p.rail_width = -20.0;
-        assert!(p.rail_width.clamp(RAIL_MIN, RAIL_MAX) >= RAIL_MIN);
-    }
+    fn filtered_sidebar_rows_carry_their_index_into_tools() {
+        // 侧栏点选 / 收藏都按行里的 `idx` 派发。搜索会把不命中的行整行剔掉，
+        // 循环下标与工具下标从此不再一致 —— 这条守的就是「点 A 打开 A」。
+        let s = AppState::load();
 
-    #[test]
-    fn ui_scale_is_clamped_into_usable_range() {
-        assert_eq!(0.2_f32.clamp(0.8, 1.6), 0.8);
-        assert_eq!(9.0_f32.clamp(0.8, 1.6), 1.6);
+        let all = tool_rows(&s, "");
+        assert_eq!(all.len(), s.tools.len(), "空搜索词必须给出全部工具");
+
+        let hits = tool_rows(&s, "json");
+        assert!(
+            hits.len() < all.len(),
+            "「json」应当筛掉一部分工具，否则这条测不到过滤"
+        );
+        for r in &hits {
+            assert_eq!(
+                s.tools[r.idx as usize].meta().id,
+                r.id.as_str(),
+                "idx 必须能在 tools 里取回同一个工具"
+            );
+        }
+
+        assert!(
+            tool_rows(&s, "没有这个工具的名字").is_empty(),
+            "一个都不命中就该是空列表（而不是全部照旧）"
+        );
     }
 }

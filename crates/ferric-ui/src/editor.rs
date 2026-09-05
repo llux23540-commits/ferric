@@ -566,11 +566,7 @@ impl TextBuffer {
                 let end = if l == lb { cb } else { self.line_len(l) };
                 // 空行的选区也要看得见 —— 给一格宽度表示「这一行被选中了」
                 let width = end.saturating_sub(start).max(if l < lb { 1 } else { 0 });
-                (
-                    l - top,
-                    start.saturating_sub(self.scroll_col),
-                    width,
-                )
+                (l - top, start.saturating_sub(self.scroll_col), width)
             })
             .collect()
     }
@@ -593,13 +589,14 @@ mod tests {
         let mut b = buf(&text);
         b.set_viewport(40, 100);
         assert_eq!(b.total_lines(), 50_001);
-        assert_eq!(b.visible_lines().len(), 40, "交给渲染层的行数必须等于视口高度");
+        assert_eq!(
+            b.visible_lines().len(),
+            40,
+            "交给渲染层的行数必须等于视口高度"
+        );
 
         b.scroll_to_line(49_990);
-        assert!(
-            b.visible_lines().len() <= 40,
-            "滚到末尾也不能超过视口高度"
-        );
+        assert!(b.visible_lines().len() <= 40, "滚到末尾也不能超过视口高度");
     }
 
     #[test]
@@ -764,7 +761,10 @@ mod tests {
             "高亮矩形数必须受视口约束，实际 {}",
             spans.len()
         );
-        assert!(spans.iter().all(|(l, _, _)| *l < 25), "行号必须是视口内坐标");
+        assert!(
+            spans.iter().all(|(l, _, _)| *l < 25),
+            "行号必须是视口内坐标"
+        );
     }
 
     #[test]

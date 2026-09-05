@@ -89,10 +89,6 @@ impl Tool for YamlTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&YamlDraft {
             input: self.input.text(),

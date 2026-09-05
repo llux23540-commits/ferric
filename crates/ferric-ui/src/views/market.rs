@@ -106,7 +106,8 @@ impl MarketTool {
             if let Some(item) = self.items.iter().find(|i| i.slug == slug) {
                 if !self.queue.iter().any(|q| q.slug == slug) {
                     self.queue.push(item.clone());
-                    self.status = format!("已排队：{}（前面还有 {} 个）", item.name, self.queue.len());
+                    self.status =
+                        format!("已排队：{}（前面还有 {} 个）", item.name, self.queue.len());
                 }
             }
             return;
@@ -286,10 +287,6 @@ impl Tool for MarketTool {
             group: "扩展",
             keywords: &["plugin", "market", "插件", "市场", "扩展"],
         }
-    }
-
-    fn migrated(&self) -> bool {
-        true
     }
 
     // 市场不持久化草稿：列表是服务端状态，搜索词存下来只会让下次进来

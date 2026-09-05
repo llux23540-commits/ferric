@@ -837,7 +837,10 @@ mod tests {
     #[test]
     fn auto_pipeline_stays_idle_when_disabled_or_sourceless() {
         let mut u = Updater::default();
-        assert_eq!(u.tick(100.0, Some(&Source::Mock), false, true), Tick::Nothing);
+        assert_eq!(
+            u.tick(100.0, Some(&Source::Mock), false, true),
+            Tick::Nothing
+        );
         assert!(matches!(u.phase, Phase::Idle), "关掉开关后仍然发起了检查");
 
         let mut u = Updater::default();
@@ -846,7 +849,10 @@ mod tests {
 
         // 距上次检查还不够久 → 这一轮不查（跨启动节流）
         let mut u = Updater::default();
-        assert_eq!(u.tick(100.0, Some(&Source::Mock), true, false), Tick::Nothing);
+        assert_eq!(
+            u.tick(100.0, Some(&Source::Mock), true, false),
+            Tick::Nothing
+        );
         assert!(matches!(u.phase, Phase::Idle), "节流期内不该发起检查");
     }
 
@@ -864,7 +870,12 @@ mod tests {
         );
 
         // 时间推过去 → 应当真的发起检查
-        u.tick(FIRST_CHECK_DELAY_SECS + 1.0, Some(&Source::Mock), true, true);
+        u.tick(
+            FIRST_CHECK_DELAY_SECS + 1.0,
+            Some(&Source::Mock),
+            true,
+            true,
+        );
         assert!(matches!(u.phase, Phase::Checking), "到点了却没发起检查");
     }
 
@@ -890,7 +901,10 @@ mod tests {
             ..Default::default()
         };
         u2.tick(100.0, Some(&Source::Mock), true, false);
-        assert!(matches!(u2.phase, Phase::Available(_)), "自动下载重复触发了");
+        assert!(
+            matches!(u2.phase, Phase::Available(_)),
+            "自动下载重复触发了"
+        );
     }
 
     /// 自定义更新源**不许**后台自动下载 —— 那个地址可能是用户被诱导改的，
@@ -928,7 +942,10 @@ mod tests {
         ));
         for _ in 0..5 {
             assert!(
-                matches!(u.tick(100.0, Some(&Source::Mock), true, false), Tick::Nothing),
+                matches!(
+                    u.tick(100.0, Some(&Source::Mock), true, false),
+                    Tick::Nothing
+                ),
                 "已就绪的提示重复弹了"
             );
         }

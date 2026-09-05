@@ -154,10 +154,6 @@ impl Tool for CryptoTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     /// **只存输入与算法，不存口令**。`app.ron` 是当前用户可写的普通文件；
     /// 口令写进去等于把它交给任何同用户进程。与 egui 版一致。
     fn save_draft(&self) -> Option<String> {
@@ -241,7 +237,11 @@ mod tests {
             assert!(t.enc.ok, "{:?} 加密失败：{}", algo, t.enc.status);
             t.send_to_decrypt();
             assert!(t.dec.ok, "{:?} 解密失败：{}", algo, t.dec.status);
-            assert_eq!(t.dec.output.text(), "payload-中文-123", "{algo:?} 往返不一致");
+            assert_eq!(
+                t.dec.output.text(),
+                "payload-中文-123",
+                "{algo:?} 往返不一致"
+            );
         }
     }
 

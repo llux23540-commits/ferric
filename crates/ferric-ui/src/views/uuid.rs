@@ -197,10 +197,6 @@ impl Tool for UuidTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&UuidDraft {
             kind: self.kind,
@@ -239,16 +235,18 @@ mod tests {
 
     #[test]
     fn draft_roundtrip_preserves_every_field() {
-        let mut t = UuidTool::default();
-        t.kind = IdKind::UuidV5;
-        t.count = 42;
-        t.namespace = Namespace::Url;
-        t.custom_ns = "6ba7b810-9dad-11d1-80b4-00c04fd430c8".into();
-        t.name = "ferric.dev".into();
-        t.upper = true;
-        t.nohyphen = true;
-        t.as_json = true;
-        t.hist_keep = 20;
+        let t = UuidTool {
+            kind: IdKind::UuidV5,
+            count: 42,
+            namespace: Namespace::Url,
+            custom_ns: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".into(),
+            name: "ferric.dev".into(),
+            upper: true,
+            nohyphen: true,
+            as_json: true,
+            hist_keep: 20,
+            ..Default::default()
+        };
 
         let saved = t.save_draft().expect("UUID 工具必须持久化草稿");
         let mut restored = UuidTool::default();
@@ -277,8 +275,10 @@ mod tests {
 
     #[test]
     fn shrinking_history_keep_trims_existing_entries() {
-        let mut t = UuidTool::default();
-        t.hist_keep = 20;
+        let mut t = UuidTool {
+            hist_keep: 20,
+            ..Default::default()
+        };
         for _ in 0..12 {
             t.regen();
         }

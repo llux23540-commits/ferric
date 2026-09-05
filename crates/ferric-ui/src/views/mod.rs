@@ -5,13 +5,11 @@
 //!
 //! 新增一个工具需要四步：
 //!
-//! 1. 写 `views/<id>.rs`（形状参照 `views/uuid.rs`：状态 + 业务 + 索引映射
-//!    + `migrated() -> true`）；
-//! 2. 在 `ui/app.slint` 里加视图组件与分支；
+//! 1. 写 `views/<id>.rs`（形状参照 `views/uuid.rs`：状态 + 业务 + 索引映射）；
+//! 2. 在 `ui/app.slint` 里加视图组件与 `root.current.id` 分支 —— 漏了这步内容区
+//!    会是空白；
 //! 3. 在这里注册一行（侧栏顺序 = 此处顺序，与 egui 版逐项对齐，不要重排）；
 //! 4. 若带编辑区，在 `state.rs` 的 `Shell::with_buffer` 里加映射。
-//!
-//! `every_builtin_tool_is_migrated` 守着「新工具别忘了实现视图」。
 
 mod crypto;
 mod diff;
@@ -63,12 +61,6 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_keeps_all_eleven_tools_visible_during_migration() {
-        // 迁移期间侧栏不能少工具 —— 少了对用户就是功能回归。
-        assert_eq!(registry().len(), 11);
-    }
-
-    #[test]
     fn tool_ids_are_unique_and_match_legacy_set() {
         // id 是 Persist.drafts 的键。改一个就等于把老用户那条草稿孤立掉。
         let ids: Vec<&str> = registry().iter().map(|t| t.meta().id).collect();
@@ -94,21 +86,6 @@ mod tests {
             ids.into_iter().collect::<HashSet<&str>>(),
             legacy,
             "id 集合必须与 egui 版完全一致，否则老用户草稿会丢"
-        );
-    }
-
-    #[test]
-    fn every_builtin_tool_is_migrated() {
-        // 迁移收尾的守门人：内置工具**全部**已有 Slint 视图。
-        // 将来新增工具若忘了实现视图，这条会红。
-        let pending: Vec<&str> = registry()
-            .iter()
-            .filter(|t| !t.migrated())
-            .map(|t| t.meta().id)
-            .collect();
-        assert!(
-            pending.is_empty(),
-            "这些内置工具还没有 Slint 视图：{pending:?}"
         );
     }
 }

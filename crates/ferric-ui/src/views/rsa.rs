@@ -101,10 +101,7 @@ impl RsaTool {
     }
 
     pub fn bits_index(&self) -> i32 {
-        BITS_OPTS
-            .iter()
-            .position(|b| *b == self.bits)
-            .unwrap_or(1) as i32
+        BITS_OPTS.iter().position(|b| *b == self.bits).unwrap_or(1) as i32
     }
 
     /// 换位数。**不自动生成** —— 用户可能只是想看看有哪些档位，
@@ -129,10 +126,6 @@ impl Tool for RsaTool {
             group: "加密",
             keywords: &["rsa", "key", "密钥", "pem", "公钥", "私钥"],
         }
-    }
-
-    fn migrated(&self) -> bool {
-        true
     }
 
     /// 只存位数。**绝不持久化私钥** —— `app.ron` 是当前用户可写的普通文件，
@@ -221,7 +214,8 @@ mod tests {
         let mut t = RsaTool::default();
         t.priv_pem
             .set_text("-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----");
-        t.pub_pem.set_text("-----BEGIN PUBLIC KEY-----\nPUB\n-----END PUBLIC KEY-----");
+        t.pub_pem
+            .set_text("-----BEGIN PUBLIC KEY-----\nPUB\n-----END PUBLIC KEY-----");
         let saved = t.save_draft().expect("必须持久化位数");
         assert!(!saved.contains("SECRET"), "草稿里出现了私钥内容：{saved}");
         assert!(!saved.contains("PRIVATE"), "草稿里出现了私钥字样：{saved}");

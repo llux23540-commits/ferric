@@ -137,10 +137,6 @@ impl Tool for DiffTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&DiffDraft {
             left: self.left.text(),
@@ -253,8 +249,14 @@ mod tests {
         let mut t = DiffTool::default();
         t.toggle_only_changes();
         let text = t.as_text();
-        assert!(text.lines().any(|l| l.starts_with('-')), "缺少删除行：{text}");
-        assert!(text.lines().any(|l| l.starts_with('+')), "缺少新增行：{text}");
+        assert!(
+            text.lines().any(|l| l.starts_with('-')),
+            "缺少删除行：{text}"
+        );
+        assert!(
+            text.lines().any(|l| l.starts_with('+')),
+            "缺少新增行：{text}"
+        );
     }
 
     #[test]

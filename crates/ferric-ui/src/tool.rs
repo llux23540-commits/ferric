@@ -6,8 +6,6 @@
 //! - `meta()` 提供侧栏所需的元信息（id / 名称 / 描述 / 图标 / 分组）；
 //! - `save_draft()` / `load_draft()` 维持原有的草稿持久化契约（格式不变，
 //!   所以老用户的 `drafts` 数据在迁移后仍然读得出来）;
-//! - `migrated()` 标记该工具的 Slint 视图是否已就绪。未就绪的在界面上显示
-//!   「正在迁移」占位，但**状态与草稿照旧保留**，迁完即接上。
 //!
 //! 具体的输入/输出绑定由外壳（`state.rs`）按工具 id 分派到对应的 Slint property。
 
@@ -85,8 +83,6 @@ impl Toast {
 #[derive(Default)]
 pub struct Shared {
     pub lang: Lang,
-    /// 是否为软件渲染（Slint software renderer 恒为真）。
-    pub gpu_software: bool,
     /// 待显示的提示队列。
     pub toasts: Vec<Toast>,
     /// 剪贴板请求：外壳在下一次同步时消费并写进系统剪贴板。
@@ -94,13 +90,6 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new() -> Self {
-        Self {
-            gpu_software: true,
-            ..Default::default()
-        }
-    }
-
     /// 排一条提示。
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toasts.push(Toast::new(text));
@@ -119,14 +108,6 @@ impl Shared {
 
 pub trait Tool {
     fn meta(&self) -> ToolMeta;
-
-    /// 该工具的 Slint 视图是否已就绪。
-    ///
-    /// `false` = 界面显示「正在迁移到 Slint」占位。业务逻辑与草稿仍然完整保留，
-    /// 迁完视图即可翻成 `true`，不需要动状态层。
-    fn migrated(&self) -> bool {
-        false
-    }
 
     /// 若本工具是 WASM 插件，借出它。内置工具返回 `None`。
     ///

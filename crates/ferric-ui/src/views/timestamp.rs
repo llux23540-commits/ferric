@@ -248,10 +248,6 @@ impl Tool for TimestampTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&TimestampDraft {
             tz: self.tz.name().to_owned(),

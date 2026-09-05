@@ -17,7 +17,6 @@ use crate::tool::{Tool, ToolMeta};
 use ferric_core::gm::{self, DecAlgo, EncAlgo, Sm2Fmt};
 use serde::{Deserialize, Serialize};
 
-
 fn default_sm2_fmt() -> Sm2Fmt {
     Sm2Fmt::C1C3C2
 }
@@ -317,10 +316,6 @@ impl Tool for GmTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     /// 存输入、算法与**密钥对**。
     ///
     /// 与 `crypto` 工具的口令不同：SM2 密钥对是用户显式生成、要反复用的
@@ -402,7 +397,11 @@ mod tests {
             assert!(t.enc_ok, "{algo:?} 加密失败：{}", t.enc_status);
             t.send_to_decrypt();
             assert!(t.dec_ok, "{algo:?} 解密失败：{}", t.dec_status);
-            assert_eq!(t.dec_output.text(), "国密载荷-payload-123", "{algo:?} 往返不一致");
+            assert_eq!(
+                t.dec_output.text(),
+                "国密载荷-payload-123",
+                "{algo:?} 往返不一致"
+            );
         }
     }
 
@@ -414,7 +413,10 @@ mod tests {
             t.gen_keypair();
             t.set_fmt(i as i32);
             t.set_enc_algo(
-                EncAlgo::ALL.iter().position(|a| *a == EncAlgo::Sm2).unwrap() as i32,
+                EncAlgo::ALL
+                    .iter()
+                    .position(|a| *a == EncAlgo::Sm2)
+                    .unwrap() as i32,
             );
             t.enc_key = t.pub_key.clone();
             t.enc_input.set_text("sm2 载荷");
@@ -430,7 +432,12 @@ mod tests {
     fn send_to_decrypt_refuses_sm3_instead_of_producing_a_confusing_error() {
         // SM3 是摘要，不可逆。搬过去只会让用户对着一条底层报错发呆。
         let mut t = GmTool::default();
-        t.set_enc_algo(EncAlgo::ALL.iter().position(|a| *a == EncAlgo::Sm3).unwrap() as i32);
+        t.set_enc_algo(
+            EncAlgo::ALL
+                .iter()
+                .position(|a| *a == EncAlgo::Sm3)
+                .unwrap() as i32,
+        );
         t.enc_input.set_text("x");
         t.encrypt();
         assert!(t.enc_ok, "{}", t.enc_status);
@@ -442,7 +449,12 @@ mod tests {
     #[test]
     fn sm3_is_a_digest_and_needs_no_key() {
         let mut t = GmTool::default();
-        t.set_enc_algo(EncAlgo::ALL.iter().position(|a| *a == EncAlgo::Sm3).unwrap() as i32);
+        t.set_enc_algo(
+            EncAlgo::ALL
+                .iter()
+                .position(|a| *a == EncAlgo::Sm3)
+                .unwrap() as i32,
+        );
         assert!(!t.enc_needs_key(), "SM3 不该显示口令栏");
         t.enc_input.set_text("abc");
         t.encrypt();

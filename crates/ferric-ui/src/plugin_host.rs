@@ -12,6 +12,9 @@
 //! - `ferric_dealloc(ptr: i32, len: i32)`   归还缓冲区
 //! - `ferric_manifest() -> i64`             返回 Manifest JSON
 //! - `ferric_process(ptr: i32, len: i32) -> i64`  ProcessIn JSON → ProcessOut JSON
+//!
+//! ABI 是「JSON 进、JSON 出」，跟 GUI 框架无关：插件本体、签名链、沙箱限额都
+//! 不受 UI 变更影响 —— **已装的插件不需要重新签名**。
 
 use crate::icons;
 use crate::tool::{Tool, ToolMeta};
@@ -289,12 +292,7 @@ impl PluginTool {
             .iter()
             .zip(&self.opts)
             .map(|(spec, st)| match (spec, st) {
-                (
-                    OptionSpec::Seg {
-                        label, values, ..
-                    },
-                    OptState::Seg(sel),
-                ) => PluginOptionRow {
+                (OptionSpec::Seg { label, values, .. }, OptState::Seg(sel)) => PluginOptionRow {
                     kind: OptKind::Seg,
                     label: label.clone(),
                     values: values.clone(),
@@ -426,15 +424,6 @@ impl Tool for PluginTool {
             icon: icons::BOX,
             keywords: self.st_keywords,
         }
-    }
-
-    /// 插件视图已迁到 Slint（见 `ui/app.slint` 的 `PluginView`）。
-    ///
-    /// 插件 ABI 是「JSON 进、JSON 出」（`ferric_process`），跟 GUI 框架无关，
-    /// 所以插件本体、签名链、沙箱限额全都不受迁移影响 ——
-    /// **已装的插件不需要重新签名**。
-    fn migrated(&self) -> bool {
-        true
     }
 
     fn as_plugin(&self) -> Option<&PluginTool> {

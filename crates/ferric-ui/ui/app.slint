@@ -16,16 +16,15 @@ import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
 // 侧栏一行工具。
 struct ToolEntry {
+    // 在 Rust 侧 `AppState::tools` 里的下标。选中 / 收藏回调都传它 ——
+    // 模型经过搜索过滤，`for` 的循环下标已经不是工具下标了。
+    idx: int,
     id: string,
     name: string,
     desc: string,
     icon: string,
     group: string,
-    // 是否已迁到 Slint（false = 显示「迁移中」占位）
-    migrated: bool,
     favorite: bool,
-    // 是否通过当前搜索过滤（Rust 侧按 name / desc / keywords 计算）
-    visible: bool,
 }
 
 // 一条正则匹配结果（已由 Rust 侧摊平成可直接显示的形状）。
@@ -177,7 +176,7 @@ component EditorPane inherits Rectangle {
     }
 }
 
-// ——— JSON → YAML（已迁移） ———
+// ——— JSON → YAML ———
 component YamlView inherits Rectangle {
     in property <EditorState> input-state;
     in property <EditorState> output-state;
@@ -264,7 +263,7 @@ component YamlView inherits Rectangle {
     }
 }
 
-// ——— SQL 格式化（已迁移） ———
+// ——— SQL 格式化 ———
 component SqlView inherits Rectangle {
     in property <EditorState> input-state;
     in property <bool> uppercase: true;
@@ -371,7 +370,7 @@ component FlagChip inherits Rectangle {
     }
 }
 
-// ——— 正则表达式（已迁移） ———
+// ——— 正则表达式 ———
 component RegexView inherits Rectangle {
     in-out property <string> pattern;
     in property <bool> fg;
@@ -521,7 +520,7 @@ component RegexView inherits Rectangle {
     }
 }
 
-// ——— RSA 密钥对（已迁移） ———
+// ——— RSA 密钥对 ———
 component RsaView inherits Rectangle {
     in property <int> bits-index;
     in property <bool> busy;
@@ -744,7 +743,7 @@ component CryptoSide inherits Rectangle {
     }
 }
 
-// ——— 加密 / 解密文本（已迁移） ———
+// ——— 加密 / 解密文本 ———
 component CryptoView inherits Rectangle {
     in property <[string]> algos;
     in property <int> enc-algo;
@@ -853,7 +852,7 @@ component CryptoView inherits Rectangle {
     }
 }
 
-// ——— 国密 SM（已迁移） ———
+// ——— 国密 SM ———
 component GmView inherits Rectangle {
     // 密钥对
     in-out property <string> pub-key;
@@ -1224,7 +1223,7 @@ component GmView inherits Rectangle {
     }
 }
 
-// ——— 时间戳（已迁移） ———
+// ——— 时间戳 ———
 component TimestampView inherits Rectangle {
     in property <string> now-text;
     in property <string> now-ms-text;
@@ -1433,7 +1432,7 @@ component TimestampView inherits Rectangle {
     }
 }
 
-// ——— JSON 工具（已迁移） ———
+// ——— JSON 工具 ———
 component JsonView inherits Rectangle {
     in property <EditorState> input-state;
     in property <int> indent-index;
@@ -1608,7 +1607,7 @@ component JsonView inherits Rectangle {
     }
 }
 
-// ——— 文本 / 文件对比（已迁移） ———
+// ——— 文本 / 文件对比 ———
 component DiffView inherits Rectangle {
     in property <EditorState> left-state;
     in property <EditorState> right-state;
@@ -1799,7 +1798,7 @@ component DiffView inherits Rectangle {
     }
 }
 
-// ——— 插件市场（已迁移） ———
+// ——— 插件市场 ———
 component MarketView inherits Rectangle {
     in-out property <string> query;
     in property <[PluginCard]> cards;
@@ -2144,14 +2143,6 @@ component SidebarRow inherits Rectangle {
                 overflow: elide;
             }
         }
-        // 未迁移的工具挂一个小圆点提示
-        if !root.entry.migrated: Rectangle {
-            width: 7px;
-            height: 7px;
-            y: (parent.height - 7px) / 2;
-            border-radius: 4px;
-            background: Theme.faint;
-        }
         // 收藏星标：hover 或已收藏时可见
         if ta.has-hover || root.entry.favorite: IconButton {
             icon: root.entry.favorite ? "★" : "☆";
@@ -2165,49 +2156,7 @@ component SidebarRow inherits Rectangle {
     }
 }
 
-// ——— 迁移中占位（9 个尚未迁的工具共用） ———
-component MigrationPlaceholder inherits Rectangle {
-    in property <string> tool-name;
-    in property <string> tool-desc;
-
-    VerticalLayout {
-        alignment: center;
-        spacing: 14px;
-
-        Text {
-            text: "⚙";
-            font-family: Theme.font-icons;
-            font-size: 40px;
-            color: Theme.faint;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: root.tool-name + " · 正在迁移到 Slint";
-            font-family: Theme.font-ui-semibold;
-            font-size: 16px;
-            color: Theme.fg;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: root.tool-desc;
-            font-family: Theme.font-ui;
-            font-size: 13px;
-            color: Theme.muted;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-        }
-        Text {
-            text: "该工具的业务逻辑在 ferric-core 里已就绪且带单测；\n这里只差 Slint 视图层。见 feat/slint-migration 分支的 phase 3。";
-            font-family: Theme.font-ui;
-            font-size: 12px;
-            color: Theme.faint;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-        }
-    }
-}
-
-// ——— UUID 生成器（已完整迁移） ———
+// ——— UUID 生成器 ———
 component UuidView inherits Rectangle {
     // 输入侧（双向：Rust 灌初值，UI 改了回写）
     in-out property <int> kind-index: 0;
@@ -2447,9 +2396,6 @@ component SettingsOverlay inherits Rectangle {
     in-out property <int> theme-mode: 0;     // 0 系统 / 1 亮 / 2 暗
     in-out property <float> ui-scale: 1.0;
     in-out property <bool> auto-update: true;
-    in property <string> backend-label;
-    in property <string> gpu-desc;
-    in property <bool> gpu-software;
     in property <string> version;
     in property <string> data-dir;
     in property <string> mem-status: "";
@@ -2602,21 +2548,23 @@ component SettingsOverlay inherits Rectangle {
                         if root.tab == 2: VerticalLayout {
                             spacing: 10px;
                             FieldLabel { text: "渲染后端"; }
+                            // 渲染路径是编译期定死的（slint 只启用 renderer-software），
+                            // 不再有「试 GPU 失败再降级」那套状态，所以这两段是静态文案。
                             Text {
-                                text: root.backend-label;
+                                text: "软渲染（CPU · Slint）";
                                 font-family: Theme.font-ui-medium;
                                 font-size: 13px;
                                 color: Theme.fg;
                             }
                             Text {
-                                text: root.gpu-desc;
+                                text: "Slint software renderer —— 不建任何 GPU 上下文";
                                 font-family: Theme.font-ui;
                                 font-size: 12.5px;
-                                color: root.gpu-software ? Theme.danger : Theme.muted;
+                                color: Theme.muted;
                                 wrap: word-wrap;
                             }
                             Text {
-                                text: "Slint 软件渲染：不建任何 GPU 上下文，进程内存与「一个窗口 + 一块位图」相当。\n这是迁移的主要收益 —— egui/wgpu 时代同一台机器上是 ~611MB。";
+                                text: "进程内存与「一个窗口 + 一块位图」相当：同一台机器上，旧版（egui + wgpu 退化成 WARP）是 ~611MB。";
                                 font-family: Theme.font-ui;
                                 font-size: 12px;
                                 color: Theme.faint;
@@ -2699,6 +2647,129 @@ component SettingsOverlay inherits Rectangle {
     }
 }
 
+// ——— 命令面板（Ctrl+K） ———
+//
+// 只做一件事：不摸鼠标也能跳到任意工具。行由 Rust 侧按同一套搜索规则给
+//（名称 / 描述 / 关键词，见 `tool_rows`），所以面板与侧栏的命中结果一致。
+component CommandPalette inherits Rectangle {
+    in property <[ToolEntry]> rows;
+    in-out property <string> query;
+    in-out property <int> sel;
+    callback query-edited(string);
+    // 参数是工具在 Rust 侧 `AppState::tools` 里的下标
+    callback pick(int);
+    callback dismiss();
+
+    background: rgba(0, 0, 0, 0.42);
+
+    // 点背景关闭
+    TouchArea {
+        clicked => { root.dismiss(); }
+    }
+
+    // 选中项：列表可能被过滤到更短，取值前夹住
+    property <int> cur: min(root.sel, max(root.rows.length - 1, 0));
+
+    // 上下 / 回车 / Esc **不在这里接**：单行 TextInput 会把方向键与回车吃掉
+    //（实测挂在祖先 FocusScope 上的 key-pressed 收不到），所以这几个键统一在
+    // Rust 侧的 winit 事件里拦（见 `Shell::wire_palette`）。这里只管显示与鼠标。
+        Rectangle {
+            width: min(620px, parent.width - 80px);
+            height: min(430px, parent.height - 140px);
+            x: (parent.width - self.width) / 2;
+            y: 84px;
+            background: Theme.bg;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.border-2;
+
+            // 吞掉点击，避免穿透到背景的关闭逻辑
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                input := FerricLineEdit {
+                    placeholder: "跳到工具…（↑↓ 选择，回车打开，Esc 关闭）";
+                    text <=> root.query;
+                    edited(t) => { root.query-edited(t); }
+                    accepted(t) => {
+                        if (root.rows.length > 0) {
+                            root.pick(root.rows[root.cur].idx);
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        for t[i] in root.rows: Rectangle {
+                            height: 46px;
+                            border-radius: 9px;
+                            background: i == root.cur
+                                ? Theme.accent-soft
+                                : (row-ta.has-hover ? Theme.border : transparent);
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                Text {
+                                    text: t.icon;
+                                    font-family: Theme.font-icons;
+                                    font-size: 16px;
+                                    color: i == root.cur ? Theme.accent-strong : Theme.muted;
+                                    vertical-alignment: center;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: t.name;
+                                        font-family: Theme.font-ui-medium;
+                                        font-size: 13.5px;
+                                        color: Theme.fg;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: t.desc;
+                                        font-family: Theme.font-ui;
+                                        font-size: 11.5px;
+                                        color: Theme.faint;
+                                        overflow: elide;
+                                    }
+                                }
+                                Text {
+                                    text: t.group;
+                                    font-family: Theme.font-ui;
+                                    font-size: 11px;
+                                    color: Theme.faint;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            row-ta := TouchArea {
+                                clicked => { root.pick(t.idx); }
+                            }
+                        }
+                    }
+                }
+
+                if root.rows.length == 0: Text {
+                    text: "没有匹配的工具";
+                    font-family: Theme.font-ui;
+                    font-size: 12.5px;
+                    color: Theme.faint;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+    // 打开即聚焦输入框：面板是键盘入口，打开还要先点一下就没意义了。
+    init => { input.focus(); }
+}
+
 export component AppWindow inherits Window {
     title: "Ferric";
     // 与原 eframe 版一致的默认尺寸与下限。
@@ -2715,14 +2786,14 @@ export component AppWindow inherits Window {
     in-out property <string> rail-filter: "";
     in-out property <length> rail-width: 264px;
     in-out property <bool> settings-open: false;
+    // 命令面板（Ctrl+K）：行由 Rust 侧按搜索词给
+    in-out property <bool> palette-open: false;
+    in-out property <string> palette-query: "";
+    in-out property <int> palette-sel: 0;
+    in property <[ToolEntry]> palette-rows;
     in property <string> version: "0.2.0";
-    in property <string> backend-label: "软渲染（CPU）";
-    in property <string> gpu-desc: "CPU 软渲染（Slint software renderer）";
-    in property <bool> gpu-software: true;
     in property <string> data-dir: "";
     in property <string> mem-status: "";
-    // 侧栏底部的迁移进度（Rust 侧按 registry 里 migrated 的数量算）
-    in property <string> migration-note: "";
     in property <[string]> toasts;
 
     // 设置项（双向）
@@ -2891,6 +2962,12 @@ export component AppWindow inherits Window {
     callback toggle-favorite(int);
     callback theme-changed(int);
     callback scale-changed(float);
+    callback auto-update-changed(bool);
+    // 搜索词由 Rust 侧持有（过滤在那边算），这里只把每次输入送过去。
+    callback filter-changed(string);
+    // 命令面板的搜索词（行由 Rust 侧算完灌回 palette-rows）
+    callback palette-query-changed(string);
+    callback rail-width-changed(float);
     callback open-data-dir();
     callback record-memory();
     callback check-update();
@@ -3010,10 +3087,16 @@ export component AppWindow inherits Window {
     callback update-dismiss();
     callback reset-demo();
 
-    // 当前工具（tools 可能为空，取值前保护）
-    property <ToolEntry> current: root.tools.length > 0
-        ? root.tools[min(root.active-tool, root.tools.length - 1)]
-        : { id: "", name: "", desc: "", icon: "", group: "", migrated: false, favorite: false, visible: true };
+    // 当前工具（Rust 侧灌：侧栏模型被过滤后没法按下标取）
+    in property <ToolEntry> current;
+
+    // 双向属性改了就通知 Rust：界面上的改动必须落到状态里（保存 + 生效），
+    // 光靠 `<=>` 只会停在 property 上。Rust 自己灌值那一拍也会走到这里 ——
+    // 回调侧按值相等提前返回。
+    changed theme-mode => { root.theme-changed(self.theme-mode); }
+    changed ui-scale => { root.scale-changed(self.ui-scale); }
+    changed auto-update => { root.auto-update-changed(self.auto-update); }
+    changed rail-width => { root.rail-width-changed(self.rail-width / 1px); }
 
     VerticalLayout {
         // ===== 标题栏 44px =====
@@ -3124,6 +3207,10 @@ export component AppWindow inherits Window {
                     FerricLineEdit {
                         placeholder: "搜索工具…";
                         text <=> root.rail-filter;
+                        // 用 `edited` 而不是 `changed rail-filter`：内建 TextInput
+                        // 的 text 走双向绑定时，根组件上的 changed 不会被触发
+                        //（实测输入后侧栏纹丝不动）。
+                        edited(t) => { root.filter-changed(t); }
                     }
 
                     // 工具列表
@@ -3132,38 +3219,44 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: 2px;
                             alignment: start;
-                            for t[i] in root.tools: SidebarRow {
+                            // 侧栏只列命中搜索的工具：过滤在 Rust 侧算
+                            //（Slint 的 string 没有 contains，中文还要按 char
+                            // 比），不命中的行根本不进模型。
+                            for t in root.tools: SidebarRow {
                                 entry: t;
-                                active: i == root.active-tool;
-                                // 搜索过滤在 Rust 侧做（Slint 的 string 没有
-                                // contains；且中文匹配要按 char 比，交给 Rust 更稳）。
-                                visible: t.visible;
-                                selected => { root.select-tool(i); }
-                                toggle-favorite => { root.toggle-favorite(i); }
+                                active: t.idx == root.active-tool;
+                                selected => { root.select-tool(t.idx); }
+                                toggle-favorite => { root.toggle-favorite(t.idx); }
                             }
                         }
                     }
-
-                    // 底部：迁移进度提示
-                    Rectangle {
-                        height: 1px;
-                        background: Theme.border;
-                    }
-                    Text {
-                        text: root.migration-note;
-                        font-family: Theme.font-ui;
-                        font-size: 11px;
-                        color: Theme.faint;
-                        horizontal-alignment: center;
-                    }
                 }
 
-                // 右边缘分隔线
+                // 右边缘：分隔线 + 拖宽手柄（宽度上下限与 Rust 侧 RAIL_MIN /
+                // RAIL_MAX 一致；越界值 Rust 会夹住再推回来）。
                 Rectangle {
                     x: parent.width - 1px;
                     width: 1px;
                     height: parent.height;
-                    background: Theme.border;
+                    background: rail-resize.has-hover || rail-resize.pressed
+                        ? Theme.accent-strong
+                        : Theme.border;
+                }
+                rail-resize := TouchArea {
+                    x: parent.width - 3px;
+                    width: 6px;
+                    height: parent.height;
+                    mouse-cursor: col-resize;
+                    // 宽度 = 指针在窗口内的横坐标（手柄贴着侧栏右缘，抓点即等宽）。
+                    //
+                    // 不能用 `mouse-x - pressed-x`：手柄自己跟着 rail-width 走，
+                    // 参考系一起移动，位移会被吃掉一半（实测拖 90px 只宽了 45px）。
+                    // `absolute-position + mouse-x` 与手柄位置无关，天然自洽。
+                    moved => {
+                        root.rail-width = min(max(
+                            self.absolute-position.x + self.mouse-x,
+                            196px), 460px);
+                    }
                 }
             }
 
@@ -3207,7 +3300,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // 工具主体：已迁移的走真实视图，其余走占位
+                    // 工具主体：按 current.id 分派（新增工具漏了分支这里就是空白）
                     if root.current.id == "uuid": UuidView {
                         vertical-stretch: 1;
                         kind-index <=> root.uuid-kind;
@@ -3503,13 +3596,6 @@ export component AppWindow inherits Window {
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
                     }
-                    // 未迁移的工具走占位。条件用 `migrated` 而不是逐个列 id ——
-                    // 每迁完一个只需把 Tool::migrated 翻成 true 并加上面那样一个分支。
-                    if !root.current.migrated: MigrationPlaceholder {
-                        vertical-stretch: 1;
-                        tool-name: root.current.name;
-                        tool-desc: root.current.desc;
-                    }
                 }
             }
         }
@@ -3607,9 +3693,6 @@ export component AppWindow inherits Window {
         theme-mode <=> root.theme-mode;
         ui-scale <=> root.ui-scale;
         auto-update <=> root.auto-update;
-        backend-label: root.backend-label;
-        gpu-desc: root.gpu-desc;
-        gpu-software: root.gpu-software;
         version: root.version;
         data-dir: root.data-dir;
         mem-status: root.mem-status;
@@ -3618,5 +3701,23 @@ export component AppWindow inherits Window {
         record-memory => { root.record-memory(); }
         check-update => { root.check-update(); }
         reset-demo => { root.reset-demo(); }
+    }
+
+    // ===== 命令面板（Ctrl+K，快捷键在 Rust 侧的 winit 事件里拦） =====
+    //
+    // 用 `if` 而不是 `visible`：每次打开都重建一次，`init` 里的 focus()
+    // 才会重新跑（面板是键盘入口，打开后必须已经能直接打字）。
+    if root.palette-open: CommandPalette {
+        width: parent.width;
+        height: parent.height;
+        rows: root.palette-rows;
+        query <=> root.palette-query;
+        sel <=> root.palette-sel;
+        query-edited(t) => { root.palette-query-changed(t); }
+        pick(i) => {
+            root.palette-open = false;
+            root.select-tool(i);
+        }
+        dismiss => { root.palette-open = false; }
     }
 }

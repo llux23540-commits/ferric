@@ -291,7 +291,12 @@ impl JsonTool {
         // 选中命中的那一段，并把它滚进视野。
         let len = self.find.chars().count();
         self.input.select_range(pos, pos + len);
-        self.status = format!("{} 处命中（{}/{}）", self.hits.len(), n + 1, self.hits.len());
+        self.status = format!(
+            "{} 处命中（{}/{}）",
+            self.hits.len(),
+            n + 1,
+            self.hits.len()
+        );
     }
 
     pub fn set_find(&mut self, v: &str) {
@@ -325,15 +330,20 @@ impl Tool for JsonTool {
         ToolMeta {
             id: "json",
             name: "JSON 工具",
-            desc: "格式化 / 压缩 / 校验 / 转义 / 去转义（多层一次剥完）/ 键名排序，查找与撤销重做。",
+            desc:
+                "格式化 / 压缩 / 校验 / 转义 / 去转义（多层一次剥完）/ 键名排序，查找与撤销重做。",
             icon: icons::BRACES,
             group: "格式",
-            keywords: &["json", "format", "beautify", "minify", "美化", "格式化", "压缩"],
+            keywords: &[
+                "json",
+                "format",
+                "beautify",
+                "minify",
+                "美化",
+                "格式化",
+                "压缩",
+            ],
         }
-    }
-
-    fn migrated(&self) -> bool {
-        true
     }
 
     fn save_draft(&self) -> Option<String> {
@@ -429,10 +439,7 @@ mod tests {
         t.unescape();
         assert!(t.ok, "{}", t.status);
         let out = t.input.text();
-        assert!(
-            !out.contains(r#"\""#),
-            "还剩转义层没剥完：{out}"
-        );
+        assert!(!out.contains(r#"\""#), "还剩转义层没剥完：{out}");
     }
 
     #[test]
@@ -547,7 +554,10 @@ mod tests {
     fn formatting_keeps_the_scroll_position() {
         let big: String = format!(
             "[{}]",
-            (0..3000).map(|i| format!("{{\"i\":{i}}}")).collect::<Vec<_>>().join(",")
+            (0..3000)
+                .map(|i| format!("{{\"i\":{i}}}"))
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let mut t = JsonTool::default();
         t.input.set_text(&big);
@@ -563,13 +573,20 @@ mod tests {
         // 崩溃守门：Slint 原生 TextEdit 在约 2190 行以上 panic。
         let big: String = format!(
             "[{}]",
-            (0..20_000).map(|i| format!("{{\"i\":{i}}}")).collect::<Vec<_>>().join(",")
+            (0..20_000)
+                .map(|i| format!("{{\"i\":{i}}}"))
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let mut t = JsonTool::default();
         t.input.set_text(&big);
         t.format();
         t.input.set_viewport(30, 120);
-        assert!(t.input.total_lines() > 2190, "实际 {}", t.input.total_lines());
+        assert!(
+            t.input.total_lines() > 2190,
+            "实际 {}",
+            t.input.total_lines()
+        );
         assert_eq!(t.input.visible_lines().len(), 30);
         assert!(t.ok, "{}", t.status);
     }

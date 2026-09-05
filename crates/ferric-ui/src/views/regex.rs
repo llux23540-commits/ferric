@@ -141,10 +141,6 @@ impl Tool for RegexTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&RegexDraft {
             pattern: self.pattern.clone(),

@@ -172,15 +172,17 @@ mod tests {
     fn roundtrip_preserves_settings_and_drafts() {
         let dir = tmpdir();
         let p = dir.join("rt.ron");
-        let mut want = Persist::default();
-        want.dark = true;
-        want.theme_mode = Some(ThemeMode::Dark);
-        want.rail_width = 320.0;
-        want.favorites = vec!["uuid".into(), "json".into()];
-        want.active_id = "uuid".into();
+        let mut want = Persist {
+            dark: true,
+            theme_mode: Some(ThemeMode::Dark),
+            rail_width: 320.0,
+            favorites: vec!["uuid".into(), "json".into()],
+            active_id: "uuid".into(),
+            ui_scale: 1.25,
+            auto_update: false,
+            ..Default::default()
+        };
         want.drafts.insert("uuid".into(), r#"{"count":42}"#.into());
-        want.ui_scale = 1.25;
-        want.auto_update = false;
 
         save_to(&p, &want);
         let got = load_from(&p);
@@ -190,7 +192,10 @@ mod tests {
         assert_eq!(got.rail_width, 320.0);
         assert_eq!(got.favorites, vec!["uuid", "json"]);
         assert_eq!(got.active_id, "uuid");
-        assert_eq!(got.drafts.get("uuid").map(|s| s.as_str()), Some(r#"{"count":42}"#));
+        assert_eq!(
+            got.drafts.get("uuid").map(|s| s.as_str()),
+            Some(r#"{"count":42}"#)
+        );
         assert_eq!(got.ui_scale, 1.25);
         assert!(!got.auto_update);
         let _ = std::fs::remove_file(&p);

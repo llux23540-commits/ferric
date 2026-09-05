@@ -10,7 +10,6 @@
 //! 找不到就返回 false，由调用方提示用户 —— 界面文案几乎全是中文，缺字体等于
 //! 整个界面废掉。
 
-
 // 编译期内嵌的设计字体（crates/ferric-ui/assets/fonts）。
 pub const PJS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf");
 pub const PJS_MEDIUM: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf");

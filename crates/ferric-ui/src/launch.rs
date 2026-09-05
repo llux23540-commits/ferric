@@ -101,7 +101,11 @@ pub fn log(line: &str) {
         .ok()
         .and_then(|b| b.last().copied())
         .is_some_and(|last| last != b'\n');
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let lead = if needs_lead_nl { "\n" } else { "" };
         let _ = writeln!(f, "{lead}[{ts}] {line}");

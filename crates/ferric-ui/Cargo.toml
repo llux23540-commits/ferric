@@ -22,6 +22,7 @@ libsm = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+# 编辑区的文本存储（src/editor.rs：rope + 视口虚拟化，见下面被它取代的两个 egui crate）
 ropey = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 chrono = { workspace = true }
@@ -31,10 +32,8 @@ wasmtime = "27.0.0"
 
 # 移除（迁到 Slint 后不再需要）：
 # - eframe / egui：UI 框架本身
-# - egui-rope-editor：绑 egui，Slint 用 Slint::TextEdit 替代（损失 Rope 增量），
-#   留给后续 phase 处理
-# - egui_json_tree：同上
-# - ropey：暂保留以备后续 JSON 大文件 Rope 复刻阶段
+# - egui-rope-editor / egui_json_tree：都绑在 egui 的 Galley/Painter 上，没法移植。
+#   它们的职责由 src/editor.rs 承接（ropey 存文本 + 只渲染可见行）。
 
 [build-dependencies]
 slint-build = "1.17"

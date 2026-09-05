@@ -79,10 +79,6 @@ impl Tool for SqlTool {
         }
     }
 
-    fn migrated(&self) -> bool {
-        true
-    }
-
     fn save_draft(&self) -> Option<String> {
         serde_json::to_string(&SqlDraft {
             input: self.input.text(),
