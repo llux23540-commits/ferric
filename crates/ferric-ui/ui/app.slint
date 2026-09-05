@@ -1580,25 +1580,25 @@ component JsonView inherits Rectangle {
 
             IconButton {
                 icon: Icons.align-left;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "格式化 / 美化";
                 clicked => { root.do-format(); }
             }
             IconButton {
                 icon: Icons.fold-vertical;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "压缩为单行";
                 clicked => { root.do-minify(); }
             }
             IconButton {
                 icon: Icons.quote;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "转义为 JSON 字符串";
                 clicked => { root.do-escape(); }
             }
             IconButton {
                 icon: Icons.code;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "去除转义（多层一次剥完）";
                 clicked => { root.do-unescape(); }
             }
@@ -1607,14 +1607,14 @@ component JsonView inherits Rectangle {
 
             IconButton {
                 icon: Icons.undo-2;
-                icon-size: 16px;
+                icon-size: 19px;
                 enabled: root.can-undo;
                 tooltip: "撤销（Ctrl+Z）";
                 clicked => { root.do-undo(); }
             }
             IconButton {
                 icon: Icons.redo-2;
-                icon-size: 16px;
+                icon-size: 19px;
                 enabled: root.can-redo;
                 tooltip: "重做（Ctrl+Y）";
                 clicked => { root.do-redo(); }
@@ -1625,35 +1625,35 @@ component JsonView inherits Rectangle {
             // 缩进档位：2 / 4 / Tab。数字用 label（Lucide 里没有数字字形）。
             IconButton {
                 label: "2";
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.indent-index == 0;
                 tooltip: "缩进 2 空格（下次格式化生效）";
                 clicked => { root.indent-changed(0); }
             }
             IconButton {
                 label: "4";
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.indent-index == 1;
                 tooltip: "缩进 4 空格（下次格式化生效）";
                 clicked => { root.indent-changed(1); }
             }
             IconButton {
                 icon: Icons.indent-increase;
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.indent-index == 2;
                 tooltip: "Tab 缩进（下次格式化生效）";
                 clicked => { root.indent-changed(2); }
             }
             IconButton {
                 icon: Icons.arrow-up-a-z;
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.sort;
                 tooltip: root.sort ? "键名排序：开" : "键名排序：关";
                 clicked => { root.toggle-sort(); }
             }
             IconButton {
                 icon: Icons.wrap-text;
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.wrap;
                 tooltip: root.wrap
                     ? "自动换行：开"
@@ -1665,20 +1665,20 @@ component JsonView inherits Rectangle {
 
             IconButton {
                 icon: Icons.search;
-                icon-size: 16px;
+                icon-size: 19px;
                 active: root.find-open;
                 tooltip: "查找（Ctrl+F）";
                 clicked => { root.find-open = !root.find-open; }
             }
             IconButton {
                 icon: Icons.copy;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "复制全文";
                 clicked => { root.copy-output(); }
             }
             IconButton {
                 icon: Icons.trash;
-                icon-size: 16px;
+                icon-size: 19px;
                 tooltip: "清空输入";
                 clicked => { root.clear-input(); }
             }
@@ -1756,7 +1756,7 @@ component JsonView inherits Rectangle {
                 }
                 IconButton {
                     icon: Icons.chevron-left;
-                    icon-size: 15px;
+                    icon-size: 18px;
                     // 刻意不按命中数置灰：第一次点它就是「去搜」的入口
                     //（Rust 侧 next_hit/prev_hit 在没有命中时会先跑一次搜索）。
                     tooltip: "上一个匹配（Shift+Enter）";
@@ -1764,13 +1764,13 @@ component JsonView inherits Rectangle {
                 }
                 IconButton {
                     icon: Icons.chevron-right;
-                    icon-size: 15px;
+                    icon-size: 18px;
                     tooltip: "下一个匹配（Enter）";
                     clicked => { root.next-hit(); }
                 }
                 IconButton {
                     icon: Icons.x;
-                    icon-size: 14px;
+                    icon-size: 16px;
                     tooltip: "关闭查找条（Esc）";
                     clicked => { root.find-open = false; }
                 }

@@ -48,8 +48,8 @@ export component CodeEditor inherits Rectangle {
     changed visible-rows => { root.viewport-changed(root.visible-rows, root.visible-cols); }
     changed visible-cols => { root.viewport-changed(root.visible-rows, root.visible-cols); }
 
-    // 折叠列：只有这一屏真有区块开头时才占位，否则纯文本白让 16px
-    property <length> fold-w: root.show-gutter && root.foldable ? 16px : 0px;
+    // 折叠列：只有这一屏真有区块开头时才占位，否则纯文本白让 18px
+    property <length> fold-w: root.show-gutter && root.foldable ? 18px : 0px;
     property <length> gutter-w: root.show-gutter
         ? (root.total-lines >= 100000 ? 62px
             : root.total-lines >= 10000 ? 54px
@@ -90,7 +90,7 @@ export component CodeEditor inherits Rectangle {
                 height: 100%;
                 text: mark == 2 ? Icons.chevron-right : Icons.chevron-down;
                 font-family: Theme.font-icons;
-                font-size: 12px;
+                font-size: 14px;
                 // 未折叠的箭头平时压得很淡：一屏几十个箭头全画实了会盖过行号。
                 color: fold-ta.has-hover
                     ? Theme.accent
