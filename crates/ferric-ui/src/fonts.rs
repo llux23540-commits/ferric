@@ -1,37 +1,37 @@
-//! 字体注入（Slint 版）。
+//! 字体（Slint 版）。
 //!
-//! 设计字体（Plus Jakarta Sans / JetBrains Mono / Lucide）由 `build.rs` 的
-//! `slint_build::embed_resources(EmbedForSoftwareRenderer)` 在**编译期**嵌入
-//! 二进制，`.slint` 里按文件名 stem 引用（见 `ui/theme.slint` 的 font-* 属性），
-//! 因此这里不需要运行期注册它们。
+//! 设计字体（Plus Jakarta Sans / JetBrains Mono / Lucide）由 **`.slint` 里的
+//! `import "…ttf";`** 打进二进制并在运行期注册（见 `ui/theme.slint` 头部注释）。
+//! 不是靠这里的 Rust 代码 —— Slint 没有公开的「注册字体」API。
 //!
-//! 运行期只做一件 Slint 做不到的事：**把系统中文字体注册进去**。CJK 字体不能
-//! 内嵌（几十 MB，且各平台字体不同），只能启动时从系统路径找一个注册上。
-//! 找不到就返回 false，由调用方提示用户 —— 界面文案几乎全是中文，缺字体等于
-//! 整个界面废掉。
+//! 运行期这里只做一件事：**看系统里有没有中文字体**。CJK 不能内嵌（几十 MB、
+//! 各平台不同），由 Slint 的 `software-renderer-systemfonts` 自己枚举并回退；
+//! 一个都没有时界面全是方块，等于整个界面废掉，所以要提示用户。
 
-// 编译期内嵌的设计字体（crates/ferric-ui/assets/fonts）。
-pub const PJS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf");
-pub const PJS_MEDIUM: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf");
-pub const PJS_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-SemiBold.ttf");
-pub const PJS_BOLD: &[u8] = include_bytes!("../assets/fonts/PlusJakartaSans-Bold.ttf");
-pub const JBM_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
-pub const JBM_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
-pub const LUCIDE: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
-
-/// 命名字体族。与 `ui/theme.slint` 里的 `font-*` 属性一一对应。
+/// 内嵌设计字体的字节数（编译期常量）。
 ///
-/// Slint 侧按 TTF 文件名 stem 引用内嵌字体；Rust 侧目前只有 `mem.rs` 的诊断
-/// 会读这几个常量。留着是因为它们是**与 .slint 的命名契约**：改了这里就必须
-/// 同步改那边，反之亦然。写在 Rust 里是为了让「族名从哪来」有一个单一出处。
+/// 只取 `.len()`：字节本身由 Slint 从 `.slint` 的 import 打进二进制，这里再
+/// `include_bytes!` 一份就是把同样的 ~2MB 复制两遍。常量求值只留下长度。
+const PJS_REGULAR_LEN: usize = include_bytes!("../assets/fonts/PlusJakartaSans-Regular.ttf").len();
+const PJS_MEDIUM_LEN: usize = include_bytes!("../assets/fonts/PlusJakartaSans-Medium.ttf").len();
+const PJS_SEMIBOLD_LEN: usize =
+    include_bytes!("../assets/fonts/PlusJakartaSans-SemiBold.ttf").len();
+const PJS_BOLD_LEN: usize = include_bytes!("../assets/fonts/PlusJakartaSans-Bold.ttf").len();
+const JBM_REGULAR_LEN: usize = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").len();
+const JBM_MEDIUM_LEN: usize = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf").len();
+const LUCIDE_LEN: usize = include_bytes!("../assets/fonts/lucide.ttf").len();
+
+/// 命名字体族。与 `ui/theme.slint` 的 `font-*` 属性一一对应，取值是字体
+/// name 表里的 family（**不是文件名**）—— 写在 Rust 里是为了让「族名从哪来」
+/// 有一个单一出处；改一边必须改另一边。
 #[allow(dead_code)]
-pub const UI_MEDIUM: &str = "PlusJakartaSans-Medium";
+pub const UI_MEDIUM: &str = "Plus Jakarta Sans Medium";
 #[allow(dead_code)]
-pub const UI_SEMIBOLD: &str = "PlusJakartaSans-SemiBold";
+pub const UI_SEMIBOLD: &str = "Plus Jakarta Sans SemiBold";
 #[allow(dead_code)]
-pub const UI_BOLD: &str = "PlusJakartaSans-Bold";
+pub const UI_BOLD: &str = "Plus Jakarta Sans";
 #[allow(dead_code)]
-pub const MONO_MEDIUM: &str = "JetBrainsMono-Medium";
+pub const MONO_MEDIUM: &str = "JetBrains Mono Medium";
 pub const LUCIDE_FAMILY: &str = "lucide";
 
 /// 各平台常见的中文字体候选路径（按优先级）。
@@ -120,16 +120,16 @@ pub fn cjk_bytes() -> usize {
 }
 
 /// 启动诊断用：内嵌设计字体 + Lucide 图标字体的字节总和。
-/// 这部分**一定**加载（编译期 `include_bytes!`），跟系统无关，
+/// 这部分**一定**加载（编译期打进二进制），跟系统无关，
 /// 是「确定性的下限」—— CJK 是「系统相关的不确定项」。
 pub fn embedded_bytes() -> usize {
-    PJS_REGULAR.len()
-        + PJS_MEDIUM.len()
-        + PJS_SEMIBOLD.len()
-        + PJS_BOLD.len()
-        + JBM_REGULAR.len()
-        + JBM_MEDIUM.len()
-        + LUCIDE.len()
+    PJS_REGULAR_LEN
+        + PJS_MEDIUM_LEN
+        + PJS_SEMIBOLD_LEN
+        + PJS_BOLD_LEN
+        + JBM_REGULAR_LEN
+        + JBM_MEDIUM_LEN
+        + LUCIDE_LEN
 }
 
 /// 硬编码路径全落空之后再扫一遍常见位置。

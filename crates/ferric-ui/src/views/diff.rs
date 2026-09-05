@@ -132,7 +132,7 @@ impl Tool for DiffTool {
             name: "文本 / 文件对比",
             desc: "逐行 diff，改动行带字符级高亮，可只看差异行，可左右互换。",
             icon: icons::GIT_COMPARE,
-            group: "格式",
+            group: "对比",
             keywords: &["diff", "compare", "对比", "比较", "差异"],
         }
     }

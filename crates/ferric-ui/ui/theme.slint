@@ -1,3 +1,29 @@
+// ⚠️ 字体必须在 .slint 里**显式 import**：Slint 只对被 import 的字体文件做
+// 「打进二进制 + 运行期注册」（编译器 `custom_fonts` 只收 FileImport 里的字体，
+// 生成的代码里才会有 `register_font_from_memory`）。
+//
+// 不 import 的话 `font-family` 只是一个名字，交给 fontdb 去系统里找 ——
+// 系统当然没装 Plus Jakarta / JetBrains Mono / lucide，于是**静默回退**到默认
+// 字体：正文还能看（换了字），图标字体那些私用区码点直接画不出来。
+// 实测就是这个原因让标题栏的最小化/最大化/关闭、侧栏工具图标、搜索放大镜
+// 全部变成空白。
+//
+// 族名（`font-family`）取字体 name 表里的 family（id 1），**不是文件名**：
+//   lucide.ttf                     → "lucide"
+//   PlusJakartaSans-Regular.ttf    → "Plus Jakarta Sans"（Regular）
+//   PlusJakartaSans-Medium.ttf     → "Plus Jakarta Sans Medium"
+//   PlusJakartaSans-SemiBold.ttf   → "Plus Jakarta Sans SemiBold"
+//   PlusJakartaSans-Bold.ttf       → "Plus Jakarta Sans"（weight 700）
+//   JetBrainsMono-Regular.ttf      → "JetBrains Mono"
+//   JetBrainsMono-Medium.ttf       → "JetBrains Mono Medium"
+import "../assets/fonts/PlusJakartaSans-Regular.ttf";
+import "../assets/fonts/PlusJakartaSans-Medium.ttf";
+import "../assets/fonts/PlusJakartaSans-SemiBold.ttf";
+import "../assets/fonts/PlusJakartaSans-Bold.ttf";
+import "../assets/fonts/JetBrainsMono-Regular.ttf";
+import "../assets/fonts/JetBrainsMono-Medium.ttf";
+import "../assets/fonts/lucide.ttf";
+
 // 设计令牌（亮 / 暗），逐值对齐原 theme.rs（egui 时代的 index.html 色板）。
 // 迁 Slint 后主题不再走 egui Visuals，而是一个 global：所有组件读 Theme.xxx，
 // 深浅色由 Rust 侧把 `dark` 灌进来，一处切换全局生效。
@@ -42,12 +68,38 @@ export global Theme {
     out property <color> del-bg: dark ? rgba(224, 107, 103, 0.14) : #fdecec;
     out property <color> del-mark: dark ? rgba(224, 107, 103, 0.33) : #f6c9c7;
 
-    // ——— 字体族（与 fonts.rs 的命名族对齐；stem = TTF 文件名） ———
-    out property <string> font-ui: "PlusJakartaSans-Regular";
-    out property <string> font-ui-medium: "PlusJakartaSans-Medium";
-    out property <string> font-ui-semibold: "PlusJakartaSans-SemiBold";
-    out property <string> font-ui-bold: "PlusJakartaSans-Bold";
-    out property <string> font-mono: "JetBrainsMono-Regular";
-    out property <string> font-mono-medium: "JetBrainsMono-Medium";
+    // ——— 字体族（取 TTF name 表里的 family，见文件头注释） ———
+    out property <string> font-ui: "Plus Jakarta Sans";
+    out property <string> font-ui-medium: "Plus Jakarta Sans Medium";
+    out property <string> font-ui-semibold: "Plus Jakarta Sans SemiBold";
+    // Bold 那一份注册在 "Plus Jakarta Sans" 家族的 700 字重下，
+    // 所以用它的地方要同时给 `font-weight: Theme.weight-bold`。
+    out property <string> font-ui-bold: "Plus Jakarta Sans";
+    out property <int> weight-bold: 700;
+    out property <string> font-mono: "JetBrains Mono";
+    out property <string> font-mono-medium: "JetBrains Mono Medium";
     out property <string> font-icons: "lucide";
+}
+
+// Lucide 字形常量。码点与 `src/icons.rs` 同一份表（那边给 Rust 侧的 ToolMeta 用，
+// 这边给 .slint 里的按钮用），改一处就要改两处 —— 但**必须**用码点而不是
+// 「✕」「▢」这类相似字符：内嵌的是 Lucide 子集，不含它们，渲染出来是空白
+//（实测标题栏的最大化 / 关闭按钮因此整个消失）。
+export global Icons {
+    out property <string> minus: "\u{e11c}";
+    out property <string> square: "\u{e167}";
+    out property <string> x: "\u{e1b2}";
+    out property <string> moon: "\u{e11e}";
+    out property <string> sun: "\u{e178}";
+    out property <string> info: "\u{e0f9}";
+    out property <string> settings: "\u{e154}";
+    out property <string> search: "\u{e151}";
+    out property <string> heart: "\u{e0f2}";
+    out property <string> box: "\u{e061}";
+    out property <string> list-checks: "\u{e1d0}";
+    out property <string> file-down: "\u{e318}";
+    out property <string> trash: "\u{e18e}";
+    out property <string> circle-alert: "\u{e077}";
+    out property <string> circle-check: "\u{e226}";
+    out property <string> refresh: "\u{e145}";
 }

@@ -62,6 +62,25 @@ impl SourcePref {
             Self::Mock => Some(true),
         }
     }
+
+    /// 与设置里那个分段控件的下标互转（0 自动 / 1 服务器 / 2 GitHub / 3 演示）。
+    pub fn index(self) -> i32 {
+        match self {
+            Self::Auto => 0,
+            Self::Server => 1,
+            Self::Github => 2,
+            Self::Mock => 3,
+        }
+    }
+
+    pub fn from_index(i: i32) -> Self {
+        match i {
+            1 => Self::Server,
+            2 => Self::Github,
+            3 => Self::Mock,
+            _ => Self::Auto,
+        }
+    }
 }
 
 impl Source {

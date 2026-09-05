@@ -29,6 +29,8 @@ pub const APP_NAME: &str = "Ferric";
 
 const RAIL_MIN: f32 = 196.0;
 const RAIL_MAX: f32 = 460.0;
+/// 侧栏默认宽度（设置里「恢复默认」用）。
+const RAIL_DEFAULT: f32 = 264.0;
 
 /// 外壳的全部可变状态。放在 `Rc<RefCell<...>>` 里被各个 callback 共享 ——
 /// Slint 的回调是 `Fn`（可多次调用、非 `FnMut`），所以内部可变性是必须的。
@@ -101,12 +103,9 @@ impl AppState {
             ThemeMode::System => persist.dark,
         };
 
-        let mut shared = Shared {
-            lang: persist.lang,
-            ..Default::default()
-        };
+        let mut shared = Shared::with_lang(persist.lang);
         for w in plugin_warns {
-            shared.toast(format!("插件加载失败 · {w}"));
+            shared.toast_err(format!("插件加载失败 · {w}"));
         }
 
         Self {
@@ -152,6 +151,28 @@ impl AppState {
                 now.saturating_sub(t) >= crate::updater::AUTO_CHECK_INTERVAL_SECS as i64
             }
         }
+    }
+
+    /// 「上次成功检查」的人话 + 是否该染红。
+    ///
+    /// 超过 14 天没成功过就是**异常**：要么网络一直不通，要么更新源换了人。
+    /// 静默吞掉它等于让用户以为自己一直是最新版。
+    pub fn last_check_text(&self) -> (String, bool) {
+        const DAY: i64 = 24 * 3600;
+        let Some(t) = self.last_update_check else {
+            return ("尚未成功检查过".to_owned(), false);
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let days = now.saturating_sub(t) / DAY;
+        let text = match days {
+            0 => "今天".to_owned(),
+            1 => "昨天".to_owned(),
+            n => format!("{n} 天前"),
+        };
+        (text, days >= 14)
     }
 
     /// 当前选中项若是 WASM 插件，借出它。
@@ -214,7 +235,7 @@ impl AppState {
             self.tools.push(Box::new(t));
         }
         for w in warns {
-            self.shared.toast(format!("插件加载失败 · {w}"));
+            self.shared.toast_err(format!("插件加载失败 · {w}"));
         }
 
         // 选中的工具可能刚被卸载 —— 找不回来就退回插件市场（用户就是从那儿来的）。
@@ -431,6 +452,11 @@ impl Shell {
         win.set_auto_update(s.auto_update);
         win.set_rail_width(s.rail_width);
         win.set_version(SharedString::from(crate::version()));
+        win.set_build_number(SharedString::from(crate::build_number()));
+        win.set_source_index(s.source_pref.index());
+        let (last, stale) = s.last_check_text();
+        win.set_last_check(SharedString::from(last));
+        win.set_last_check_stale(stale);
         win.set_data_dir(SharedString::from(
             crate::launch::data_dir()
                 .map(|p| p.display().to_string())
@@ -445,13 +471,13 @@ impl Shell {
         Self::apply_scale(win, base, scale);
     }
 
-    /// 工具列表 → 侧栏模型。`filter` 为空则全部可见。
+    /// 工具列表 → 侧栏模型（分组标题 + 工具行，收藏置顶）。
     ///
-    /// 过滤放在 Rust 侧：Slint 的 `string` 没有 `contains`，而且中文匹配要按
-    /// char 比（不能按字节切），交给 Rust 更稳。
+    /// 分组与过滤都放在 Rust 侧：Slint 的 `string` 没有 `contains`，中文匹配
+    /// 要按 char 比（不能按字节切），分组顺序还得跟注册表一致。
     fn sync_tools(&self, win: &AppWindow) {
         let s = self.state.borrow();
-        win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &s.rail_filter))));
+        win.set_rail(ModelRc::new(VecModel::from(rail_rows(&s, &s.rail_filter))));
         drop(s);
         Self::push_current(&self.state, win);
     }
@@ -821,17 +847,9 @@ impl Shell {
         win.set_update_dialog_open(s.update_dialog_open);
     }
 
-    /// 提示队列 → property（先剔除过期的）。
+    /// 提示队列 → property（先剔除过期的），并顺带刷新操作记录。
     fn sync_toasts(&self, win: &AppWindow) {
-        let mut s = self.state.borrow_mut();
-        s.shared.prune_toasts();
-        let msgs: Vec<SharedString> = s
-            .shared
-            .toasts
-            .iter()
-            .map(|t| SharedString::from(t.text.clone()))
-            .collect();
-        win.set_toasts(ModelRc::new(VecModel::from(msgs)));
+        Self::flush_shared(&self.state, win);
     }
 
     /// 接上所有 Slint 回调。
@@ -1116,21 +1134,13 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_open_data_dir(move || {
-            let msg = match crate::launch::open_data_dir() {
-                Ok(()) => None,
-                Err(e) => Some(format!("打开数据目录失败：{e}")),
-            };
-            if let Some(m) = msg {
-                state.borrow_mut().shared.toast(m);
+            if let Err(e) = crate::launch::open_data_dir() {
+                state
+                    .borrow_mut()
+                    .shared
+                    .toast_err(format!("打开数据目录失败：{e}"));
                 if let Some(win) = w.upgrade() {
-                    let msgs: Vec<SharedString> = state
-                        .borrow()
-                        .shared
-                        .toasts
-                        .iter()
-                        .map(|t| SharedString::from(t.text.clone()))
-                        .collect();
-                    win.set_toasts(ModelRc::new(VecModel::from(msgs)));
+                    Self::flush_shared(&state, &win);
                 }
             }
         });
@@ -1169,7 +1179,7 @@ impl Shell {
                 None => state.borrow_mut().shared.toast("当前数据源没有演示数据"),
             }
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
 
@@ -1191,7 +1201,85 @@ impl Shell {
             }
             if let Some(win) = w.upgrade() {
                 Self::push_update(&state, &win);
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
+            }
+        });
+
+        // 提示条上的「×」：立刻关掉那一条（按 id，不是下标）。
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_dismiss_toast(move |id| {
+            state.borrow_mut().shared.dismiss_toast(id.max(0) as u64);
+            if let Some(win) = w.upgrade() {
+                Self::flush_shared(&state, &win);
+            }
+        });
+
+        // 清空操作记录。只清界面上这份 —— startup.log / memory.log 是磁盘文件，
+        // 不该被一个界面按钮删掉。
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_clear_activity(move || {
+            state.borrow_mut().shared.activity.clear();
+            if let Some(win) = w.upgrade() {
+                Self::flush_shared(&state, &win);
+            }
+        });
+
+        // 数据源：换源要把更新器状态清掉 —— 上一个源的「已最新 / 失败」
+        // 结论对新源没有意义，留着会骗人。
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_source_changed(move |i| {
+            let pref = crate::source::SourcePref::from_index(i);
+            let mut s = state.borrow_mut();
+            if s.source_pref == pref {
+                return;
+            }
+            s.source_pref = pref;
+            s.updater.phase = crate::updater::Phase::Idle;
+            let name = match pref {
+                crate::source::SourcePref::Auto => "自动",
+                crate::source::SourcePref::Server => "服务器",
+                crate::source::SourcePref::Github => "GitHub",
+                crate::source::SourcePref::Mock => "演示数据",
+            };
+            s.shared.toast(format!("数据源已切到「{name}」"));
+            s.save();
+            drop(s);
+            if let Some(win) = w.upgrade() {
+                Self::push_update(&state, &win);
+                Self::flush_shared(&state, &win);
+            }
+        });
+
+        // 清除收藏与草稿：把每个工具重置成默认值（等于 egui 版「重建注册表」），
+        // 再整体同步一遍界面 —— 只清落盘那份的话，界面上还留着旧内容，
+        // 下次启动才生效，看起来像没反应。
+        let shell = self.clone_handles();
+        let w = win.as_weak();
+        win.on_clear_drafts(move || {
+            let Some(win) = w.upgrade() else { return };
+            shell.reset_tools();
+            {
+                let mut s = shell.state.borrow_mut();
+                s.favorites.clear();
+                s.shared.toast("已清除收藏与工具草稿");
+                s.save();
+            }
+            shell.sync_all(&win);
+        });
+
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_reset_rail_width(move || {
+            {
+                let mut s = state.borrow_mut();
+                s.rail_width = RAIL_DEFAULT;
+                s.save();
+            }
+            if let Some(win) = w.upgrade() {
+                win.set_rail_width(RAIL_DEFAULT);
             }
         });
     }
@@ -1254,18 +1342,14 @@ impl Shell {
                 return;
             }
             let n = text.lines().count();
-            state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+            {
+                let mut s = state.borrow_mut();
+                // 真写剪贴板 —— 以前这里只弹「已复制 N 行」，剪贴板里什么也没进。
+                s.shared.copy(text);
+                s.shared.toast(format!("已复制 {n} 行"));
+            }
             if let Some(win) = w.upgrade() {
-                // Slint 没有跨平台剪贴板 API，走 winit 窗口的实现。
-                // 失败只提示，不打断。
-                let msgs: Vec<SharedString> = state
-                    .borrow()
-                    .shared
-                    .toasts
-                    .iter()
-                    .map(|t| SharedString::from(t.text.clone()))
-                    .collect();
-                win.set_toasts(ModelRc::new(VecModel::from(msgs)));
+                Self::flush_shared(&state, &win);
             }
         });
 
@@ -1328,7 +1412,7 @@ impl Shell {
                 .shared
                 .toast(format!("已复制 {n} 行 YAML"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1386,7 +1470,7 @@ impl Shell {
                 .shared
                 .toast(format!("已复制 {n} 行 SQL"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1514,7 +1598,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast("已复制公钥");
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
 
@@ -1529,7 +1613,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast("已复制私钥 —— 注意保管");
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1604,7 +1688,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast("已复制密文");
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
 
@@ -1619,7 +1703,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast("已复制明文");
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1816,7 +1900,7 @@ impl Shell {
             state.borrow_mut().shared.copy(v.clone());
             state.borrow_mut().shared.toast(format!("已复制 {v}"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1911,7 +1995,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -1979,7 +2063,7 @@ impl Shell {
                 .shared
                 .toast(format!("已复制 {n} 行差异"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -2018,7 +2102,7 @@ impl Shell {
                         "插件目录已重新加载"
                     };
                     s2.borrow_mut().shared.toast(msg);
-                    Self::flush_toasts(&s2, &win);
+                    Self::flush_shared(&s2, &win);
                 }
             },
         );
@@ -2126,7 +2210,7 @@ impl Shell {
             state.borrow_mut().shared.copy(text);
             state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
             if let Some(win) = w.upgrade() {
-                Self::flush_toasts(&state, &win);
+                Self::flush_shared(&state, &win);
             }
         });
     }
@@ -2183,7 +2267,14 @@ impl Shell {
                     s.shared.toast(format!("v{version} 已就绪，可以安装"));
                     s.save();
                     drop(s);
-                    Self::flush_toasts(&state, &win);
+                    Self::flush_shared(&state, &win);
+                }
+
+                // 提示到点自己消失：过期剔除只在「刷一次」时发生，而刷新只由
+                // 事件驱动 —— 没有这一拍，最后一条提示会一直挂在右下角，直到
+                // 用户下次点什么（实测「安装失败」挂了好几分钟）。
+                if !state.borrow().shared.toasts.is_empty() {
+                    Self::flush_shared(&state, &win);
                 }
 
                 let after = {
@@ -2221,9 +2312,12 @@ impl Shell {
                     let _ = slint::quit_event_loop();
                 }
                 Err(e) => {
-                    state.borrow_mut().shared.toast(format!("安装失败：{e}"));
+                    state
+                        .borrow_mut()
+                        .shared
+                        .toast_err(format!("安装失败：{e}"));
                     if let Some(win) = w.upgrade() {
-                        Self::flush_toasts(&state, &win);
+                        Self::flush_shared(&state, &win);
                     }
                 }
             }
@@ -2234,7 +2328,7 @@ impl Shell {
         win.on_update_dismiss(move || {
             state.borrow_mut().update_dialog_open = false;
             if let Some(win) = w.upgrade() {
-                // 顶栏的「安装 vX」入口仍在 —— 点了「稍后」不等于丢掉这次更新。
+                // 侧栏左下角的「安装 vX」入口仍在 —— 点「稍后」不等于丢掉这次更新。
                 Self::push_update(&state, &win);
             }
         });
@@ -2312,7 +2406,7 @@ impl Shell {
                     .borrow_mut()
                     .shared
                     .toast(format!("已复制 {n} 行"));
-                Self::flush_toasts(&shell.state, &win);
+                Self::flush_shared(&shell.state, &win);
             }
             if outcome.edited {
                 shell.recompute(&which);
@@ -2320,6 +2414,29 @@ impl Shell {
             }
             shell.sync_editor(&win, &which);
         });
+    }
+
+    /// 把每个工具重置成默认状态（设置里「清除收藏与工具草稿」用）。
+    ///
+    /// 注册表里那一份与这里具体类型的那一份是两套实例，**两边都得清** ——
+    /// 只清一边会出现「界面空了但下次启动又回来」或者反过来。
+    /// 插件那一截原样留下：它们的草稿是插件自己的输入，跟内置工具无关。
+    fn reset_tools(&self) {
+        *self.uuid.borrow_mut() = views::UuidTool::default();
+        *self.yaml.borrow_mut() = views::YamlTool::default();
+        *self.sql.borrow_mut() = views::SqlTool::default();
+        *self.regex.borrow_mut() = views::RegexTool::default();
+        *self.rsa.borrow_mut() = views::RsaTool::default();
+        *self.crypto.borrow_mut() = views::CryptoTool::default();
+        *self.gm.borrow_mut() = views::GmTool::default();
+        *self.ts.borrow_mut() = views::TimestampTool::default();
+        *self.json.borrow_mut() = views::JsonTool::default();
+        *self.diff.borrow_mut() = views::DiffTool::default();
+        let mut s = self.state.borrow_mut();
+        let builtin = s.builtin_tools;
+        let plugins = s.tools.split_off(builtin);
+        s.tools = views::registry();
+        s.tools.extend(plugins);
     }
 
     /// 拿到一份共享句柄（给回调捕获用）。
@@ -2462,18 +2579,42 @@ impl Shell {
         }
     }
 
-    /// 把提示队列刷进 Slint（多处要用，收成一个函数）。
-    fn flush_toasts(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
+    /// 把「共享上下文」里攒下的东西一次性交给 Slint：剪贴板请求、提示队列、
+    /// 操作记录。凡是 `Shared` 被改过的地方都调它 —— 分成三个函数只会漏。
+    fn flush_shared(state: &Rc<RefCell<AppState>>, win: &AppWindow) {
         let mut s = state.borrow_mut();
         s.shared.prune_toasts();
-        let msgs: Vec<SharedString> = s
+        let clip = s.shared.clipboard.take();
+        let toasts: Vec<ToastRow> = s
             .shared
             .toasts
             .iter()
-            .map(|t| SharedString::from(t.text.clone()))
+            .map(|t| ToastRow {
+                id: t.id as i32,
+                text: SharedString::from(t.text.clone()),
+                level: t.level.index(),
+            })
+            .collect();
+        // 记录新的在上：刚发生的那条最可能是用户要找的。
+        let activity: Vec<ActivityRow> = s
+            .shared
+            .activity
+            .iter()
+            .rev()
+            .map(|a| ActivityRow {
+                at: SharedString::from(a.at.clone()),
+                text: SharedString::from(a.text.clone()),
+                level: a.level.index(),
+            })
             .collect();
         drop(s);
-        win.set_toasts(ModelRc::new(VecModel::from(msgs)));
+        win.set_toasts(ModelRc::new(VecModel::from(toasts)));
+        win.set_activity(ModelRc::new(VecModel::from(activity)));
+        // 剪贴板：Slint 的 Rust API 不给写剪贴板的入口，绕 `.slint` 里那个
+        // 0×0 TextInput 的 copy()（见 app.slint 的 copy-to-clipboard）。
+        if let Some(text) = clip {
+            win.invoke_copy_to_clipboard(SharedString::from(text));
+        }
     }
 
     /// 生成一个「重新同步侧栏」的闭包（收藏或搜索词变化后要重建模型）。
@@ -2484,7 +2625,7 @@ impl Shell {
             let Some(win) = w.upgrade() else { return };
             {
                 let s = state.borrow();
-                win.set_tools(ModelRc::new(VecModel::from(tool_rows(&s, &s.rail_filter))));
+                win.set_rail(ModelRc::new(VecModel::from(rail_rows(&s, &s.rail_filter))));
             }
             // 收藏星标也画在「当前工具」上，模型重建后它得跟着更新。
             Self::push_current(&state, &win);
@@ -2541,7 +2682,70 @@ fn tool_entry(s: &AppState, idx: usize, t: &dyn Tool) -> ToolEntry {
         icon: SharedString::from(m.icon.to_string()),
         group: SharedString::from(m.group),
         favorite: s.favorites.contains(m.id),
+        // 整宽铺开的工具：编辑区/结果表本身就要横向空间，收进 1080px 列
+        // 反而浪费。其余工具走居中列（对位 egui 版的 `Tool::full_bleed`，
+        // 那边只有对比工具返回 true；这里把编辑器类一并算进去）。
+        wide: matches!(m.id, "diff" | "json" | "sql" | "yaml" | "market"),
     }
+}
+
+/// 分组标题用的图标。表与 egui 版的 `group_icon` 一致 —— 组名是 `ToolMeta.group`
+/// 的字符串，加新组时这里补一行，认不出来的组退回 `BOX`。
+fn group_icon(group: &str) -> char {
+    match group {
+        "收藏" => crate::icons::HEART,
+        "JSON" => crate::icons::CODE,
+        "对比" => crate::icons::GIT_COMPARE,
+        "转换" => crate::icons::CLOCK,
+        "SQL" => crate::icons::DATABASE,
+        "生成" => crate::icons::CREDIT_CARD,
+        "加密" => crate::icons::LOCK,
+        "文本" => crate::icons::TERMINAL,
+        _ => crate::icons::BOX,
+    }
+}
+
+/// 侧栏模型：**分组标题 + 工具行**混在一个列表里（`group == true` 的是标题）。
+///
+/// 分组顺序 = 注册表里首次出现的顺序（不排字典序：那会把「JSON」排到「转换」
+/// 后面，跟用户记住的位置对不上）。收藏的工具**另起一组置顶** —— 否则点了星
+/// 除了星星变亮什么也不会发生，收藏就是个装饰。
+fn rail_rows(s: &AppState, filter: &str) -> Vec<RailRow> {
+    let hits = tool_rows(s, filter);
+    let mut rows: Vec<RailRow> = Vec::with_capacity(hits.len() + 8);
+
+    let group_row = |name: &str| RailRow {
+        group: true,
+        label: SharedString::from(name),
+        icon: SharedString::from(group_icon(name).to_string()),
+        desc: SharedString::new(),
+        idx: -1,
+        favorite: false,
+    };
+    let tool_row = |e: &ToolEntry| RailRow {
+        group: false,
+        label: e.name.clone(),
+        icon: e.icon.clone(),
+        desc: e.desc.clone(),
+        idx: e.idx,
+        favorite: e.favorite,
+    };
+
+    if hits.iter().any(|e| e.favorite) {
+        rows.push(group_row("收藏"));
+        rows.extend(hits.iter().filter(|e| e.favorite).map(tool_row));
+    }
+
+    let mut seen: Vec<SharedString> = Vec::new();
+    for e in &hits {
+        if seen.contains(&e.group) {
+            continue;
+        }
+        seen.push(e.group.clone());
+        rows.push(group_row(e.group.as_str()));
+        rows.extend(hits.iter().filter(|x| x.group == e.group).map(tool_row));
+    }
+    rows
 }
 
 #[cfg(test)]

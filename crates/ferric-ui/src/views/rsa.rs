@@ -123,7 +123,7 @@ impl Tool for RsaTool {
             name: "RSA 密钥对",
             desc: "1024–4096 位，后台线程生成，PEM 输出。",
             icon: icons::KEY,
-            group: "加密",
+            group: "生成",
             keywords: &["rsa", "key", "密钥", "pem", "公钥", "私钥"],
         }
     }

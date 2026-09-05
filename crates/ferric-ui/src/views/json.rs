@@ -333,7 +333,7 @@ impl Tool for JsonTool {
             desc:
                 "格式化 / 压缩 / 校验 / 转义 / 去转义（多层一次剥完）/ 键名排序，查找与撤销重做。",
             icon: icons::BRACES,
-            group: "格式",
+            group: "JSON",
             keywords: &[
                 "json",
                 "format",

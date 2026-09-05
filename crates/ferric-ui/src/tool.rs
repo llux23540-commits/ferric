@@ -55,25 +55,53 @@ pub struct ToolMeta {
 /// ⚠️ **必须是时间，不能是帧数** —— egui 时代这里踩过坑：帧数计时在软件光栅化
 /// （8fps）的机器上会把 2 秒的提示拖成 15 秒，且那 15 秒整窗都在重画。
 /// Slint 是 retained mode，不存在「提示在就满帧率转」的问题，但语义仍保持时间。
-pub const TOAST_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+pub const TOAST_TTL: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// 操作记录的条数上限。超过丢最旧的 —— 无上限的记录就是内存泄漏。
+const ACTIVITY_KEEP: usize = 200;
+
+/// 提示 / 记录的级别。决定颜色，也决定用户要不要回头找它。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Level {
+    #[default]
+    Info,
+    Warn,
+    Err,
+}
+
+impl Level {
+    /// 给 Slint 的下标（`.slint` 里按它取颜色）。
+    pub fn index(self) -> i32 {
+        match self {
+            Level::Info => 0,
+            Level::Warn => 1,
+            Level::Err => 2,
+        }
+    }
+}
 
 pub struct Toast {
     pub text: String,
+    pub level: Level,
     pub born: std::time::Instant,
+    /// 单调递增序号。点「×」关掉某一条时用它定位 —— 用下标会在
+    /// 同时有别的提示过期时关错人。
+    pub id: u64,
 }
 
 impl Toast {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            born: std::time::Instant::now(),
-        }
-    }
-
     /// 是否已过期该移除。
     pub fn expired(&self) -> bool {
         self.born.elapsed() >= TOAST_TTL
     }
+}
+
+/// 一条操作记录。提示只活几秒，这里是它的长期落点。
+pub struct Activity {
+    /// 本地时间 `HH:MM:SS`（记录用不到日期：应用一次会话内的操作流）。
+    pub at: String,
+    pub text: String,
+    pub level: Level,
 }
 
 /// 跨工具共享的运行时上下文。
@@ -85,14 +113,55 @@ pub struct Shared {
     pub lang: Lang,
     /// 待显示的提示队列。
     pub toasts: Vec<Toast>,
+    /// 操作记录（新的在后）。提示自动消失，但**记录留着** ——
+    /// 「更新失败」这类信息只闪 4 秒就找不回来是不可接受的。
+    pub activity: Vec<Activity>,
     /// 剪贴板请求：外壳在下一次同步时消费并写进系统剪贴板。
     pub clipboard: Option<String>,
+    /// 下一条提示的序号。
+    next_toast_id: u64,
 }
 
 impl Shared {
-    /// 排一条提示。
+    /// 带界面语言构造（其余字段取默认）。
+    pub fn with_lang(lang: Lang) -> Self {
+        Self {
+            lang,
+            ..Default::default()
+        }
+    }
+
+    /// 排一条普通提示（并记进操作记录）。
     pub fn toast(&mut self, text: impl Into<String>) {
-        self.toasts.push(Toast::new(text));
+        self.push(text.into(), Level::Info);
+    }
+
+    /// 排一条警告（黄）。
+    pub fn toast_warn(&mut self, text: impl Into<String>) {
+        self.push(text.into(), Level::Warn);
+    }
+
+    /// 排一条失败提示（红）。
+    pub fn toast_err(&mut self, text: impl Into<String>) {
+        self.push(text.into(), Level::Err);
+    }
+
+    fn push(&mut self, text: String, level: Level) {
+        self.next_toast_id += 1;
+        self.activity.push(Activity {
+            at: chrono::Local::now().format("%H:%M:%S").to_string(),
+            text: text.clone(),
+            level,
+        });
+        if self.activity.len() > ACTIVITY_KEEP {
+            self.activity.remove(0);
+        }
+        self.toasts.push(Toast {
+            text,
+            level,
+            born: std::time::Instant::now(),
+            id: self.next_toast_id,
+        });
     }
 
     /// 请求把文本写进系统剪贴板（由外壳执行 —— Slint 的剪贴板 API 需要窗口句柄）。
@@ -100,9 +169,14 @@ impl Shared {
         self.clipboard = Some(text.into());
     }
 
-    /// 丢掉过期提示。外壳每次同步时调一次。
+    /// 丢掉过期提示。外壳每次同步与每秒心跳各调一次。
     pub fn prune_toasts(&mut self) {
         self.toasts.retain(|t| !t.expired());
+    }
+
+    /// 手动关掉一条提示（点提示上的「×」）。
+    pub fn dismiss_toast(&mut self, id: u64) {
+        self.toasts.retain(|t| t.id != id);
     }
 }
 

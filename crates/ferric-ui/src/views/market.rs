@@ -284,7 +284,7 @@ impl Tool for MarketTool {
             name: "插件市场",
             desc: "浏览并安装 WASM 插件，全部更新，安装包一律验签。",
             icon: icons::BOX,
-            group: "扩展",
+            group: "插件",
             keywords: &["plugin", "market", "插件", "市场", "扩展"],
         }
     }

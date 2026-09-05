@@ -67,7 +67,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // 系统中文字体探测（Slint 的 systemfonts 会自己做回退，这里只判断要不要提示）。
     if !fonts::install_fonts() {
         // 提示必须中英双语：这条消息本身也会是方块，英文那半句是用户唯一读得懂的。
-        shell.state.borrow_mut().shared.toast(
+        shell.state.borrow_mut().shared.toast_warn(
             "未找到中文字体，界面会显示为方块 / No CJK font found: \
              please install Microsoft YaHei or Noto Sans SC",
         );

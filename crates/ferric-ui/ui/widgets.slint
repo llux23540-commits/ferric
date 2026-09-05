@@ -1,7 +1,7 @@
 // 复用 UI 组件，对位原 widgets/mod.rs 的那一套（primary / ghost / subtle 按钮、
 // 图标按钮、分段控件、字段标签）。样式全部从 Theme global 取，不在这里写死颜色。
 
-import { Theme } from "theme.slint";
+import { Theme, Icons } from "theme.slint";
 
 // 区块小标题（原 field_label）。
 export component FieldLabel inherits Text {
@@ -74,10 +74,16 @@ export component FerricButton inherits Rectangle {
 
 // 图标按钮（正方形，muted → hover 变 fg + border 底）。
 // 方块边长跟着字号走：原实现是 (size * 1.65).max(26.0)。
+//
+// `danger` 给关闭按钮用：hover 时整块变红、图标反白，符合平台习惯
+//（误点关闭的代价最大，它必须看起来跟其它按钮不一样）。
+// `active` 给「当前已打开」的入口用（比如设置浮层开着时的齿轮）。
 export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <length> icon-size: 18px;
     in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <bool> active: false;
     in property <string> tooltip: "";
     callback clicked();
 
@@ -88,7 +94,11 @@ export component IconButton inherits Rectangle {
     min-height: side;
     horizontal-stretch: 0;
     border-radius: 9px;
-    background: ta.has-hover && root.enabled ? Theme.border : transparent;
+    background: !root.enabled
+        ? transparent
+        : (ta.has-hover
+            ? (root.danger ? Theme.danger : Theme.border)
+            : (root.active ? Theme.accent-soft : transparent));
 
     Text {
         width: 100%;
@@ -98,7 +108,9 @@ export component IconButton inherits Rectangle {
         font-size: root.icon-size;
         color: !root.enabled
             ? Theme.faint
-            : (ta.has-hover ? Theme.fg : Theme.muted);
+            : (ta.has-hover
+                ? (root.danger ? #ffffff : Theme.fg)
+                : (root.active ? Theme.accent-strong : Theme.muted));
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -159,9 +171,10 @@ export component FerricLineEdit inherits Rectangle {
     in-out property <string> text;
     in property <bool> read-only: false;
     in property <bool> mono: false;
+    // 左内边距。默认 12px；搜索框把放大镜画在里面时需要更大的留白。
+    in property <length> pad-left: 12px;
     callback edited(string);
     callback accepted(string);
-
     height: 38px;
     border-radius: 9px;
     background: Theme.field;
@@ -189,9 +202,9 @@ export component FerricLineEdit inherits Rectangle {
     }
 
     Rectangle {
-        x: 12px;
+        x: root.pad-left;
         y: 0;
-        width: parent.width - 24px;
+        width: parent.width - root.pad-left - 12px;
         height: parent.height;
         clip: true;
 
@@ -211,8 +224,8 @@ export component FerricLineEdit inherits Rectangle {
     }
 
     if root.text == "" && !input.has-focus: Text {
-        x: 12px;
-        width: parent.width - 24px;
+        x: root.pad-left;
+        width: parent.width - root.pad-left - 12px;
         height: 100%;
         text: root.placeholder;
         font-family: Theme.font-ui;
@@ -231,17 +244,37 @@ export component Card inherits Rectangle {
     border-color: Theme.border;
 }
 
-// 提示条（toast）。存活时长由 Rust 侧控制（TOAST_TTL = 3s），这里只管样式。
+// 提示条（toast）。存活时长由 Rust 侧控制（`TOAST_TTL`），这里只管样式与「×」。
+//
+// 级别：0 普通 / 1 警告 / 2 失败。失败的那条最需要被看见，用左侧色条标出来，
+// 而不是把整块涂红 —— 白字在红底上读起来更累，且与「危险操作」按钮混淆。
 export component Toast inherits Rectangle {
     in property <string> text;
-    height: 40px;
+    in property <int> level: 0;
+    callback dismissed();
+
+    property <color> mark: root.level == 2
+        ? Theme.danger
+        : (root.level == 1 ? #e0a23a : Theme.accent);
+
+    height: max(40px, toast-label.min-height + 20px);
     border-radius: 10px;
     background: Theme.dark ? #232a33 : #2a3138;
-    min-width: toast-label.min-width + 32px;
+    min-width: toast-label.min-width + 64px;
+
+    // 左侧级别色条
+    Rectangle {
+        x: 0;
+        y: 8px;
+        width: 3px;
+        height: parent.height - 16px;
+        border-radius: 2px;
+        background: root.mark;
+    }
 
     toast-label := Text {
-        x: 16px;
-        width: parent.width - 32px;
+        x: 14px;
+        width: parent.width - 46px;
         height: 100%;
         text: root.text;
         font-family: Theme.font-ui-medium;
@@ -249,5 +282,24 @@ export component Toast inherits Rectangle {
         color: #ffffff;
         vertical-alignment: center;
         wrap: word-wrap;
+    }
+
+    // 手动关掉：失败信息可能很长，用户读完就想清掉，不该等它自己走。
+    close-ta := TouchArea {
+        x: parent.width - 30px;
+        y: (parent.height - 24px) / 2;
+        width: 24px;
+        height: 24px;
+        clicked => { root.dismissed(); }
+        Text {
+            width: 100%;
+            height: 100%;
+            text: Icons.x;
+            font-family: Theme.font-icons;
+            font-size: 12px;
+            color: close-ta.has-hover ? #ffffff : rgba(255, 255, 255, 0.55);
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 }

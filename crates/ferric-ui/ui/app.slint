@@ -6,7 +6,7 @@
 // 与 egui 版的关键差别：这里是 retained mode —— 状态放在 property 上，Rust 侧用
 // setter 灌数据、用 callback 收事件；不再每帧重跑 UI 代码。
 
-import { Theme } from "theme.slint";
+import { Theme, Icons } from "theme.slint";
 // 把 Theme 再导出一次：Slint 只为**本文件导出**的 global 生成 Rust 侧类型，
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
@@ -24,6 +24,36 @@ struct ToolEntry {
     desc: string,
     icon: string,
     group: string,
+    favorite: bool,
+    // 是否整宽铺开（编辑器类工具）。false = 收进 1080px 居中列。
+    wide: bool,
+}
+
+// 一条提示。`level`：0 普通 / 1 警告 / 2 失败；`id` 是 Rust 侧的序号，
+// 点「×」时按它关掉那一条（用下标会在别的提示同时过期时关错人）。
+struct ToastRow {
+    id: int,
+    text: string,
+    level: int,
+}
+
+// 一条操作记录（提示的长期落点）。`at` 是 HH:MM:SS。
+struct ActivityRow {
+    at: string,
+    text: string,
+    level: int,
+}
+
+// 侧栏的一行。分组标题与工具行混在同一个模型里：`group == true` 是标题。
+// 这样分组顺序、收藏置顶都由 Rust 侧一次算好（见 `rail_rows`），
+// Slint 只按 kind 画两种行。
+struct RailRow {
+    group: bool,
+    label: string,
+    icon: string,
+    desc: string,
+    // 工具在 Rust 侧 `AppState::tools` 里的下标；标题行是 -1。
+    idx: int,
     favorite: bool,
 }
 
@@ -570,12 +600,14 @@ component RsaView inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
+        // 公钥在上、私钥在下（对位 egui 版）。PEM 一行 64 字符，左右分栏时
+        // 每栏都不够宽，反倒都要横向滚。私钥那块给更多高度：它更长。
+        VerticalLayout {
             spacing: 12px;
             vertical-stretch: 1;
 
             VerticalLayout {
-                horizontal-stretch: 1;
+                vertical-stretch: 1;
                 spacing: 6px;
                 EditorPane {
                     title: "公钥 (PEM)";
@@ -599,7 +631,7 @@ component RsaView inherits Rectangle {
             }
 
             VerticalLayout {
-                horizontal-stretch: 1;
+                vertical-stretch: 2;
                 spacing: 6px;
                 EditorPane {
                     title: "私钥 (PEM)";
@@ -789,12 +821,14 @@ component CryptoView inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
-            spacing: 16px;
+        // 加密卡在上、解密卡在下（对位 egui 版的两张卡上下堆叠）。
+        // 并排的话每侧只剩一半宽度，Base64 密文换行更频繁，反而更难读。
+        VerticalLayout {
+            spacing: 12px;
             vertical-stretch: 1;
 
             CryptoSide {
-                horizontal-stretch: 1;
+                vertical-stretch: 1;
                 title: "加密";
                 action-label: "加密";
                 which-in: "crypto-enc-in";
@@ -822,7 +856,7 @@ component CryptoView inherits Rectangle {
             }
 
             CryptoSide {
-                horizontal-stretch: 1;
+                vertical-stretch: 1;
                 title: "解密";
                 action-label: "解密";
                 which-in: "crypto-dec-in";
@@ -1004,8 +1038,10 @@ component GmView inherits Rectangle {
                         }
                     }
 
-                    HorizontalLayout {
-                        spacing: 16px;
+                    // 加密在上、解密在下（对位 egui 版的两张独立卡片）。
+                    // hex 密文很长，并排时每侧都不够宽。
+                    VerticalLayout {
+                        spacing: 14px;
 
                         // 加密侧
                         VerticalLayout {
@@ -1083,6 +1119,11 @@ component GmView inherits Rectangle {
                                 editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                                 editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
                             }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
                         }
 
                         // 解密侧
@@ -1309,14 +1350,15 @@ component TimestampView inherits Rectangle {
             }
         }
 
-        HorizontalLayout {
+        // 三块自上而下：当前时间戳 → 两个换算卡 → 时区面板（对位 egui 版
+        // 的三张全宽卡上下堆叠）。时区以前常驻右侧 40%，把换算卡挤成窄条 ——
+        // 那是「整页变左右布局」最直接的一处。
+        VerticalLayout {
             spacing: 12px;
             vertical-stretch: 1;
 
-            // ===== 双向转换 =====
             VerticalLayout {
                 spacing: 12px;
-                horizontal-stretch: 1;
 
                 Card {
                     vertical-stretch: 0;
@@ -1361,14 +1403,12 @@ component TimestampView inherits Rectangle {
                         }
                     }
                 }
-
-                Rectangle { vertical-stretch: 1; }
             }
 
             // ===== 时区选择 =====
             VerticalLayout {
                 spacing: 6px;
-                width: 40%;
+                vertical-stretch: 1;
                 HorizontalLayout {
                     FieldLabel { text: "目标时区"; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
@@ -2108,13 +2148,40 @@ component PluginView inherits Rectangle {
     }
 }
 
+// 侧栏分组标题（图标 + 组名，安静的小字）。
+component RailGroup inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+
+    height: 26px;
+    HorizontalLayout {
+        padding-left: 10px;
+        spacing: 6px;
+        Text {
+            text: root.icon;
+            font-family: Theme.font-icons;
+            font-size: 12px;
+            color: Theme.faint;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            font-family: Theme.font-ui-semibold;
+            font-size: 11px;
+            color: Theme.faint;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
 component SidebarRow inherits Rectangle {
-    in property <ToolEntry> entry;
+    in property <RailRow> entry;
     in property <bool> active;
     callback selected();
     callback toggle-favorite();
 
-    height: 40px;
+    height: 38px;
     border-radius: 9px;
     background: active
         ? Theme.accent-soft
@@ -2122,7 +2189,7 @@ component SidebarRow inherits Rectangle {
 
     HorizontalLayout {
         padding-left: 12px;
-        padding-right: 8px;
+        padding-right: 6px;
         spacing: 10px;
 
         Text {
@@ -2136,17 +2203,21 @@ component SidebarRow inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             Text {
-                text: root.entry.name;
-                font-family: Theme.font-ui-medium;
+                text: root.entry.label;
+                // 选中态换字重 + 主色（对位 egui 版：选中项是绿色加粗，
+                // 只换颜色的话在长列表里不够跳）。
+                font-family: root.active ? Theme.font-ui-semibold : Theme.font-ui-medium;
                 font-size: 13.5px;
-                color: root.active ? Theme.fg : Theme.fg-soft;
+                color: root.active ? Theme.accent-strong : Theme.fg-soft;
                 overflow: elide;
             }
         }
-        // 收藏星标：hover 或已收藏时可见
+        // 收藏：hover 或已收藏时才占位。图标走 Lucide 码点 ——
+        // 「★ / ☆」这类字符内嵌字体里没有，画出来是空白。
         if ta.has-hover || root.entry.favorite: IconButton {
-            icon: root.entry.favorite ? "★" : "☆";
+            icon: Icons.heart;
             icon-size: 13px;
+            active: root.entry.favorite;
             clicked => { root.toggle-favorite(); }
         }
     }
@@ -2397,14 +2468,28 @@ component SettingsOverlay inherits Rectangle {
     in-out property <float> ui-scale: 1.0;
     in-out property <bool> auto-update: true;
     in property <string> version;
+    in property <string> build-number: "0";
     in property <string> data-dir;
     in property <string> mem-status: "";
+    // 更新器状态（0 空闲 / 1 检查中 / 2 已最新 / 3 发现新版 / 4 下载中 / 5 可安装 / 6 失败）
+    in property <int> update-phase;
+    in property <string> update-version: "";
+    in property <int> update-progress;
+    in property <string> update-note: "";
+    in property <bool> updater-busy: false;
+    in property <string> last-check: "尚未成功检查过";
+    in property <bool> last-check-stale: false;
+    // 数据源：0 自动 / 1 服务器 / 2 GitHub / 3 演示
+    in property <int> source-index: 0;
 
     callback close();
     callback open-data-dir();
     callback record-memory();
     callback check-update();
     callback reset-demo();
+    callback source-changed(int);
+    callback clear-drafts();
+    callback reset-rail-width();
 
     visible: root.open;
     background: rgba(0, 0, 0, 0.45);
@@ -2575,14 +2660,94 @@ component SettingsOverlay inherits Rectangle {
                         // —— 更新 ——
                         if root.tab == 3: VerticalLayout {
                             spacing: 10px;
+
+                            // 当前状态。**六个阶段都要有话说** —— 只画「就绪」
+                            // 那一档的话，检查失败与「已是最新」在界面上无从区分，
+                            // 中间人丢包就能伪装成「你已经是最新版」。
+                            FieldLabel { text: "状态"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.update-phase == 6
+                                        ? Icons.circle-alert
+                                        : (root.update-phase == 2 || root.update-phase == 5
+                                            ? Icons.circle-check
+                                            : Icons.refresh);
+                                    font-family: Theme.font-icons;
+                                    font-size: 13px;
+                                    color: root.update-phase == 6
+                                        ? Theme.danger
+                                        : (root.update-phase == 2 || root.update-phase == 5
+                                            ? Theme.accent-strong
+                                            : Theme.muted);
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.update-phase == 1
+                                        ? "正在检查…"
+                                        : (root.update-phase == 2
+                                            ? "已是最新版本"
+                                            : (root.update-phase == 3
+                                                ? "发现新版本 v" + root.update-version
+                                                : (root.update-phase == 4
+                                                    ? "下载中 " + root.update-progress + "%"
+                                                    : (root.update-phase == 5
+                                                        ? "v" + root.update-version + " 已下载，签名与校验和均已通过"
+                                                        : (root.update-phase == 6
+                                                            ? "检查失败：" + root.update-note
+                                                            : "空闲")))));
+                                    font-family: Theme.font-ui;
+                                    font-size: 12.5px;
+                                    color: root.update-phase == 6 ? Theme.danger : Theme.fg-soft;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                            Text {
+                                text: "上次成功检查：" + root.last-check;
+                                font-family: Theme.font-ui;
+                                font-size: 11.5px;
+                                color: root.last-check-stale ? Theme.danger : Theme.faint;
+                            }
+
+                            FieldLabel { text: "数据源"; }
+                            Segmented {
+                                options: ["自动", "服务器", "GitHub", "演示"];
+                                current: root.source-index;
+                                changed(i) => { root.source-changed(i); }
+                            }
+                            Text {
+                                text: "没有配置更新服务器的构建里，选「演示」可以把插件市场与更新流程点开看。";
+                                font-family: Theme.font-ui;
+                                font-size: 11.5px;
+                                color: Theme.faint;
+                                wrap: word-wrap;
+                            }
+
                             CheckBox {
                                 text: "自动检查更新并后台下载";
                                 checked <=> root.auto-update;
                             }
-                            FerricButton {
-                                text: "立即检查更新";
-                                variant: "default";
-                                clicked => { root.check-update(); }
+                            Text {
+                                text: root.auto-update
+                                    ? "下好之后侧栏左下角会出现「安装 vX」，绝不自动装。"
+                                    : "只在手动点「立即检查更新」时联网。";
+                                font-family: Theme.font-ui;
+                                font-size: 11.5px;
+                                color: Theme.faint;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                FerricButton {
+                                    // 检查中禁用：点两下就是两次并发检查。
+                                    text: root.updater-busy ? "检查中…" : "立即检查更新";
+                                    variant: "default";
+                                    enabled: !root.updater-busy;
+                                    clicked => { root.check-update(); }
+                                }
                             }
                         }
 
@@ -2602,7 +2767,6 @@ component SettingsOverlay inherits Rectangle {
                                 alignment: start;
                                 FerricButton {
                                     text: "打开数据文件夹";
-                                    icon: "⌸";
                                     clicked => { root.open-data-dir(); }
                                 }
                                 FerricButton {
@@ -2621,19 +2785,41 @@ component SettingsOverlay inherits Rectangle {
                                 font-size: 12px;
                                 color: Theme.accent-strong;
                             }
+                            FieldLabel { text: "清理"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                FerricButton {
+                                    text: "清除收藏与工具草稿";
+                                    variant: "subtle";
+                                    clicked => { root.clear-drafts(); }
+                                }
+                                FerricButton {
+                                    text: "侧栏宽度恢复默认";
+                                    variant: "subtle";
+                                    clicked => { root.reset-rail-width(); }
+                                }
+                            }
                         }
 
                         // —— 关于 ——
                         if root.tab == 5: VerticalLayout {
                             spacing: 10px;
                             Text {
-                                text: "Ferric " + root.version;
+                                text: "Ferric";
                                 font-family: Theme.font-ui-semibold;
                                 font-size: 16px;
                                 color: Theme.fg;
                             }
+                            // 版本 + 构建号：报 bug 时说不清是哪个 build 等于白报。
                             Text {
-                                text: "跨平台原生 Rust 开发者工具箱。\nGUI：Slint（软件渲染）。";
+                                text: "v" + root.version + "  (build " + root.build-number + ")";
+                                font-family: Theme.font-mono-medium;
+                                font-size: 12.5px;
+                                color: Theme.muted;
+                            }
+                            Text {
+                                text: "跨平台原生 Rust 开发者工具箱。GUI：Slint（软件渲染）。\n工具数据仅存于本机；只有检查更新与插件市场会联网。";
                                 font-family: Theme.font-ui;
                                 font-size: 12.5px;
                                 color: Theme.muted;
@@ -2642,6 +2828,134 @@ component SettingsOverlay inherits Rectangle {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ——— 操作记录 ———
+//
+// 提示条只活 4 秒，这里是它们的**统一落点**：复制了什么、更新查到哪一步、
+// 插件为什么没加载起来、安装为什么失败，一次会话内都能回头看。
+// 由 Rust 侧的 `Shared::activity` 灌进来（上限 200 条，超了丢最旧的）。
+component ActivityPanel inherits Rectangle {
+    in property <[ActivityRow]> rows;
+    callback clear();
+    callback dismiss();
+
+    background: rgba(0, 0, 0, 0.42);
+
+    // 点背景关闭
+    TouchArea {
+        clicked => { root.dismiss(); }
+    }
+
+    Rectangle {
+        width: min(560px, parent.width - 80px);
+        height: min(480px, parent.height - 120px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: Theme.border-2;
+
+        // 吞掉点击，避免穿透到背景的关闭逻辑
+        TouchArea { }
+
+        VerticalLayout {
+            // 标题条
+            Rectangle {
+                height: 48px;
+                background: Theme.titlebar;
+                border-radius: 14px;
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    Text {
+                        text: "操作记录";
+                        font-family: Theme.font-ui-semibold;
+                        font-size: 15px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.rows.length + " 条";
+                        font-family: Theme.font-mono;
+                        font-size: 11px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                    IconButton {
+                        icon: Icons.trash;
+                        icon-size: 14px;
+                        enabled: root.rows.length > 0;
+                        clicked => { root.clear(); }
+                    }
+                    IconButton {
+                        icon: Icons.x;
+                        icon-size: 14px;
+                        clicked => { root.dismiss(); }
+                    }
+                }
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 1px;
+                    alignment: start;
+                    // 新的在上：刚发生的事最可能是用户要找的那条。
+                    for r in root.rows: Rectangle {
+                        height: max(30px, row-text.min-height + 12px);
+                        border-radius: 7px;
+                        background: row-ta.has-hover ? Theme.code-bg : transparent;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            Text {
+                                text: r.level == 2
+                                    ? Icons.circle-alert
+                                    : (r.level == 1 ? Icons.circle-alert : Icons.circle-check);
+                                font-family: Theme.font-icons;
+                                font-size: 12px;
+                                color: r.level == 2
+                                    ? Theme.danger
+                                    : (r.level == 1 ? #e0a23a : Theme.accent);
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: r.at;
+                                font-family: Theme.font-mono;
+                                font-size: 11px;
+                                color: Theme.faint;
+                                vertical-alignment: center;
+                            }
+                            row-text := Text {
+                                text: r.text;
+                                font-family: Theme.font-ui;
+                                font-size: 12.5px;
+                                color: r.level == 2 ? Theme.danger : Theme.fg-soft;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                        }
+                        row-ta := TouchArea { }
+                    }
+                }
+            }
+
+            if root.rows.length == 0: Text {
+                text: "还没有记录";
+                font-family: Theme.font-ui;
+                font-size: 12.5px;
+                color: Theme.faint;
+                horizontal-alignment: center;
             }
         }
     }
@@ -2778,10 +3092,15 @@ export component AppWindow inherits Window {
     min-width: 360px;
     min-height: 280px;
     no-frame: true;
+    // 无边框窗口自己没有系统边框可拖。Slint 的 winit 后端会在离边缘
+    // `resize-border-width` 以内接管指针（换 resize 光标 + 调 drag_resize_window），
+    // 但这个属性默认 0px —— 不给值就等于「窗口不能拖着改大小」。
+    resize-border-width: 6px;
     background: Theme.canvas;
 
     // ——— 状态（Rust 侧读写） ———
-    in property <[ToolEntry]> tools;
+    // 侧栏行（分组标题 + 工具，由 Rust 侧 `rail_rows` 一次算好）
+    in property <[RailRow]> rail;
     in-out property <int> active-tool: 0;
     in-out property <string> rail-filter: "";
     in-out property <length> rail-width: 264px;
@@ -2792,9 +3111,19 @@ export component AppWindow inherits Window {
     in-out property <int> palette-sel: 0;
     in property <[ToolEntry]> palette-rows;
     in property <string> version: "0.2.0";
+    in property <string> build-number: "0";
+    // 更新器辅助状态（阶段本身在「更新器」一节）
+    in property <bool> updater-busy: false;
+    in property <string> last-check: "尚未成功检查过";
+    in property <bool> last-check-stale: false;
+    // 数据源：0 自动 / 1 服务器 / 2 GitHub / 3 演示
+    in property <int> source-index: 0;
     in property <string> data-dir: "";
     in property <string> mem-status: "";
-    in property <[string]> toasts;
+    // 提示条（4 秒自动消失，也可点「×」）与它们的长期落点「操作记录」
+    in property <[ToastRow]> toasts;
+    in property <[ActivityRow]> activity;
+    in-out property <bool> log-open: false;
 
     // 设置项（双向）
     in-out property <int> theme-mode: 0;
@@ -2971,6 +3300,13 @@ export component AppWindow inherits Window {
     callback open-data-dir();
     callback record-memory();
     callback check-update();
+    // 提示与操作记录
+    callback dismiss-toast(int);
+    callback clear-activity();
+    // 设置里的动作
+    callback source-changed(int);
+    callback clear-drafts();
+    callback reset-rail-width();
     callback uuid-regenerate();
     callback uuid-copy();
     callback uuid-restore-history(int);
@@ -3104,37 +3440,45 @@ export component AppWindow inherits Window {
             height: 44px;
             background: Theme.titlebar;
 
-            // 拖拽区（右侧留出 180px 给窗口按钮，按钮声明在后面因此覆盖其上）。
+            // 拖拽区（右侧留出 96px 给三个窗口按钮，按钮声明在后面因此覆盖其上）。
             //
             // 在**按下瞬间**就交给系统拖动，而不是等 `moved`：winit 的
             // drag_window 要求在鼠标仍按下时调用，等移动事件到达时那一拍
             // 已经过去了（实测「拖了没反应」就是这个原因）。
             drag-ta := TouchArea {
-                width: parent.width - 180px;
+                width: parent.width - 96px;
                 height: parent.height;
                 mouse-cursor: default;
                 pointer-event(ev) => {
-                    if (ev.kind == PointerEventKind.down) {
+                    if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left) {
                         root.window-drag();
                     }
                 }
             }
 
             HorizontalLayout {
-                padding-left: 18px;
-                padding-right: 4px;
+                padding-left: 14px;
+                padding-right: 6px;
                 spacing: 0px;
 
+                // 品牌区：图标 + 名字 + 版本
+                Text {
+                    text: Icons.box;
+                    font-family: Theme.font-icons;
+                    font-size: 16px;
+                    color: Theme.accent-strong;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 8px; }
                 Text {
                     text: "Ferric";
                     font-family: Theme.font-ui-bold;
+                    font-weight: Theme.weight-bold;
                     font-size: 14.5px;
                     color: Theme.fg;
                     vertical-alignment: center;
                 }
-                Rectangle {
-                    width: 12px;
-                }
+                Rectangle { width: 10px; }
                 Text {
                     text: root.version;
                     font-family: Theme.font-mono-medium;
@@ -3144,42 +3488,22 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                 }
 
-                // 更新就绪时顶栏常驻一个入口。用户点了「稍后」之后
-                // 仍然要能找回来 —— 否则那次更新就等于被丢掉了。
-                if root.update-phase == 5: FerricButton {
-                    text: "安装 v" + root.update-version;
-                    variant: "primary";
-                    clicked => { root.update-dialog-open = true; }
-                }
-                if root.update-phase == 4: Text {
-                    text: "更新下载中 " + root.update-progress + "%";
-                    font-family: Theme.font-ui;
-                    font-size: 11.5px;
-                    color: Theme.muted;
-                    vertical-alignment: center;
-                }
-
-                // 设置入口
+                // 窗口按钮。字形一律取 Lucide 码点（`Icons.*`）——
+                // 写「▢」「✕」这类相似字符时内嵌字体里没有，按钮会整个变空白。
                 IconButton {
-                    icon: "⚙";
-                    icon-size: 16px;
-                    clicked => { root.settings-open = true; }
-                }
-                Rectangle { width: 4px; }
-                // 窗口按钮
-                IconButton {
-                    icon: "—";
-                    icon-size: 14px;
+                    icon: Icons.minus;
+                    icon-size: 15px;
                     clicked => { root.window-minimize(); }
                 }
                 IconButton {
-                    icon: "▢";
+                    icon: Icons.square;
                     icon-size: 13px;
                     clicked => { root.window-maximize(); }
                 }
                 IconButton {
-                    icon: "✕";
-                    icon-size: 14px;
+                    icon: Icons.x;
+                    icon-size: 15px;
+                    danger: true;
                     clicked => { root.window-close(); }
                 }
             }
@@ -3203,32 +3527,190 @@ export component AppWindow inherits Window {
                     padding: 12px;
                     spacing: 8px;
 
-                    // 搜索框
-                    FerricLineEdit {
-                        placeholder: "搜索工具…";
-                        text <=> root.rail-filter;
-                        // 用 `edited` 而不是 `changed rail-filter`：内建 TextInput
-                        // 的 text 走双向绑定时，根组件上的 changed 不会被触发
-                        //（实测输入后侧栏纹丝不动）。
-                        edited(t) => { root.filter-changed(t); }
+                    // 搜索框：左侧放大镜 + 「Ctrl K」提示（命令面板的唯一线索，
+                    // 不写出来用户无从知道有这个快捷键）。
+                    Rectangle {
+                        height: 38px;
+                        FerricLineEdit {
+                            width: 100%;
+                            height: 100%;
+                            pad-left: 34px;
+                            placeholder: "搜索工具…   Ctrl K";
+                            text <=> root.rail-filter;
+                            // 用 `edited` 而不是 `changed rail-filter`：内建 TextInput
+                            // 的 text 走双向绑定时，根组件上的 changed 不会被触发
+                            //（实测输入后侧栏纹丝不动）。
+                            edited(t) => { root.filter-changed(t); }
+                        }
+                        Text {
+                            x: 12px;
+                            width: 16px;
+                            height: 100%;
+                            text: Icons.search;
+                            font-family: Theme.font-icons;
+                            font-size: 14px;
+                            color: Theme.faint;
+                            vertical-alignment: center;
+                        }
                     }
 
-                    // 工具列表
+                    // 工具列表：分组标题与工具行同在一个模型里（`rail_rows`）。
+                    // 过滤也在 Rust 侧算（Slint 的 string 没有 contains，
+                    // 中文还要按 char 比），不命中的行根本不进模型。
                     ScrollView {
                         vertical-stretch: 1;
                         VerticalLayout {
                             spacing: 2px;
                             alignment: start;
-                            // 侧栏只列命中搜索的工具：过滤在 Rust 侧算
-                            //（Slint 的 string 没有 contains，中文还要按 char
-                            // 比），不命中的行根本不进模型。
-                            for t in root.tools: SidebarRow {
-                                entry: t;
-                                active: t.idx == root.active-tool;
-                                selected => { root.select-tool(t.idx); }
-                                toggle-favorite => { root.toggle-favorite(t.idx); }
+                            for r in root.rail: Rectangle {
+                                height: r.group ? 26px : 38px;
+                                if r.group: RailGroup {
+                                    label: r.label;
+                                    icon: r.icon;
+                                }
+                                if !r.group: SidebarRow {
+                                    entry: r;
+                                    active: r.idx == root.active-tool;
+                                    selected => { root.select-tool(r.idx); }
+                                    toggle-favorite => { root.toggle-favorite(r.idx); }
+                                }
                             }
                         }
+                    }
+
+                    // ===== 底部：更新状态 + 品牌 + 一排入口 =====
+                    //
+                    // 位置对齐 egui 版的左下角。更新入口刻意不放标题栏：那儿只该
+                    // 有窗口按钮，一个绿按钮紧贴关闭键既抢眼又容易误点。
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    // 有事才占位：可安装 / 下载中 / 失败。空闲与「已最新」不占地方。
+                    if root.update-phase == 5: FerricButton {
+                        text: "安装 v" + root.update-version;
+                        variant: "primary";
+                        clicked => { root.update-dialog-open = true; }
+                    }
+                    if root.update-phase == 4: HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: Icons.file-down;
+                            font-family: Theme.font-icons;
+                            font-size: 13px;
+                            color: Theme.accent-strong;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "下载更新 " + root.update-progress + "%";
+                            font-family: Theme.font-ui;
+                            font-size: 11.5px;
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    if root.update-phase == 6: Rectangle {
+                        height: 26px;
+                        border-radius: 8px;
+                        background: fail-ta.has-hover ? Theme.border : transparent;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: Icons.circle-alert;
+                                font-family: Theme.font-icons;
+                                font-size: 13px;
+                                color: Theme.danger;
+                                vertical-alignment: center;
+                            }
+                            // 详情不在这儿铺开：一行放不下，点开操作记录看全文。
+                            Text {
+                                text: "更新失败 · 查看记录";
+                                font-family: Theme.font-ui;
+                                font-size: 11.5px;
+                                color: Theme.danger;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        fail-ta := TouchArea {
+                            clicked => { root.log-open = true; }
+                        }
+                    }
+
+                    // 品牌块
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 9px;
+                            background: Theme.accent;
+                            Text {
+                                width: 100%;
+                                height: 100%;
+                                text: Icons.box;
+                                font-family: Theme.font-icons;
+                                font-size: 17px;
+                                color: #ffffff;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "Ferric";
+                                font-family: Theme.font-ui-semibold;
+                                font-size: 13px;
+                                color: Theme.fg;
+                            }
+                            Text {
+                                text: "v" + root.version;
+                                font-family: Theme.font-mono;
+                                font-size: 10.5px;
+                                color: Theme.faint;
+                            }
+                        }
+                    }
+
+                    // 入口行：主题 / 操作记录 / 关于 / 设置
+                    HorizontalLayout {
+                        spacing: 2px;
+                        IconButton {
+                            icon: Theme.dark ? Icons.sun : Icons.moon;
+                            icon-size: 15px;
+                            // 单击就在亮 / 暗之间来回。「跟随系统」留在设置里 ——
+                            // 三态循环按钮点两下才回到原处，反而难用。
+                            clicked => { root.theme-mode = Theme.dark ? 1 : 2; }
+                        }
+                        IconButton {
+                            icon: Icons.list-checks;
+                            icon-size: 15px;
+                            active: root.log-open;
+                            clicked => { root.log-open = !root.log-open; }
+                        }
+                        IconButton {
+                            icon: Icons.info;
+                            icon-size: 15px;
+                            clicked => {
+                                root.settings-tab = 5;
+                                root.settings-open = true;
+                            }
+                        }
+                        IconButton {
+                            icon: Icons.settings;
+                            icon-size: 15px;
+                            active: root.settings-open;
+                            clicked => {
+                                root.settings-tab = 0;
+                                root.settings-open = true;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
 
@@ -3266,30 +3748,28 @@ export component AppWindow inherits Window {
                 background: Theme.bg;
 
                 VerticalLayout {
-                    // 工具标题条
+                    // 工具标题条：名称 + 收藏
                     Rectangle {
-                        height: 64px;
+                        height: 60px;
                         HorizontalLayout {
-                            padding-left: 20px;
-                            padding-right: 20px;
+                            padding-left: 24px;
+                            padding-right: 14px;
                             spacing: 12px;
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 2px;
+                            Text {
+                                text: root.current.name;
+                                font-family: Theme.font-ui-bold;
+                                font-weight: Theme.weight-bold;
+                                font-size: 19px;
+                                color: Theme.fg;
+                                vertical-alignment: center;
                                 horizontal-stretch: 1;
-                                Text {
-                                    text: root.current.name;
-                                    font-family: Theme.font-ui-bold;
-                                    font-size: 19px;
-                                    color: Theme.fg;
-                                }
-                                Text {
-                                    text: root.current.desc;
-                                    font-family: Theme.font-ui;
-                                    font-size: 12.5px;
-                                    color: Theme.muted;
-                                    overflow: elide;
-                                }
+                            }
+                            // 收藏：收藏组会置顶到侧栏最上，所以这颗心是有用的。
+                            IconButton {
+                                icon: Icons.heart;
+                                icon-size: 16px;
+                                active: root.current.favorite;
+                                clicked => { root.toggle-favorite(root.current.idx); }
                             }
                         }
                         Rectangle {
@@ -3299,6 +3779,42 @@ export component AppWindow inherits Window {
                             background: Theme.border;
                         }
                     }
+
+                    // 说明条：accent 竖条 + 描述（对位 egui 版的 page-intro；
+                    // 挤在标题下面当小灰字读起来太轻，那是页面在自我介绍）。
+                    if root.current.desc != "": HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        padding-top: 14px;
+                        spacing: 10px;
+                        Rectangle {
+                            width: 3px;
+                            border-radius: 2px;
+                            background: Theme.accent;
+                        }
+                        Text {
+                            text: root.current.desc;
+                            font-family: Theme.font-ui;
+                            font-size: 13px;
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    // 内容列：宽屏时收窄居中到 1080px（对位 egui 版 content_metrics）。
+                    // 不收窄的话同一组控件在 1280px+ 的窗口里被拉开，一行字的
+                    // 扫视距离过长 —— 这也是「怎么都变成左右布局了」的观感来源。
+                    // 编辑器类工具（`wide`）照旧整宽。
+                    Rectangle {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: 0;
+                            width: root.current.wide ? parent.width : min(1080px, parent.width);
+                            height: parent.height;
+                            VerticalLayout {
 
                     // 工具主体：按 current.id 分派（新增工具漏了分支这里就是空白）
                     if root.current.id == "uuid": UuidView {
@@ -3596,19 +4112,28 @@ export component AppWindow inherits Window {
                         editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
                         editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
                     }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     // ===== Toast 区（右下角堆叠） =====
+    //
+    // 过期由 Rust 侧的每秒心跳剔除（`prune_toasts`），点「×」立即关掉那一条。
     VerticalLayout {
         x: parent.width - self.width - 20px;
         y: parent.height - self.height - 20px;
-        width: 340px;
+        width: 360px;
         spacing: 8px;
         alignment: end;
-        for msg in root.toasts: Toast { text: msg; }
+        for t in root.toasts: Toast {
+            text: t.text;
+            level: t.level;
+            dismissed => { root.dismiss-toast(t.id); }
+        }
     }
 
     // ===== 更新框 =====
@@ -3639,6 +4164,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "发现新版本 v" + root.update-version;
                     font-family: Theme.font-ui-bold;
+                    font-weight: Theme.weight-bold;
                     font-size: 17px;
                     color: Theme.fg;
                 }
@@ -3694,13 +4220,25 @@ export component AppWindow inherits Window {
         ui-scale <=> root.ui-scale;
         auto-update <=> root.auto-update;
         version: root.version;
+        build-number: root.build-number;
         data-dir: root.data-dir;
         mem-status: root.mem-status;
+        update-phase: root.update-phase;
+        update-version: root.update-version;
+        update-progress: root.update-progress;
+        update-note: root.update-note;
+        updater-busy: root.updater-busy;
+        last-check: root.last-check;
+        last-check-stale: root.last-check-stale;
+        source-index: root.source-index;
         close => { root.settings-open = false; }
         open-data-dir => { root.open-data-dir(); }
         record-memory => { root.record-memory(); }
         check-update => { root.check-update(); }
         reset-demo => { root.reset-demo(); }
+        source-changed(i) => { root.source-changed(i); }
+        clear-drafts => { root.clear-drafts(); }
+        reset-rail-width => { root.reset-rail-width(); }
     }
 
     // ===== 命令面板（Ctrl+K，快捷键在 Rust 侧的 winit 事件里拦） =====
@@ -3719,5 +4257,34 @@ export component AppWindow inherits Window {
             root.select-tool(i);
         }
         dismiss => { root.palette-open = false; }
+    }
+
+    // ===== 操作记录（侧栏左下角那个图标打开） =====
+    if root.log-open: ActivityPanel {
+        width: parent.width;
+        height: parent.height;
+        rows: root.activity;
+        clear => { root.clear-activity(); }
+        dismiss => { root.log-open = false; }
+    }
+
+    // ===== 剪贴板出口 =====
+    //
+    // Slint 的公开 Rust API 没有剪贴板（`Platform::set_clipboard_text` 是后端
+    // 内部实现），但 `TextInput` 自带 `copy()`。所以留一个 0×0 的隐形输入框：
+    // Rust 侧把要复制的文本灌进来 → 全选 → copy()。
+    //
+    // 不能只做「toast 说已复制」而不真写剪贴板 —— 迁移期就是这样，所有工具的
+    // 复制按钮都在骗人。
+    clip := TextInput {
+        width: 0px;
+        height: 0px;
+        // single-line 会把多行内容截断，UUID 列表 / PEM 私钥都是多行。
+        single-line: false;
+    }
+    public function copy-to-clipboard(text: string) {
+        clip.text = text;
+        clip.select-all();
+        clip.copy();
     }
 }
