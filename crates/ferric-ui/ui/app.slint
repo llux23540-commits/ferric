@@ -11,7 +11,7 @@ import { Theme, Icons } from "theme.slint";
 // 光 import 进来不够 —— Rust 需要 `win.global::<Theme>()` 来切深浅色。
 export { Theme }
 import { FieldLabel, FerricButton, IconButton, VDivider, Segmented, FerricLineEdit, Card, Toast, Tooltip } from "widgets.slint";
-import { CodeEditor, TokenLine } from "editor.slint";
+import { CodeEditor, TokenLine, CellSpan } from "editor.slint";
 import { ScrollView, CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
 
 // 侧栏一行工具。
@@ -131,19 +131,19 @@ struct EditorState {
     row-kinds: [int],
     // 这一屏里有没有差异行（决定行号槽要不要让出 -/+ 那一列）
     diffed: bool,
-    // 字符级高亮 (视口行, 起列, 列数)：改动行里「改了哪几个字」
-    emph-spans: [[int]],
-    // 光标的视口内坐标
+    // 字符级高亮：改动行里「改了哪几个字」（坐标是窄字宽的倍数）
+    emph-spans: [CellSpan],
+    // 光标的视口内位置：行是整数，横向是窄字宽的倍数（中文一个字宽过一格）
     cursor-line: int,
-    cursor-col: int,
+    cursor-x: float,
     cursor-visible: bool,
-    // 语法着色的片段（JSON 工具用）。Slint 没有富文本，所以一行不是一个
-    // Text，而是按 char 列定位的一串片段 —— 等宽字体下与光标列天然对齐。
+    // 语法着色的片段（JSON 工具用）。Slint 没有富文本，所以一行是一串
+    // 顺次排开的片段 —— 宽度交给字体，中文才不会互相压字。
     tokens: [TokenLine],
     // 这一屏有没有着色片段（有就不再画整行纯文本，免得画两遍）
     highlighted: bool,
-    // 选区高亮 (视口行, 起列, 列数)，已裁到视口内
-    selection-spans: [[int]],
+    // 选区高亮，已裁到视口内（坐标同为窄字宽的倍数）
+    selection-spans: [CellSpan],
 }
 
 // 带标题栏的编辑区面板。
@@ -158,8 +158,9 @@ component EditorPane inherits Rectangle {
     in property <string> hint: "";
 
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -209,12 +210,13 @@ component EditorPane inherits Rectangle {
             tokens: root.state.tokens;
             highlighted: root.state.highlighted;
             cursor-line: root.state.cursor-line;
-            cursor-col: root.state.cursor-col;
+            cursor-x: root.state.cursor-x;
             cursor-visible: root.state.cursor-visible;
             selection-spans: root.state.selection-spans;
             read-only: root.read-only;
 
             viewport-changed(r, c) => { root.editor-viewport(root.which, r, c); }
+            wide-ratio-changed(v) => { root.editor-wide-ratio(v); }
             clicked(l, c, e) => { root.editor-click(root.which, l, c, e); }
             dragged(l, c) => { root.editor-drag(root.which, l, c); }
             triple-clicked => { root.editor-triple(root.which); }
@@ -237,8 +239,9 @@ component YamlView inherits Rectangle {
     callback clear-input();
     callback copy-output();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -288,6 +291,7 @@ component YamlView inherits Rectangle {
                 state: root.input-state;
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -304,6 +308,7 @@ component YamlView inherits Rectangle {
                 hint: "只读";
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -328,8 +333,9 @@ component SqlView inherits Rectangle {
     callback clear-input();
     callback copy-input();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -384,6 +390,7 @@ component SqlView inherits Rectangle {
             state: root.input-state;
             vertical-stretch: 1;
             editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
@@ -441,8 +448,9 @@ component RegexView inherits Rectangle {
     callback pattern-edited(string);
     callback toggle-flag(int);
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -501,6 +509,7 @@ component RegexView inherits Rectangle {
                 state: root.text-state;
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -591,8 +600,9 @@ component RsaView inherits Rectangle {
     callback copy-pub();
     callback copy-priv();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -645,6 +655,7 @@ component RsaView inherits Rectangle {
                     hint: "只读";
                     vertical-stretch: 1;
                     editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                    editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                     editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                     editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                     editor-triple(w) => { root.editor-triple(w); }
@@ -671,6 +682,7 @@ component RsaView inherits Rectangle {
                     hint: "只读 · 不持久化";
                     vertical-stretch: 1;
                     editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                    editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                     editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                     editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                     editor-triple(w) => { root.editor-triple(w); }
@@ -709,8 +721,9 @@ component CryptoSide inherits Rectangle {
     callback run();
     callback copy-output();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -757,6 +770,7 @@ component CryptoSide inherits Rectangle {
             state: root.input-state;
             vertical-stretch: 1;
             editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
@@ -797,6 +811,7 @@ component CryptoSide inherits Rectangle {
             hint: "只读";
             vertical-stretch: 1;
             editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
@@ -834,8 +849,9 @@ component CryptoView inherits Rectangle {
     callback copy-enc();
     callback copy-dec();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -881,6 +897,7 @@ component CryptoView inherits Rectangle {
                 run => { root.do-encrypt(); }
                 copy-output => { root.copy-enc(); }
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -910,6 +927,7 @@ component CryptoView inherits Rectangle {
                 run => { root.do-decrypt(); }
                 copy-output => { root.copy-dec(); }
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -970,8 +988,9 @@ component GmView inherits Rectangle {
     callback do-sign();
     callback do-verify();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -1117,6 +1136,7 @@ component GmView inherits Rectangle {
                                 state: root.enc-in;
                                 height: 150px;
                                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
@@ -1150,6 +1170,7 @@ component GmView inherits Rectangle {
                                 hint: "只读";
                                 height: 150px;
                                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
@@ -1198,6 +1219,7 @@ component GmView inherits Rectangle {
                                 state: root.dec-in;
                                 height: 150px;
                                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
@@ -1231,6 +1253,7 @@ component GmView inherits Rectangle {
                                 hint: "只读";
                                 height: 150px;
                                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                                 editor-triple(w) => { root.editor-triple(w); }
@@ -1282,6 +1305,7 @@ component GmView inherits Rectangle {
                         state: root.sig-state;
                         height: 130px;
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -1646,8 +1670,9 @@ component JsonView inherits Rectangle {
     callback next-hit();
     callback prev-hit();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -1887,6 +1912,7 @@ component JsonView inherits Rectangle {
             state: root.input-state;
             vertical-stretch: 1;
             editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+            editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
             editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
             editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
             editor-triple(w) => { root.editor-triple(w); }
@@ -1912,8 +1938,9 @@ component DiffView inherits Rectangle {
     callback next-hunk();
     callback prev-hunk();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -1992,6 +2019,7 @@ component DiffView inherits Rectangle {
                 state: root.left-state;
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -2006,6 +2034,7 @@ component DiffView inherits Rectangle {
                 state: root.right-state;
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -2221,8 +2250,9 @@ component PluginView inherits Rectangle {
     callback do-run();
     callback copy-output();
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -2303,6 +2333,7 @@ component PluginView inherits Rectangle {
                 state: root.input-state;
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -2319,6 +2350,7 @@ component PluginView inherits Rectangle {
                 hint: "只读";
                 horizontal-stretch: 1;
                 editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                 editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                 editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                 editor-triple(w) => { root.editor-triple(w); }
@@ -3502,8 +3534,9 @@ export component AppWindow inherits Window {
     // Rust 侧一个 match 分派到对应的 TextBuffer —— 每加一个文本类工具
     // 不需要再接一遍回调。
     callback editor-viewport(string, int, int);
-    callback editor-click(string, int, int, bool);
-    callback editor-drag(string, int, int);
+    callback editor-wide-ratio(float);
+    callback editor-click(string, int, float, bool);
+    callback editor-drag(string, int, float);
     callback editor-triple(string);
     callback editor-fold(string, int);
     callback editor-scroll(string, int, int);
@@ -4035,6 +4068,7 @@ export component AppWindow inherits Window {
                         clear-input => { root.yaml-clear(); }
                         copy-output => { root.yaml-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4054,6 +4088,7 @@ export component AppWindow inherits Window {
                         clear-input => { root.sql-clear(); }
                         copy-input => { root.sql-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4077,6 +4112,7 @@ export component AppWindow inherits Window {
                         pattern-edited(t) => { root.regex-pattern-edited(t); }
                         toggle-flag(i) => { root.regex-toggle-flag(i); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4098,6 +4134,7 @@ export component AppWindow inherits Window {
                         copy-pub => { root.rsa-copy-pub(); }
                         copy-priv => { root.rsa-copy-priv(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4131,6 +4168,7 @@ export component AppWindow inherits Window {
                         copy-enc => { root.crypto-copy-enc(); }
                         copy-dec => { root.crypto-copy-dec(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4183,6 +4221,7 @@ export component AppWindow inherits Window {
                         do-sign => { root.gm-sign(); }
                         do-verify => { root.gm-verify(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4246,6 +4285,7 @@ export component AppWindow inherits Window {
                         next-hit => { root.json-next-hit(); }
                         prev-hit => { root.json-prev-hit(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4267,6 +4307,7 @@ export component AppWindow inherits Window {
                         clear-input => { root.diff-clear(); }
                         copy-result => { root.diff-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }
@@ -4304,6 +4345,7 @@ export component AppWindow inherits Window {
                         do-run => { root.plugin-run(); }
                         copy-output => { root.plugin-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
+                        editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
                         editor-drag(w, l, c) => { root.editor-drag(w, l, c); }
                         editor-triple(w) => { root.editor-triple(w); }

@@ -12,7 +12,7 @@
 //! 在这边 match 反而更清楚，也顺手把 Ctrl 组合键一起收了。
 
 use crate::editor::{Motion, TextBuffer};
-use crate::state::{EditorState, TokenLine, TokenRun};
+use crate::state::{CellSpan, EditorState, TokenLine, TokenRun};
 use slint::{ModelRc, SharedString, VecModel};
 
 // Slint 的功能键码点（i-slint-common/key_codes.rs）。
@@ -77,14 +77,17 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         .map(SharedString::from)
         .collect();
 
-    let (_, cur_col) = buf.cursor_line_col();
     let cur_row = buf.cursor_view_row();
 
-    let spans: Vec<ModelRc<i32>> = buf
+    // 选区与字符级高亮的横向坐标都是「窄字宽的倍数」（中文一个字宽过一格），
+    // UI 侧乘上量出来的窄字宽即得像素。
+    let spans: Vec<CellSpan> = buf
         .selection_spans()
         .into_iter()
-        .map(|(line, col, width)| {
-            ModelRc::new(VecModel::from(vec![line as i32, col as i32, width as i32]))
+        .map(|(row, x, w)| CellSpan {
+            row: row as i32,
+            x,
+            w,
         })
         .collect();
 
@@ -104,20 +107,19 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
     let diffed = kinds.iter().any(|k| *k != 0);
 
     // 字符级高亮裁到视口：行不在这一屏、或整段被横向滚动推出去的都不画。
+    // 坐标同样是窄字宽的倍数（`cells_of_range` 负责裁剪与换算）。
     let left = buf.scroll_col();
     let right = left + buf.viewport_cols() + 1;
-    let emph: Vec<ModelRc<i32>> = decor
+    let emph: Vec<CellSpan> = decor
         .emph
         .iter()
         .filter_map(|(line, col, len)| {
             let row = rows.iter().position(|l| l == line)?;
-            let (a, b) = ((*col).max(left), (col + len).min(right));
-            (b > a).then(|| {
-                ModelRc::new(VecModel::from(vec![
-                    row as i32,
-                    (a - left) as i32,
-                    (b - a) as i32,
-                ]))
+            let (x, w) = buf.cells_of_range(*line, *col, *len)?;
+            Some(CellSpan {
+                row: row as i32,
+                x,
+                w,
             })
         })
         .collect();
@@ -165,7 +167,7 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         diffed,
         emph_spans: ModelRc::new(VecModel::from(emph)),
         cursor_line: cur_row.unwrap_or(0) as i32,
-        cursor_col: cur_col.saturating_sub(buf.scroll_col()) as i32,
+        cursor_x: buf.cursor_cells(),
         cursor_visible: cur_row.is_some(),
         tokens: ModelRc::new(VecModel::from(tokens)),
         highlighted,
@@ -365,8 +367,8 @@ mod tests {
 
         b.select_all();
         b.move_cursor(Motion::DocStart, false);
-        b.click(0, 0, false);
-        b.click(0, 5, true);
+        b.click(0, 0.0, false);
+        b.click(0, 5.0, true);
         let out = apply_key(&mut b, "c", true, false, false);
         assert_eq!(out.copy.as_deref(), Some("hello"));
     }
@@ -379,8 +381,8 @@ mod tests {
         assert!(!out.edited);
         assert_eq!(b.text(), "hello\nworld\n");
 
-        b.click(0, 0, false);
-        b.click(0, 5, true);
+        b.click(0, 0.0, false);
+        b.click(0, 5.0, true);
         let out = apply_key(&mut b, "x", true, false, false);
         assert_eq!(out.copy.as_deref(), Some("hello"));
         assert_eq!(b.text(), "\nworld\n");
@@ -445,7 +447,7 @@ mod tests {
         let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
         let mut b = TextBuffer::new(&text);
         b.set_viewport(10, 80);
-        b.click(0, 0, false); // 光标在第 0 行
+        b.click(0, 0.0, false); // 光标在第 0 行
         b.scroll_to_line(500); // 视野挪到 500
         let st = state_of(&b);
         assert!(!st.cursor_visible);
@@ -481,9 +483,10 @@ mod tests {
 
         assert_eq!(st.emph_spans.row_count(), 1, "视野外的高亮不该进模型");
         let span = st.emph_spans.row_data(0).expect("这一屏有一处字符级高亮");
-        assert_eq!(span.row_data(0), Some(2), "行号必须换算成视口内坐标");
-        assert_eq!(span.row_data(1), Some(5));
-        assert_eq!(span.row_data(2), Some(3));
+        assert_eq!(span.row, 2, "行号必须换算成视口内坐标");
+        // 全是窄字符，所以「窄字宽的倍数」与字符数一致
+        assert_eq!(span.x, 5.0);
+        assert_eq!(span.w, 3.0);
     }
 
     #[test]

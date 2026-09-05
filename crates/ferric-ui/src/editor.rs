@@ -33,6 +33,31 @@ use ropey::Rope;
 /// 本身就是内存泄漏（egui 版踩过，见那一版的 `undo` 限流）。
 const UNDO_BUDGET: usize = 4 * 1024 * 1024;
 
+std::thread_local! {
+    /// 宽字符（中日韩、全角标点、emoji）的步进 ÷ 窄字宽。
+    ///
+    /// 等宽字体只对拉丁字形等宽 —— 中文由回退字体渲染，实际步进宽一截。
+    /// 光标 / 选区若按「一个 char 一格」算，中文行上就会与真实字形错开：
+    /// 点在这里、光标画在那里、字又插到第三个地方（用户报的「输入异常」）。
+    ///
+    /// 值由 UI 侧量出来（同字体同字号量 `0` 与 `字` 两个字形）写进来。
+    /// 全进程同一套字体，所以是个全局量，不给每个缓冲区各存一份。
+    static WIDE_RATIO: std::cell::Cell<f32> = const { std::cell::Cell::new(2.0) };
+}
+
+/// UI 侧量完宽字符步进后写进来。越界值忽略 —— 量不出来时保持上一次的值，
+/// 别把横向坐标算成 0。
+pub fn set_wide_ratio(ratio: f32) {
+    if ratio.is_finite() && (1.0..=4.0).contains(&ratio) {
+        WIDE_RATIO.with(|r| r.set(ratio));
+    }
+}
+
+/// 当前宽字符步进（窄字宽的倍数）。
+pub fn wide_ratio() -> f32 {
+    WIDE_RATIO.with(|r| r.get())
+}
+
 /// 一次可撤销的快照。存整份文本：实现简单且正确，代价由 [`UNDO_BUDGET`] 封顶。
 struct Snapshot {
     text: String,
@@ -353,6 +378,77 @@ impl TextBuffer {
         (row < self.viewport_lines).then_some(row)
     }
 
+    // ——— 横向坐标（窄字宽为单位） ———
+    //
+    // 「一个 char 一格」只在纯拉丁文本里成立。中文由回退字体渲染，步进更宽，
+    // 所以光标 / 选区 / 字符级高亮的 x 全部按**窄字宽的倍数**（f32）给 UI：
+    // 一个窄字 1.0，一个宽字 [`wide_ratio`]。UI 侧乘上量出来的窄字宽即得像素。
+
+    /// 单个字符占几个窄字宽。
+    fn char_cells(&self, c: char) -> f32 {
+        match unicode_width::UnicodeWidthChar::width(c) {
+            Some(w) if w > 1 => wide_ratio(),
+            // 零宽（组合符号）也当 0：它挂在前一个字形上，不占位
+            Some(0) => 0.0,
+            _ => 1.0,
+        }
+    }
+
+    /// 行内 `[from, to)` 这一段占几个窄字宽。
+    fn cells_between(&self, line: usize, from: usize, to: usize) -> f32 {
+        if to <= from || line >= self.rope.len_lines() {
+            return 0.0;
+        }
+        let start = self.rope.line_to_char(line);
+        let len = self.line_len(line);
+        let (from, to) = (from.min(len), to.min(len));
+        self.rope
+            .slice(start + from..start + to)
+            .chars()
+            .map(|c| self.char_cells(c))
+            .sum()
+    }
+
+    /// 光标在视口内的横向位置（窄字宽的倍数）。
+    pub fn cursor_cells(&self) -> f32 {
+        let (line, col) = self.cursor_line_col();
+        self.cells_between(line, self.scroll_col, col)
+    }
+
+    /// 行内某个字符区间在视口里的 `(起点, 宽度)`，都以窄字宽为单位。
+    /// 完全被横向滚动推出视野时返回 `None`。
+    pub fn cells_of_range(&self, line: usize, from: usize, len: usize) -> Option<(f32, f32)> {
+        let right = self.scroll_col + self.viewport_cols + 1;
+        let (a, b) = (from.max(self.scroll_col), (from + len).min(right));
+        if b <= a {
+            return None;
+        }
+        Some((
+            self.cells_between(line, self.scroll_col, a),
+            self.cells_between(line, a, b),
+        ))
+    }
+
+    /// 视口内的横向位置（窄字宽倍数）落在第几个字符上（点击命中用）。
+    ///
+    /// 落在字形的后半边就算下一个字符 —— 与所有编辑器的手感一致：
+    /// 点一个字的右半边，光标应当停在它后面。
+    fn col_at_cells(&self, line: usize, cells: f32) -> usize {
+        let len = self.line_len(line);
+        let start = self.rope.line_to_char(line);
+        let mut at = 0.0f32;
+        let mut col = self.scroll_col.min(len);
+        while col < len {
+            let w = self.char_cells(self.rope.char(start + col));
+            if cells < at + w / 2.0 {
+                return col;
+            }
+            at += w;
+            col += 1;
+        }
+        len
+    }
+
     /// 展开所有把 `line` 藏起来的折叠（搜索命中落在折叠里时要先露出来）。
     fn reveal(&mut self, line: usize) {
         self.folds.retain(|(s, e)| !(*s < line && line <= *e));
@@ -627,10 +723,12 @@ impl TextBuffer {
 
     // ——— 光标 ———
 
-    /// 点击定位。`line` / `col` 是**视口内**坐标，这里换算成文档坐标。
-    pub fn click(&mut self, view_line: usize, view_col: usize, extend: bool) {
+    /// 点击定位。`view_line` 是视口内行号，`cells` 是横向位置（窄字宽的倍数，
+    /// 由 UI 侧用像素除以窄字宽得到）——**不是字符数**：中文一个字占两格上下，
+    /// 按字符数换算会让光标落在别的字上。
+    pub fn click(&mut self, view_line: usize, cells: f32, extend: bool) {
         let line = self.doc_line_from_top(view_line);
-        let col = self.scroll_col + view_col;
+        let col = self.col_at_cells(line, cells.max(0.0));
         self.cursor = self.char_of_line_col(line, col);
         if !extend {
             self.anchor = self.cursor;
@@ -910,11 +1008,11 @@ impl TextBuffer {
         self.scroll_to_cursor();
     }
 
-    /// 选区在可见范围内的高亮矩形（视口行坐标 + 列区间）。
+    /// 选区在可见范围内的高亮矩形。
     ///
-    /// 返回 `(视口行, 起列, 列数)`。Slint 侧照这个画矩形 —— 只有可见的那几行
-    /// 需要画，与选区跨多少万行无关。
-    pub fn selection_spans(&self) -> Vec<(usize, usize, usize)> {
+    /// 返回 `(视口行, 起点, 宽度)`，后两者以**窄字宽**为单位（见
+    /// [`Self::cells_of_range`]）。只有可见的那几行需要画，与选区跨多少万行无关。
+    pub fn selection_spans(&self) -> Vec<(usize, f32, f32)> {
         if !self.has_selection() {
             return Vec::new();
         }
@@ -927,12 +1025,13 @@ impl TextBuffer {
             .into_iter()
             .enumerate()
             .filter(|(_, l)| *l >= la && *l <= lb)
-            .map(|(row, l)| {
+            .filter_map(|(row, l)| {
                 let start = if l == la { ca } else { 0 };
                 let end = if l == lb { cb } else { self.line_len(l) };
-                // 空行的选区也要看得见 —— 给一格宽度表示「这一行被选中了」
-                let width = end.saturating_sub(start).max(if l < lb { 1 } else { 0 });
-                (row, start.saturating_sub(self.scroll_col), width)
+                let (x, w) = self.cells_of_range(l, start, end.saturating_sub(start))?;
+                // 空行 / 行尾换行也要看得见「这一行被选中了」——给一格宽度
+                let w = if l < lb { w.max(1.0) } else { w };
+                (w > 0.0).then_some((row, x, w))
             })
             .collect()
     }
@@ -1002,6 +1101,77 @@ mod tests {
     }
 
     #[test]
+    fn cjk_lines_use_real_glyph_widths_for_the_caret() {
+        // 用户报的「输入异常」就是这条：中文行上光标画在别处、字插到第三个
+        // 地方。根因是横向坐标按「一个 char 一格」算，而中文字形宽一截。
+        set_wide_ratio(2.0);
+        let mut b = buf("  \"城市\": \"上海\",");
+        b.set_viewport(4, 40);
+
+        // 光标移到行尾：2 空格 + 4 个窄字符（"":  两个引号一个冒号一个空格…）
+        // 逐字算太绕，直接与「等宽假设」对比：中文行上两者必须不同。
+        b.move_cursor(Motion::LineEnd, false);
+        let (_, col) = b.cursor_line_col();
+        assert!(
+            b.cursor_cells() > col as f32,
+            "有中文的行，光标位置必须比字符数更靠右（{} vs {col}）",
+            b.cursor_cells()
+        );
+
+        // 纯 ASCII 行则两者相等 —— 不能因为改了中文而把普通行也算歪。
+        let mut a = buf("  \"port\": 8080");
+        a.set_viewport(4, 40);
+        a.move_cursor(Motion::LineEnd, false);
+        assert_eq!(a.cursor_cells(), a.cursor_line_col().1 as f32);
+    }
+
+    #[test]
+    fn clicking_a_cjk_line_lands_on_the_glyph_under_the_pointer() {
+        // 点在第 4 个字形上就该停在第 4 个字符前后，而不是被宽度换算带偏。
+        set_wide_ratio(2.0);
+        let mut b = buf("ab中文cd");
+        b.set_viewport(2, 40);
+
+        // a b 各 1 格，两个中文各 2 格 → "中" 占 [2,4)，"文" 占 [4,6)
+        b.click(0, 2.1, false); // 落在「中」的左半边
+        assert_eq!(b.cursor_line_col().1, 2, "应当停在「中」之前");
+        b.click(0, 3.9, false); // 落在「中」的右半边
+        assert_eq!(b.cursor_line_col().1, 3, "应当停在「中」之后");
+        b.click(0, 6.1, false); // 落在 c 上
+        assert_eq!(b.cursor_line_col().1, 4);
+        b.click(0, 99.0, false); // 远超行尾 → 夹到行尾
+        assert_eq!(b.cursor_line_col().1, 6);
+    }
+
+    #[test]
+    fn selection_width_counts_wide_glyphs_twice() {
+        set_wide_ratio(2.0);
+        let mut b = buf("ab中文cd");
+        b.set_viewport(2, 40);
+        b.select_range(2, 4); // 选中「中文」
+        let spans = b.selection_spans();
+        assert_eq!(spans.len(), 1);
+        let (row, x, w) = spans[0];
+        assert_eq!(row, 0);
+        assert_eq!(x, 2.0, "前面是 a b 两个窄字符");
+        assert_eq!(w, 4.0, "两个中文 = 四格宽");
+    }
+
+    #[test]
+    fn wide_ratio_rejects_nonsense_values() {
+        // 量不出来（字体没回退、宽度 0）时保持上一次的值 —— 否则横向坐标
+        // 会整列塌到 0，界面上表现为「光标永远在行首」。
+        set_wide_ratio(2.0);
+        set_wide_ratio(0.0);
+        assert_eq!(wide_ratio(), 2.0);
+        set_wide_ratio(f32::NAN);
+        assert_eq!(wide_ratio(), 2.0);
+        set_wide_ratio(1.667);
+        assert_eq!(wide_ratio(), 1.667);
+        set_wide_ratio(2.0); // 复位，别影响同线程的其它测试
+    }
+
+    #[test]
     fn line_len_excludes_the_newline() {
         // 光标不该能停在换行符右边 —— 那会显示成「下一行的第 0 列」，
         // 上下移动时列号跳来跳去。
@@ -1030,7 +1200,7 @@ mod tests {
     #[test]
     fn vertical_move_keeps_column_when_possible() {
         let mut b = buf("abcdef\nxy\nabcdef\n");
-        b.click(0, 5, false);
+        b.click(0, 5.0, false);
         assert_eq!(b.cursor_line_col(), (0, 5));
         b.move_cursor(Motion::Down, false);
         // 短行上只能停在行尾
@@ -1042,8 +1212,8 @@ mod tests {
         // 编辑器通例：有选区时不带 shift 的左移是「塌缩到左端」，
         // 而不是「在选区左端再往左一格」。
         let mut b = buf("abcdef");
-        b.click(0, 2, false);
-        b.click(0, 5, true);
+        b.click(0, 2.0, false);
+        b.click(0, 5.0, true);
         assert!(b.has_selection());
         b.move_cursor(Motion::Left, false);
         assert_eq!(b.cursor_line_col(), (0, 2));
@@ -1053,8 +1223,8 @@ mod tests {
     #[test]
     fn typing_replaces_the_selection() {
         let mut b = buf("hello world");
-        b.click(0, 0, false);
-        b.click(0, 5, true);
+        b.click(0, 0.0, false);
+        b.click(0, 5.0, true);
         b.insert_str("bye");
         assert_eq!(b.text(), "bye world");
         assert!(!b.has_selection());
@@ -1096,7 +1266,7 @@ mod tests {
         let mut b = buf(&text);
         b.set_viewport(20, 80);
         b.scroll_to_line(500);
-        b.click(3, 0, false);
+        b.click(3, 0.0, false);
         let formatted: String = (0..1000).map(|i| format!("  line {i}\n")).collect();
         b.replace_keeping_view(&formatted);
         assert_eq!(b.scroll_line(), 500, "格式化后视野跳走了");
@@ -1211,9 +1381,9 @@ mod tests {
         // 这是折叠最容易出错的地方：视觉第 2 行已经不是文档第 2 行。
         let mut b = folded_sample();
         b.toggle_fold(1);
-        b.click(2, 0, false); // 视觉第 3 行 = 文档第 6 行（`  "tail": 9`）
+        b.click(2, 0.0, false); // 视觉第 3 行 = 文档第 6 行（`  "tail": 9`）
         assert_eq!(b.cursor_line_col().0, 6);
-        b.click(3, 0, false);
+        b.click(3, 0.0, false);
         assert_eq!(b.cursor_line_col().0, 7);
     }
 
@@ -1221,7 +1391,7 @@ mod tests {
     fn arrow_down_steps_over_a_folded_block() {
         let mut b = folded_sample();
         b.toggle_fold(1);
-        b.click(1, 0, false); // 光标放到折叠头
+        b.click(1, 0.0, false); // 光标放到折叠头
         b.move_cursor(Motion::Down, false);
         assert_eq!(
             b.cursor_line_col().0,
@@ -1254,7 +1424,7 @@ mod tests {
         let mut b = folded_sample();
         b.toggle_fold(1);
         assert!(b.has_folds());
-        b.click(1, 12, false); // 折叠头上打字
+        b.click(1, 12.0, false); // 折叠头上打字
         b.insert_char(' ');
         assert!(!b.has_folds(), "编辑跨过折叠区间就要作废它");
         assert_eq!(b.view_total_lines(), b.total_lines());
@@ -1264,7 +1434,7 @@ mod tests {
     fn editing_above_a_fold_shifts_it_instead_of_dropping_it() {
         let mut b = folded_sample();
         b.toggle_fold(1);
-        b.click(0, 1, false); // 第 0 行末尾回车，下面所有行 +1
+        b.click(0, 1.0, false); // 第 0 行末尾回车，下面所有行 +1
         b.insert_char('\n');
         assert!(b.has_folds(), "编辑点在折叠之前，折叠应当保留");
         assert_eq!(

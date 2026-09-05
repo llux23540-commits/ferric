@@ -24,6 +24,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 # 编辑区的文本存储（src/editor.rs：rope + 视口虚拟化，见下面被它取代的两个 egui crate）
 ropey = { workspace = true }
+unicode-width = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 chrono = { workspace = true }
 

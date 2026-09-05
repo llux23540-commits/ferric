@@ -15,15 +15,24 @@ export struct TokenLine {
     runs: [TokenRun],
 }
 
+// 一段横向高亮（选区 / 字符级差异）。`x` 与 `w` 的单位是**窄字宽的倍数**：
+// 中文由回退字体渲染、步进比窄字宽大，按「一个 char 一格」算会整段错开。
+export struct CellSpan {
+    row: int,
+    x: float,
+    w: float,
+}
+
 export component CodeEditor inherits Rectangle {
     in property <[string]> lines;
     in property <[int]> line-nos;
     in property <int> first-line: 0;
     in property <int> total-lines: 1;
     in property <int> cursor-line: 0;
-    in property <int> cursor-col: 0;
+    // 光标横向位置（窄字宽的倍数，Rust 侧按真实字宽算好）
+    in property <float> cursor-x: 0;
     in property <bool> cursor-visible: true;
-    in property <[[int]]> selection-spans;
+    in property <[CellSpan]> selection-spans;
     in property <length> font-size: 13px;
     in property <length> line-height: 18px;
     in property <bool> show-gutter: true;
@@ -34,15 +43,18 @@ export component CodeEditor inherits Rectangle {
     // 差异种类（与 `lines` 一一对应）：0 相同 / 1 删除 / 2 新增
     in property <[int]> row-kinds;
     in property <bool> diffed: false;
-    // 字符级高亮 (视口行, 起列, 列数)：改动行里被改掉的那几个字
-    in property <[[int]]> emph-spans;
+    // 字符级高亮：改动行里被改掉的那几个字
+    in property <[CellSpan]> emph-spans;
     // 语法着色：每个可见行一份片段序列。空 = 不着色，走纯文本那条。
     in property <[TokenLine]> tokens;
     in property <bool> highlighted: false;
 
     callback viewport-changed(int, int);
-    callback clicked(int, int, bool);
-    callback dragged(int, int);
+    /// 宽字符（中文等）的步进 / 窄字宽。字体一变就报一次，Rust 侧据此算横向坐标。
+    callback wide-ratio-changed(float);
+    /// 点击 / 拖动。第二个参数是横向位置（窄字宽的倍数），不是字符数。
+    callback clicked(int, float, bool);
+    callback dragged(int, float);
     callback triple-clicked();
     callback scrolled(int, int);
     callback scroll-to-line(int);
@@ -63,13 +75,26 @@ export component CodeEditor inherits Rectangle {
         font-family: Theme.font-mono;
         font-size: root.font-size;
     }
+    // 量一个宽字符：中文由回退字体渲染，步进不是窄字宽的整数倍，只能量。
+    wide-probe := Text {
+        visible: false;
+        text: "字";
+        font-family: Theme.font-mono;
+        font-size: root.font-size;
+    }
     property <length> char-w: probe.preferred-width;
+    property <float> wide-ratio: root.char-w > 0
+        ? wide-probe.preferred-width / root.char-w
+        : 2;
     property <length> pad: 8px;
     property <int> visible-rows: max(1, floor((self.height - root.pad * 2) / root.line-height));
     property <int> visible-cols: max(1, floor((self.width - root.pad * 2) / root.char-w));
 
     changed visible-rows => { root.viewport-changed(root.visible-rows, root.visible-cols); }
     changed visible-cols => { root.viewport-changed(root.visible-rows, root.visible-cols); }
+    // 字体 / 字号变了才会变，首帧也会来一次。
+    changed wide-ratio => { root.wide-ratio-changed(root.wide-ratio); }
+    init => { root.wide-ratio-changed(root.wide-ratio); }
 
     // 折叠列：只有这一屏真有区块开头时才占位，否则纯文本白让 18px
     property <length> fold-w: root.show-gutter && root.foldable ? 18px : 0px;
@@ -173,18 +198,18 @@ export component CodeEditor inherits Rectangle {
 
         // 字符级高亮：改动行里被改掉的那几个字，底色比整行再深一档。
         for span[i] in root.emph-spans: Rectangle {
-            x: root.pad + span[1] * root.char-w;
-            y: root.pad + span[0] * root.line-height;
-            width: span[2] * root.char-w;
+            x: root.pad + span.x * root.char-w;
+            y: root.pad + span.row * root.line-height;
+            width: span.w * root.char-w;
             height: root.line-height;
-            background: root.row-kinds[span[0]] == 1 ? Theme.del-mark : Theme.add-mark;
+            background: root.row-kinds[span.row] == 1 ? Theme.del-mark : Theme.add-mark;
         }
 
         // 选区高亮（画在文本下面）
         for span[i] in root.selection-spans: Rectangle {
-            x: root.pad + span[1] * root.char-w;
-            y: root.pad + span[0] * root.line-height;
-            width: span[2] * root.char-w;
+            x: root.pad + span.x * root.char-w;
+            y: root.pad + span.row * root.line-height;
+            width: span.w * root.char-w;
             height: root.line-height;
             background: Theme.accent-soft;
         }
@@ -237,7 +262,7 @@ export component CodeEditor inherits Rectangle {
         }
 
         if root.cursor-visible && focus.has-focus && !root.read-only: Rectangle {
-            x: root.pad + root.cursor-col * root.char-w;
+            x: root.pad + root.cursor-x * root.char-w;
             y: root.pad + root.cursor-line * root.line-height;
             width: 2px;
             height: root.line-height;
@@ -250,19 +275,21 @@ export component CodeEditor inherits Rectangle {
             mouse-cursor: text;
 
             property <int> hit-line: max(0, floor((self.mouse-y - root.pad) / root.line-height));
-            property <int> hit-col: max(0, round((self.mouse-x - root.pad) / root.char-w));
+            // 命中位置按**窄字宽的倍数**报给 Rust（不四舍五入成字符数）：
+            // 中文一个字宽过一格，取整会让光标落在别的字上。
+            property <float> hit-cells: max(0, (self.mouse-x - root.pad) / root.char-w);
 
             pointer-event(ev) => {
                 if (ev.kind == PointerEventKind.down) {
                     // 必须显式抢焦点：键盘事件走 FocusScope，而点击落在 TouchArea 上。
                     // 少了这一行的表现是「光标能点、字打不进去」。
                     focus.focus();
-                    root.clicked(self.hit-line, self.hit-col, false);
+                    root.clicked(self.hit-line, self.hit-cells, false);
                 }
             }
             moved => {
                 if (self.pressed) {
-                    root.dragged(self.hit-line, self.hit-col);
+                    root.dragged(self.hit-line, self.hit-cells);
                 }
             }
             double-clicked => { root.triple-clicked(); }

@@ -2448,6 +2448,9 @@ impl Shell {
                 b.set_viewport(rows.max(1) as usize, cols.max(1) as usize);
             });
         });
+        // 宽字符步进：UI 侧量出来的（同字体量 `0` 与 `字`）。全进程一套字体，
+        // 所以直接落到 `editor` 的全局量上，不必逐个缓冲区设。
+        win.on_editor_wide_ratio(crate::editor::set_wide_ratio);
         editor_cb!(on_editor_scroll, |s, which, dl, dc| {
             s.with_buffer(&which, |b| {
                 b.scroll_by(dl);
@@ -2459,17 +2462,17 @@ impl Shell {
             s.with_buffer(&which, |b| b.scroll_to_line(line.max(0) as usize));
             s.mirror_diff_scroll(&which);
         });
-        editor_cb!(on_editor_click, |s, which, line, col, extend| {
+        editor_cb!(on_editor_click, |s, which, line, cells, extend| {
             // 点回正文 = 焦点离开查找框，Enter 重新归换行。
             s.find_hint.set(false);
             s.with_buffer(&which, |b| {
-                b.click(line.max(0) as usize, col.max(0) as usize, extend);
+                b.click(line.max(0) as usize, cells, extend);
             });
         });
-        editor_cb!(on_editor_drag, |s, which, line, col| {
+        editor_cb!(on_editor_drag, |s, which, line, cells| {
             // 拖动 = 从原锚点扩选，所以 extend = true
             s.with_buffer(&which, |b| {
-                b.click(line.max(0) as usize, col.max(0) as usize, true);
+                b.click(line.max(0) as usize, cells, true);
             });
         });
         editor_cb!(on_editor_triple, |s, which| {
