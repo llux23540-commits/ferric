@@ -45,6 +45,8 @@ pub struct UuidTool {
     pub nohyphen: bool,
     pub as_json: bool,
     pub output: String,
+    /// 当前选中的输出行（界面上高亮那一条）。重新生成 / 恢复历史后清空。
+    pub selected: Option<usize>,
     pub ok: bool,
     pub status: String,
     pub history: Vec<HistEntry>,
@@ -65,6 +67,7 @@ impl Default for UuidTool {
             nohyphen: false,
             as_json: false,
             output: String::new(),
+            selected: None,
             ok: true,
             status: "就绪".to_owned(),
             history: Vec::new(),
@@ -99,6 +102,8 @@ impl UuidTool {
                 } else {
                     items.join("\n")
                 };
+                // 内容整批换掉了，「第几行被选中」不再指代同一个 id
+                self.selected = None;
                 self.ok = true;
                 self.status = format!("已生成 {} 条", items.len());
             }
@@ -132,12 +137,39 @@ impl UuidTool {
         match self.history.get(idx) {
             Some(h) => {
                 self.output = h.body.clone();
+                // 换了一批内容，「第几行被选中」不再指代同一个 id
+                self.selected = None;
                 self.status = format!("已恢复：{}", h.label);
                 self.ok = true;
                 true
             }
             None => false,
         }
+    }
+
+    /// 输出按行拆开（界面上一行一条，可单条选中 / 单条复制）。
+    ///
+    /// 以前输出是一整块 `Text`：既选不中一条，也没法只复制一条 ——
+    /// 用户拿一个 UUID 得手工从十条里挑，正是他报的「不能单条选中」。
+    pub fn lines(&self) -> Vec<&str> {
+        self.output.lines().collect()
+    }
+
+    /// 选中第 `i` 行。越界或再点一次同一行都当取消选中。
+    pub fn select_line(&mut self, i: usize) {
+        self.selected = match self.selected {
+            Some(cur) if cur == i => None,
+            _ if i < self.lines().len() => Some(i),
+            _ => None,
+        };
+    }
+
+    /// 当前选中那一行的文本（复制用）。JSON 模式下顺手去掉行尾逗号与引号 ——
+    /// 用户要的是那个 id，不是它在 JSON 里的写法。
+    pub fn selected_text(&self) -> Option<String> {
+        let line = self.lines().get(self.selected?)?.trim().to_owned();
+        let line = line.trim_end_matches(',').trim();
+        Some(line.trim_matches('"').to_owned())
     }
 
     // ——— Slint 侧用索引表达枚举，这里做双向映射 ———
@@ -335,5 +367,71 @@ mod tests {
         assert_eq!(t.kind, IdKind::UuidV4);
         assert_eq!(t.namespace, Namespace::Dns);
         assert_eq!(t.hist_keep, 3);
+    }
+
+    #[test]
+    fn a_single_line_can_be_selected_and_copied() {
+        // 用户报的「不能单条选中」：输出十条，要能挑出其中一条来复制。
+        let mut t = UuidTool {
+            count: 3,
+            ..Default::default()
+        };
+        t.regen();
+        assert_eq!(t.lines().len(), 3);
+        assert_eq!(t.selected, None, "刚生成不该有选中项");
+
+        t.select_line(1);
+        assert_eq!(t.selected, Some(1));
+        assert_eq!(t.selected_text().as_deref(), Some(t.lines()[1]));
+
+        // 再点同一行 = 取消选中
+        t.select_line(1);
+        assert_eq!(t.selected, None);
+        assert_eq!(t.selected_text(), None);
+
+        // 越界不选中、不 panic
+        t.select_line(99);
+        assert_eq!(t.selected, None);
+    }
+
+    #[test]
+    fn json_mode_copies_the_id_not_its_json_syntax() {
+        // JSON 模式下那一行长这样：`  "0190...-...",` —— 用户要的是里面那个 id。
+        let mut t = UuidTool {
+            count: 2,
+            as_json: true,
+            ..Default::default()
+        };
+        t.regen();
+        let idx = t
+            .lines()
+            .iter()
+            .position(|l| l.contains('-'))
+            .expect("JSON 里应当有 id 行");
+        t.select_line(idx);
+        let copied = t.selected_text().expect("选中了就该有文本");
+        assert!(!copied.starts_with('"'), "不该带引号：{copied}");
+        assert!(!copied.ends_with(','), "不该带行尾逗号：{copied}");
+        assert_eq!(copied.len(), 36, "标准 UUID 是 36 个字符：{copied}");
+    }
+
+    #[test]
+    fn regenerating_and_restoring_clear_the_selection() {
+        // 内容整批换掉之后，「第 2 行」已经不是刚才那个 id 了 ——
+        // 不清的话界面上会高亮一条与用户预期无关的记录。
+        let mut t = UuidTool {
+            count: 3,
+            ..Default::default()
+        };
+        t.regen();
+        t.select_line(2);
+        assert_eq!(t.selected, Some(2));
+
+        t.regen();
+        assert_eq!(t.selected, None);
+
+        t.select_line(0);
+        assert!(t.restore(1), "样例里应当有第二条历史");
+        assert_eq!(t.selected, None);
     }
 }

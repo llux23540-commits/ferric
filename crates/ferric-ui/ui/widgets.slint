@@ -247,6 +247,11 @@ export component FerricLineEdit inherits Rectangle {
     //
     // clip 放在**内层**而不是根节点：根节点裁的话连外面那圈聚焦光环
     //（x: -3px）一起没了。
+    //
+    // ⚠️ 里面那个 TextInput 的宽度**必须**等于 clip 框，不能按文本
+    // `preferred-width` 撑开：撑开之后选区矩形是按 TextInput 自己的几何画的，
+    // 而它比 clip 框宽得多 —— 全选一条长公钥时，蓝色选中条会从输入框里
+    // 一路铺到侧栏上（用户报的就是这个）。
     min-width: 80px;
     // 让外部能 `focus()` 这个包装组件（命令面板打开即聚焦要用）。
     forward-focus: input;
@@ -270,7 +275,7 @@ export component FerricLineEdit inherits Rectangle {
         clip: true;
 
         input := TextInput {
-            width: max(parent.width, self.preferred-width);
+            width: 100%;
             height: parent.height;
             text <=> root.text;
             read-only: root.read-only;
