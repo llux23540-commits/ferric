@@ -4190,68 +4190,48 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
 
-                                // 有事才出现：可安装 / 下载中 / 失败。
-                                // 空闲与「已最新」不占地方。
-                                if root.update-phase == 4
-                                    || root.update-phase == 5
-                                    || root.update-phase == 6: Rectangle {
+                                // 有事才出现：下载中 / 可安装。空闲、已最新、
+                                // **失败**都不占地方 —— 失败是后台自动检查的结果，
+                                // 用户没要求过这件事，拿一颗红胶囊堵在版本号旁边
+                                // 只会让人焦虑又无从处理（网络不通时每次启动都挂着）。
+                                // 详情两处都留着：设置 → 更新的状态行，以及操作记录。
+                                if root.update-phase == 4 || root.update-phase == 5: chip := Rectangle {
+                                    // 可安装 = 要人点的那一档，用主色；下载中是中性灰。
+                                    property <bool> ready: root.update-phase == 5;
                                     height: 18px;
                                     horizontal-stretch: 0;
                                     border-radius: 9px;
-                                    background: root.update-phase == 5
+                                    background: chip.ready
                                         ? (chip-ta.has-hover ? Theme.accent-strong : Theme.accent)
-                                        : (root.update-phase == 6
-                                            ? (chip-ta.has-hover ? Theme.del-mark : Theme.del-bg)
-                                            : Theme.border);
+                                        : Theme.border;
 
                                     HorizontalLayout {
                                         padding-left: 6px;
                                         padding-right: 7px;
                                         spacing: 3px;
                                         Text {
-                                            text: root.update-phase == 5
-                                                ? Icons.file-down
-                                                : (root.update-phase == 6
-                                                    ? Icons.circle-alert
-                                                    : Icons.refresh);
+                                            text: chip.ready ? Icons.file-down : Icons.refresh;
                                             font-family: Theme.font-icons;
                                             font-size: 10px;
-                                            color: root.update-phase == 5
-                                                ? #ffffff
-                                                : (root.update-phase == 6
-                                                    ? Theme.danger
-                                                    : Theme.muted);
+                                            color: chip.ready ? #ffffff : Theme.muted;
                                             vertical-alignment: center;
                                         }
                                         Text {
-                                            text: root.update-phase == 5
+                                            text: chip.ready
                                                 ? "安装 v" + root.update-version
-                                                : (root.update-phase == 4
-                                                    ? root.update-progress + "%"
-                                                    : "更新失败");
+                                                : root.update-progress + "%";
                                             font-family: Theme.font-ui-medium;
                                             font-size: 10.5px;
-                                            color: root.update-phase == 5
-                                                ? #ffffff
-                                                : (root.update-phase == 6
-                                                    ? Theme.danger
-                                                    : Theme.muted);
+                                            color: chip.ready ? #ffffff : Theme.muted;
                                             vertical-alignment: center;
                                         }
                                     }
 
                                     chip-ta := TouchArea {
                                         // 下载中不可点：还没下完，点了也没得装
-                                        enabled: root.update-phase != 4;
+                                        enabled: chip.ready;
                                         mouse-cursor: pointer;
-                                        clicked => {
-                                            if (root.update-phase == 5) {
-                                                root.update-dialog-open = true;
-                                            } else {
-                                                // 失败详情一行放不下，点开操作记录看全文
-                                                root.log-open = true;
-                                            }
-                                        }
+                                        clicked => { root.update-dialog-open = true; }
                                     }
                                 }
                             }
