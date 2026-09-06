@@ -16,6 +16,7 @@
 
 use crate::editor::TextBuffer;
 use crate::icons;
+use crate::json_history::JsonHistory;
 use crate::tool::{Tool, ToolMeta};
 use ferric_core::json::{self, Indent};
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,15 @@ pub struct JsonTool {
     /// 5MB 文本上每个字符都全量搜一遍是白烧。
     pub hits: Vec<usize>,
     pub hit_idx: usize,
+
+    // ——— 粘贴记录（右侧抽屉）———
+    /// 一条记录 = 数据目录里的一个文件，见 [`crate::json_history`]。
+    pub history: JsonHistory,
+    pub history_open: bool,
+    /// 正在改名的那一行（抽屉里的可见行号），-1 = 没有。
+    pub renaming: i32,
+    /// 抽屉自己的状态行（改名报错、恢复了哪条）。
+    pub history_status: String,
 }
 
 impl Default for JsonTool {
@@ -71,6 +81,10 @@ impl Default for JsonTool {
             find: String::new(),
             hits: Vec::new(),
             hit_idx: 0,
+            history: JsonHistory::default(),
+            history_open: false,
+            renaming: -1,
+            history_status: String::new(),
         };
         t.validate();
         t
@@ -322,6 +336,106 @@ impl JsonTool {
     pub fn redo(&mut self) {
         self.input.redo();
         self.on_edited();
+    }
+
+    // ===== 粘贴记录 =====
+
+    /// 往输入区粘了东西 → 自动记一条。返回落盘的名字（没记则 `None`）。
+    ///
+    /// 记的是**粘进来的那一份**，不是粘完之后的整个缓冲区：常见操作是
+    /// Ctrl+A、Ctrl+V 整份替换，两者一样；而在已有内容里补一段时，
+    /// 用户想留的显然是刚拿进来的那份。
+    pub fn record_paste(&mut self, pasted: &str) -> Option<String> {
+        let name = self.history.record(pasted)?;
+        self.history_status = format!("已记录「{name}」");
+        Some(name)
+    }
+
+    /// 开 / 收抽屉。每次打开重扫目录 —— 用户可能在文件管理器里动过。
+    pub fn toggle_history(&mut self) {
+        self.history_open = !self.history_open;
+        self.renaming = -1;
+        if self.history_open {
+            self.history.load();
+            self.history_status = if self.history.len() == 0 {
+                "还没有记录：往输入区粘一段 JSON 就会自动存一条".to_owned()
+            } else {
+                format!("共 {} 条记录", self.history.len())
+            };
+        }
+    }
+
+    pub fn set_history_query(&mut self, q: &str) {
+        self.history.set_query(q);
+        // 搜索一收窄，正在改名的那一行可能已经不在可见列表里了
+        self.renaming = -1;
+    }
+
+    /// 把某条记录读回输入区。
+    pub fn restore_history(&mut self, row: i32) {
+        let Some(i) = self.visible_index(row) else {
+            return;
+        };
+        let Some(text) = self.history.text_of(i) else {
+            self.history_status = "这条记录读不出来（文件可能已被删掉）".to_owned();
+            return;
+        };
+        let name = self.history.visible()[row.max(0) as usize].name.clone();
+        // 整份换掉：恢复是文档级操作，视野回到顶部才对
+        self.input.set_text(&text);
+        self.unsorted = None;
+        self.on_edited();
+        self.history_status = format!("已恢复「{name}」");
+    }
+
+    pub fn start_rename(&mut self, row: i32) {
+        self.renaming = if self.visible_index(row).is_some() {
+            row
+        } else {
+            -1
+        };
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.renaming = -1;
+    }
+
+    /// 给记录起名（= 改文件名）。
+    pub fn rename_history(&mut self, row: i32, name: &str) {
+        let Some(i) = self.visible_index(row) else {
+            return;
+        };
+        match self.history.rename(i, name) {
+            Ok(n) => {
+                self.renaming = -1;
+                self.history_status = format!("已改名为「{n}」");
+            }
+            // 改名失败要留在编辑状态：把输入框收起来等于把用户刚打的名字扔了
+            Err(e) => self.history_status = e,
+        }
+    }
+
+    pub fn delete_history(&mut self, row: i32) {
+        let Some(i) = self.visible_index(row) else {
+            return;
+        };
+        self.renaming = -1;
+        if let Some(name) = self.history.remove(i) {
+            self.history_status = format!("已删除「{name}」");
+        }
+    }
+
+    pub fn clear_history(&mut self) {
+        let n = self.history.clear();
+        self.renaming = -1;
+        self.history_status = format!("已清空 {n} 条记录");
+    }
+
+    fn visible_index(&self, row: i32) -> Option<usize> {
+        if row < 0 {
+            return None;
+        }
+        self.history.index_of_visible(row as usize)
     }
 }
 

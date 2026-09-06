@@ -716,6 +716,7 @@ impl Shell {
         win.set_json_hit_index(t.hit_idx as i32);
         win.set_json_can_undo(t.can_undo());
         win.set_json_can_redo(t.can_redo());
+        Self::push_json_history(&t, win);
     }
 
     /// 对比工具状态 → property。
@@ -2103,6 +2104,40 @@ impl Shell {
                 Self::flush_shared(&state, &win);
             }
         });
+
+        // ——— 粘贴记录（右侧抽屉）———
+        json_cb!(on_json_history_toggle, |t| {
+            t.toggle_history();
+        });
+        json_cb!(on_json_history_restore, |t, i| {
+            t.restore_history(i);
+        });
+        json_cb!(on_json_history_rename_start, |t, i| {
+            t.start_rename(i);
+        });
+        json_cb!(on_json_history_rename_cancel, |t| {
+            t.cancel_rename();
+        });
+        json_cb!(on_json_history_delete, |t, i| {
+            t.delete_history(i);
+        });
+        json_cb!(on_json_history_clear, |t| {
+            t.clear_history();
+        });
+        json_cb!(on_json_history_query_edited, |t, q| {
+            t.set_history_query(&q);
+        });
+
+        // 改名带两个参数（行号 + 名字）；上面那个宏只有零参与单参两种形态。
+        // 记录改名不进草稿：草稿只存输入区正文，记录自己就在磁盘上。
+        let json = self.json.clone();
+        let w = win.as_weak();
+        win.on_json_history_rename(move |i, name| {
+            json.borrow_mut().rename_history(i, &name);
+            if let Some(win) = w.upgrade() {
+                Self::push_json(&json, &win);
+            }
+        });
     }
 
     /// 把 JSON 工具的状态刷进 Slint（多条路径共用）。
@@ -2124,6 +2159,26 @@ impl Shell {
         win.set_json_hit_index(t.hit_idx as i32);
         win.set_json_can_undo(t.can_undo());
         win.set_json_can_redo(t.can_redo());
+        Self::push_json_history(&t, win);
+    }
+
+    /// 粘贴记录 → property。行是按当前搜索词过滤后的可见行。
+    fn push_json_history(t: &views::JsonTool, win: &AppWindow) {
+        win.set_json_history_open(t.history_open);
+        win.set_json_history_renaming(t.renaming);
+        win.set_json_history_status(SharedString::from(t.history_status.clone()));
+        let rows: Vec<HistoryRow> = t
+            .history
+            .visible()
+            .into_iter()
+            .map(|e| HistoryRow {
+                name: SharedString::from(e.name.clone()),
+                when: SharedString::from(crate::json_history::when_label(e.at)),
+                size: SharedString::from(fmt_size(e.bytes as i64)),
+                preview: SharedString::from(e.preview.clone()),
+            })
+            .collect();
+        win.set_json_history_rows(ModelRc::new(VecModel::from(rows)));
     }
 
     /// 对比工具。
@@ -2556,10 +2611,23 @@ impl Shell {
             // `paste()`（Slint 的 Rust API 不给读剪贴板的入口）。
             let mut pasted = false;
             if outcome.paste {
-                let text = win.invoke_paste_from_clipboard().to_string();
-                if !text.is_empty() {
-                    shell.with_buffer(&which, |b| b.insert_str(&text));
+                let payload = win.invoke_paste_from_clipboard().to_string();
+                if !payload.is_empty() {
+                    shell.with_buffer(&which, |b| b.insert_str(&payload));
                     pasted = true;
+                    // JSON 工具：粘进输入区的东西自动存一条记录（一条 = 一个
+                    // 文件，见 `json_history`）。落盘就在这一步，没有「保存」按钮 ——
+                    // 记录的用处正是「当时那份粘错了/被覆盖了想翻回去」。
+                    if which == "json-in" {
+                        if let Some(name) = shell.json.borrow_mut().record_paste(&payload) {
+                            shell
+                                .state
+                                .borrow_mut()
+                                .shared
+                                .toast(format!("已记录粘贴内容「{name}」"));
+                            Self::flush_shared(&shell.state, &win);
+                        }
+                    }
                 }
             }
             if outcome.edited || pasted {

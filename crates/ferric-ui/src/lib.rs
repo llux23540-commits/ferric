@@ -19,6 +19,7 @@ mod editor_bridge;
 mod fonts;
 mod github;
 mod icons;
+mod json_history;
 pub mod launch;
 mod market;
 mod mem;

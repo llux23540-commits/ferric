@@ -93,6 +93,15 @@ struct PluginCard {
     queued: bool,
 }
 
+// JSON 粘贴记录的一行（右侧抽屉）。一条记录 = 数据目录里的一个文件，
+// `name` 就是文件名。
+struct HistoryRow {
+    name: string,
+    when: string,
+    size: string,
+    preview: string,
+}
+
 
 // 时区列表里的一项。
 struct TzRow {
@@ -1647,6 +1656,8 @@ component TimestampView inherits Rectangle {
 
 // ——— JSON 工具 ———
 component JsonView inherits Rectangle {
+    // 抽屉收起时停在窗口外，必须裁掉（提示气泡画在 AppWindow 顶层，不受影响）
+    clip: true;
     in property <EditorState> input-state;
     in property <int> indent-index;
     in property <bool> sort;
@@ -1660,6 +1671,14 @@ component JsonView inherits Rectangle {
     in property <int> hit-index;
     in property <bool> can-undo;
     in property <bool> can-redo;
+
+    // ——— 粘贴记录抽屉 ———
+    in property <bool> history-open;
+    in property <[HistoryRow]> history-rows;
+    in-out property <string> history-query;
+    // 正在改名的可见行号，-1 = 没有
+    in property <int> renaming: -1;
+    in property <string> history-status;
 
     callback do-format();
     callback do-minify();
@@ -1676,6 +1695,14 @@ component JsonView inherits Rectangle {
     callback do-search();
     callback next-hit();
     callback prev-hit();
+    callback toggle-history();
+    callback history-query-edited(string);
+    callback restore-history(int);
+    callback rename-start(int);
+    callback rename-history(int, string);
+    callback rename-cancel();
+    callback delete-history(int);
+    callback clear-history();
     callback editor-viewport(string, int, int);
     callback editor-wide-ratio(float);
     callback editor-click(string, int, float, bool);
@@ -1818,6 +1845,14 @@ component JsonView inherits Rectangle {
                 tooltip: "清空输入";
                 clicked => { root.clear-input(); }
             }
+            // 粘贴记录：往输入区粘东西时自动存一条（一条 = 数据目录里一个文件）
+            IconButton {
+                icon: Icons.list-checks;
+                icon-size: 19px;
+                active: root.history-open;
+                tooltip: "粘贴记录（自动保存，右侧抽屉）";
+                clicked => { root.toggle-history(); }
+            }
 
             Rectangle { horizontal-stretch: 1; min-width: 12px; }
 
@@ -1927,6 +1962,218 @@ component JsonView inherits Rectangle {
             editor-scroll(w, dl, dc) => { root.editor-scroll(w, dl, dc); }
             editor-scroll-line(w, l) => { root.editor-scroll-line(w, l); }
             editor-key(w, t, ctrl, shift) => { root.editor-key(w, t, ctrl, shift); }
+        }
+    }
+
+    // ===== 粘贴记录抽屉（从右侧滑出）=====
+    //
+    // 始终实例化、靠 x 动画滑进滑出：放进 `if` 里的元素一创建就在终点位置，
+    // 动画无从发生（与查找条那条经验同源）。收起时整块停在窗口外由 root 的
+    // clip 裁掉，两个 TouchArea 一并禁用 —— 否则一层看不见的遮罩会吃掉
+    // 编辑区的点击。
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.history-open ? rgba(0, 0, 0, 0.28) : transparent;
+        animate background { duration: 160ms; }
+
+        // 点抽屉外面收起
+        TouchArea {
+            enabled: root.history-open;
+            clicked => { root.toggle-history(); }
+        }
+
+        Rectangle {
+            width: min(460px, parent.width - 60px);
+            height: 100%;
+            x: root.history-open ? parent.width - self.width : parent.width;
+            animate x { duration: 170ms; easing: ease-out; }
+            background: Theme.bg;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            // 吞掉点击，别穿到背后的「点外面收起」
+            TouchArea { enabled: root.history-open; }
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "粘贴记录";
+                        font-family: Theme.font-ui-semibold;
+                        font-size: 15px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    IconButton {
+                        icon: Icons.trash;
+                        icon-size: 15px;
+                        danger: true;
+                        enabled: root.history-rows.length > 0;
+                        tooltip: "清空全部记录";
+                        clicked => { root.clear-history(); }
+                    }
+                    IconButton {
+                        icon: Icons.x;
+                        icon-size: 15px;
+                        tooltip: "收起";
+                        clicked => { root.toggle-history(); }
+                    }
+                }
+
+                // 按名称查询
+                Rectangle {
+                    height: 36px;
+                    FerricLineEdit {
+                        width: 100%;
+                        height: 100%;
+                        pad-left: 32px;
+                        text <=> root.history-query;
+                        placeholder: "按名称搜索…";
+                        edited(t) => { root.history-query-edited(t); }
+                    }
+                    Text {
+                        x: 11px;
+                        width: 16px;
+                        height: 100%;
+                        text: Icons.search;
+                        font-family: Theme.font-icons;
+                        font-size: 13px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: root.history-status;
+                    font-family: Theme.font-ui;
+                    font-size: 11.5px;
+                    color: Theme.faint;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.code-bg;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+
+                    if root.history-rows.length == 0: Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.history-query != ""
+                            ? "没有名字含「" + root.history-query + "」的记录"
+                            : "还没有记录";
+                        font-family: Theme.font-ui;
+                        font-size: 12.5px;
+                        color: Theme.faint;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            for row[i] in root.history-rows: card := Rectangle {
+                                // 改名输入框的当前值。放在这一行自己身上：
+                                // `for` 的每个实例各有一份，不会互相串。
+                                property <string> draft: row.name;
+                                background: Theme.bg;
+                                border-radius: 9px;
+                                border-width: 1px;
+                                border-color: root.renaming == i ? Theme.accent : Theme.border;
+                                height: 104px;
+
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 6px;
+
+                                    // 名字行（或改名输入）
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        if root.renaming != i: Text {
+                                            text: row.name;
+                                            font-family: Theme.font-ui-semibold;
+                                            font-size: 12.5px;
+                                            color: Theme.fg;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        if root.renaming != i: Text {
+                                            text: row.when + " · " + row.size;
+                                            font-family: Theme.font-mono;
+                                            font-size: 10.5px;
+                                            color: Theme.faint;
+                                            vertical-alignment: center;
+                                        }
+                                        if root.renaming == i: FerricLineEdit {
+                                            height: 30px;
+                                            horizontal-stretch: 1;
+                                            text: row.name;
+                                            placeholder: "起个名字（就是文件名）";
+                                            edited(t) => { card.draft = t; }
+                                            accepted(t) => { root.rename-history(i, t); }
+                                        }
+                                        if root.renaming == i: IconButton {
+                                            icon: Icons.circle-check;
+                                            icon-size: 15px;
+                                            tooltip: "保存名字";
+                                            clicked => { root.rename-history(i, card.draft); }
+                                        }
+                                        if root.renaming == i: IconButton {
+                                            icon: Icons.x;
+                                            icon-size: 15px;
+                                            tooltip: "取消";
+                                            clicked => { root.rename-cancel(); }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: row.preview;
+                                        font-family: Theme.font-mono;
+                                        font-size: 11px;
+                                        color: Theme.muted;
+                                        vertical-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        FerricButton {
+                                            text: "恢复到输入区";
+                                            height: 28px;
+                                            clicked => { root.restore-history(i); }
+                                        }
+                                        FerricButton {
+                                            text: "改名";
+                                            variant: "subtle";
+                                            height: 28px;
+                                            clicked => { root.rename-start(i); }
+                                        }
+                                        FerricButton {
+                                            text: "删除";
+                                            variant: "subtle";
+                                            height: 28px;
+                                            clicked => { root.delete-history(i); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -3804,6 +4051,13 @@ export component AppWindow inherits Window {
     in property <int> json-hit-index;
     in property <bool> json-can-undo;
     in property <bool> json-can-redo;
+    // 粘贴记录（右侧抽屉）。一条记录 = `<数据目录>/json-history/<名字>.json`，
+    // 存文件不存数据库：记录本身就是文档，名字就是文件名，用户能直接拿走。
+    in property <bool> json-history-open;
+    in property <[HistoryRow]> json-history-rows;
+    in-out property <string> json-history-query;
+    in property <int> json-history-renaming: -1;
+    in property <string> json-history-status;
 
     // 对比工具状态
     in property <EditorState> diff-left;
@@ -3962,6 +4216,14 @@ export component AppWindow inherits Window {
     callback json-search();
     callback json-next-hit();
     callback json-prev-hit();
+    callback json-history-toggle();
+    callback json-history-query-edited(string);
+    callback json-history-restore(int);
+    callback json-history-rename-start(int);
+    callback json-history-rename(int, string);
+    callback json-history-rename-cancel();
+    callback json-history-delete(int);
+    callback json-history-clear();
 
     // 对比工具
     callback diff-compare();
@@ -4639,6 +4901,19 @@ export component AppWindow inherits Window {
                         do-search => { root.json-search(); }
                         next-hit => { root.json-next-hit(); }
                         prev-hit => { root.json-prev-hit(); }
+                        history-open: root.json-history-open;
+                        history-rows: root.json-history-rows;
+                        history-query <=> root.json-history-query;
+                        renaming: root.json-history-renaming;
+                        history-status: root.json-history-status;
+                        toggle-history => { root.json-history-toggle(); }
+                        history-query-edited(q) => { root.json-history-query-edited(q); }
+                        restore-history(i) => { root.json-history-restore(i); }
+                        rename-start(i) => { root.json-history-rename-start(i); }
+                        rename-history(i, n) => { root.json-history-rename(i, n); }
+                        rename-cancel => { root.json-history-rename-cancel(); }
+                        delete-history(i) => { root.json-history-delete(i); }
+                        clear-history => { root.json-history-clear(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
                         editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
                         editor-click(w, l, c, e) => { root.editor-click(w, l, c, e); }
