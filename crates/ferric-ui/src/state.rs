@@ -1500,6 +1500,25 @@ impl Shell {
                     save(&sql.borrow().save_draft());
                 });
             }};
+            // 带一个参数的那类（分段控件传下标）
+            ($setter:ident, |$t:ident, $arg:ident| $body:block) => {{
+                let sql = self.sql.clone();
+                let save = self.draft_saver("sql");
+                let w = win.as_weak();
+                win.$setter(move |$arg| {
+                    {
+                        let mut $t = sql.borrow_mut();
+                        $body
+                    }
+                    if let Some(win) = w.upgrade() {
+                        let t = sql.borrow();
+                        win.set_sql_input(editor_bridge::state_of(&t.input));
+                        win.set_sql_uppercase(t.uppercase);
+                        win.set_sql_status(SharedString::from(t.status.clone()));
+                    }
+                    save(&sql.borrow().save_draft());
+                });
+            }};
         }
 
         sql_btn!(on_sql_format, |t| {
@@ -1508,8 +1527,8 @@ impl Shell {
         sql_btn!(on_sql_minify, |t| {
             t.minify();
         });
-        sql_btn!(on_sql_toggle_uppercase, |t| {
-            t.toggle_uppercase();
+        sql_btn!(on_sql_set_case, |t, index| {
+            t.set_case(index);
         });
         sql_btn!(on_sql_clear, |t| {
             t.clear();

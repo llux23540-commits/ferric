@@ -331,7 +331,7 @@ component SqlView inherits Rectangle {
 
     callback do-format();
     callback do-minify();
-    callback toggle-uppercase();
+    callback set-case(int);
     callback clear-input();
     callback copy-input();
     callback editor-viewport(string, int, int);
@@ -360,11 +360,16 @@ component SqlView inherits Rectangle {
                 text: "压缩为单行";
                 clicked => { root.do-minify(); }
             }
-            // 关键字大写：用分段控件表达开关，与设置页同一套语言
+            // 关键字大小写：两档都是**真的会变**的（关掉不是「保持原样」——
+            // 那一档一旦排过一次就再也回不去，按下去毫无变化）。
+            FieldLabel {
+                text: "关键字";
+                vertical-alignment: center;
+            }
             Segmented {
-                options: ["关键字大写", "原样"];
+                options: ["大写", "小写"];
                 current: root.uppercase ? 0 : 1;
-                changed(i) => { root.toggle-uppercase(); }
+                changed(i) => { root.set-case(i); }
             }
             Rectangle { horizontal-stretch: 1; }
             Text {
@@ -3889,7 +3894,7 @@ export component AppWindow inherits Window {
     // SQL 工具
     callback sql-format();
     callback sql-minify();
-    callback sql-toggle-uppercase();
+    callback sql-set-case(int);
     callback sql-clear();
     callback sql-copy();
 
@@ -4434,7 +4439,7 @@ export component AppWindow inherits Window {
                         status: root.sql-status;
                         do-format => { root.sql-format(); }
                         do-minify => { root.sql-minify(); }
-                        toggle-uppercase => { root.sql-toggle-uppercase(); }
+                        set-case(i) => { root.sql-set-case(i); }
                         clear-input => { root.sql-clear(); }
                         copy-input => { root.sql-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }

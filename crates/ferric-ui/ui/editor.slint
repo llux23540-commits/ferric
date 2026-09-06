@@ -106,13 +106,32 @@ export component CodeEditor inherits Rectangle {
             : root.total-lines >= 1000 ? 46px : 38px) + root.fold-w + root.sign-w
         : 0px;
 
-    // ===== 行号槽 =====
+    // ===== 行号槽（底色）=====
+    //
+    // 内缩 1px 并把左侧两个角圆掉：整块方角铺在 (0,0) 会把编辑区自己的
+    // 1px 左边框连同左上/左下圆角一起盖成不透明底色 —— 逐像素量过，
+    // 左缘从窗口白直接变成槽底色（用户报的「所有输入框左边没有边框」）。
+    // 靠根节点 `clip` 解决不了：Slint 的 clip 只按矩形裁，不认圆角。
+    if root.show-gutter: Rectangle {
+        x: 1px;
+        y: 1px;
+        width: root.gutter-w - 1px;
+        height: parent.height - 2px;
+        border-top-left-radius: 8px;
+        border-bottom-left-radius: 8px;
+        background: Theme.dark ? #0d1014 : #f1f3f6;
+    }
+
+    // ===== 行号槽（内容）=====
+    //
+    // 与底色分开画，坐标系保持和正文区一致：行号要和它那一行严格同基线，
+    // 跟着底色一起内缩 1px 就会整槽下移一像素、与右边的文字错开。
     if root.show-gutter: Rectangle {
         x: 0;
         y: 0;
         width: root.gutter-w;
         height: parent.height;
-        background: Theme.dark ? #0d1014 : #f1f3f6;
+        background: transparent;
 
         for no[i] in root.line-nos: Text {
             x: root.fold-w;

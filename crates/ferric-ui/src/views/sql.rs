@@ -23,8 +23,13 @@ struct SqlDraft {
 
 pub struct SqlTool {
     pub input: TextBuffer,
+    /// 关键字大写（关 = 小写）。
     pub uppercase: bool,
     pub status: String,
+    /// 上一次格式化/压缩吐出的文本。缓冲区还与它逐字相同 = 用户没改过，
+    /// 这时候切大小写可以**当场重排**（切了没反应正是这个开关被嫌弃的原因）；
+    /// 一旦有人动过一个字符就不再自动重排 —— 那会改掉他手写的 SQL。
+    last_out: String,
 }
 
 impl Default for SqlTool {
@@ -33,36 +38,65 @@ impl Default for SqlTool {
             input: TextBuffer::new(SAMPLE),
             uppercase: true,
             status: "就绪".to_owned(),
+            last_out: String::new(),
         }
     }
 }
 
 impl SqlTool {
+    fn case(&self) -> sql::Case {
+        if self.uppercase {
+            sql::Case::Upper
+        } else {
+            sql::Case::Lower
+        }
+    }
+
     pub fn format(&mut self) {
-        let out = sql::format(&self.input.text(), self.uppercase);
+        let out = sql::format(&self.input.text(), self.case());
         self.input.replace_keeping_view(&out);
+        self.last_out = out;
         self.status = "已格式化".to_owned();
     }
 
     pub fn minify(&mut self) {
         let out = sql::minify(&self.input.text());
         self.input.replace_keeping_view(&out);
+        // 压缩结果不是排版结果：此后切大小写不该把它重新展开成多行。
+        self.last_out.clear();
         self.status = "已压缩为单行".to_owned();
     }
 
-    /// 切换「关键字大写」。**不自动重排** —— 那会在用户还没看清的时候
-    /// 改掉他手写的 SQL；下次按格式化才生效，与 egui 版行为一致。
-    pub fn toggle_uppercase(&mut self) {
-        self.uppercase = !self.uppercase;
-        self.status = if self.uppercase {
-            "关键字大写：开（下次格式化生效）".to_owned()
+    /// 选关键字大小写（0 大写 / 1 小写）。
+    ///
+    /// 内容还是上一次排版的原样就当场重排，否则只记下设置、等下次格式化 ——
+    /// 手写的 SQL 不该在用户没按格式化的时候被改写。
+    pub fn set_case(&mut self, index: i32) {
+        let want = index != 1;
+        if want == self.uppercase {
+            return;
+        }
+        self.uppercase = want;
+        let untouched = !self.last_out.is_empty() && self.input.text() == self.last_out;
+        if untouched {
+            self.format();
+            self.status = if self.uppercase {
+                "关键字已改为大写".to_owned()
+            } else {
+                "关键字已改为小写".to_owned()
+            };
         } else {
-            "关键字大写：关（下次格式化生效）".to_owned()
-        };
+            self.status = if self.uppercase {
+                "关键字大写：开（下次格式化生效）".to_owned()
+            } else {
+                "关键字大写：关（下次格式化生效）".to_owned()
+            };
+        }
     }
 
     pub fn clear(&mut self) {
         self.input.set_text("");
+        self.last_out.clear();
         self.status = "已清空".to_owned();
     }
 }
@@ -72,7 +106,7 @@ impl Tool for SqlTool {
         ToolMeta {
             id: "sql",
             name: "SQL 格式化",
-            desc: "美化 / 压缩 SQL，关键字换行缩进，可选关键字大写。",
+            desc: "美化 / 压缩 SQL，关键字换行缩进，关键字大写 / 小写随时切。",
             icon: icons::DATABASE,
             group: "SQL",
             keywords: &["sql", "format", "格式化", "美化"],
@@ -122,26 +156,65 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_off_keeps_keywords_as_written() {
+    fn lower_case_actually_lowercases_on_the_next_format() {
         let mut t = SqlTool::default();
-        t.toggle_uppercase();
+        t.set_case(1);
         assert!(!t.uppercase);
         t.format();
-        assert!(
-            !t.input.text().contains("SELECT"),
-            "关掉大写后不该把关键字改成大写：{}",
-            t.input.text()
-        );
+        let out = t.input.text();
+        assert!(out.contains("select"), "{out}");
+        assert!(!out.contains("SELECT"), "关掉大写后关键字还是大写：{out}");
     }
 
     #[test]
-    fn toggling_uppercase_does_not_reformat_immediately() {
-        // 立刻重排会在用户还没看清的时候改掉他手写的 SQL。
+    fn switching_case_reformats_untouched_output_on_the_spot() {
+        // 「切了没反应」是这个开关被嫌弃的根因：内容还是上次排版的原样时，
+        // 切换必须当场看到效果。
         let mut t = SqlTool::default();
+        t.format();
+        assert!(t.input.text().contains("SELECT"));
+
+        t.set_case(1);
+        let out = t.input.text();
+        assert!(out.contains("select"), "切到小写没有当场生效：{out}");
+        assert!(!out.contains("SELECT"), "{out}");
+        assert_eq!(t.status, "关键字已改为小写");
+
+        t.set_case(0);
+        assert!(t.input.text().contains("SELECT"), "切回大写没生效");
+        assert_eq!(t.status, "关键字已改为大写");
+    }
+
+    #[test]
+    fn switching_case_never_rewrites_hand_written_sql() {
+        // 用户自己敲的内容不该在没按格式化的时候被改掉。
+        let mut t = SqlTool::default();
+        t.input.set_text("select  Id   from  T -- 我自己排的");
         let before = t.input.text();
-        t.toggle_uppercase();
+        t.set_case(1);
+        assert_eq!(t.input.text(), before, "手写内容被自动重排了");
+        assert!(t.status.contains("下次格式化生效"), "{}", t.status);
+    }
+
+    #[test]
+    fn switching_case_after_minify_keeps_it_on_one_line() {
+        // 压缩过的单行不是排版结果，切大小写不该把它重新展开。
+        let mut t = SqlTool::default();
+        t.format();
+        t.minify();
+        let before = t.input.text();
+        t.set_case(1);
         assert_eq!(t.input.text(), before);
-        assert!(t.status.contains("下次格式化生效"));
+    }
+
+    #[test]
+    fn re_selecting_the_same_case_is_a_noop() {
+        let mut t = SqlTool::default();
+        t.format();
+        let before = t.input.text();
+        t.set_case(0);
+        assert_eq!(t.input.text(), before);
+        assert_eq!(t.status, "已格式化", "同一档重复选中不该改状态");
     }
 
     #[test]
@@ -162,7 +235,7 @@ mod tests {
     fn draft_roundtrip_preserves_input_and_flag() {
         let mut t = SqlTool::default();
         t.input.set_text("select 1");
-        t.toggle_uppercase();
+        t.set_case(1);
         let saved = t.save_draft().expect("必须持久化草稿");
 
         let mut restored = SqlTool::default();
