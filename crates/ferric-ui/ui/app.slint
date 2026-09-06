@@ -868,7 +868,7 @@ component CryptoView inherits Rectangle {
             alignment: start;
             FerricButton {
                 text: "把密文送去解密";
-                icon: "→";
+                icon: Icons.chevron-right;
                 clicked => { root.send-to-decrypt(); }
             }
         }
@@ -2083,6 +2083,112 @@ component MarketBadge inherits Rectangle {
     }
 }
 
+// 卡片右侧的操作组：主操作与「卸载」合成一颗药丸（split button）。
+//
+// 分开摆时两个控件的高度来源不一样：`FerricButton` 自己写死 38px，
+// `IconButton` 只声明 min-height，进了 HorizontalLayout 就被拉到整行高、
+// 字形再在那一整块里居中 —— 两者的中线差了十几像素，看着就是「没在一行」。
+// 合进同一个容器后两段共用一个高度与一条基线，不可能再错位；
+// 顺带把「卸载」写成文字，图标按钮那种「不知道点了会发生什么」也一并省掉。
+component MarketActions inherits Rectangle {
+    in property <string> text;
+    // 主操作用主色（只有「更新」用）
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    // 是否带「卸载」那一段
+    in property <bool> removable;
+    callback act();
+    callback remove();
+
+    height: 34px;
+    horizontal-stretch: 0;
+    min-width: row.min-width;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: Theme.border-2;
+    // 底色始终是中性的：主色只涂主操作那一段。整颗药丸都涂绿的话，
+    // 「卸载」就变成绿底上的灰字（实测几乎读不出来），而且每一行的
+    // 「卸载」看起来还不一样。
+    background: Theme.code-bg;
+    // `clip` 只按矩形裁，不管圆角（实测 hover 的红底会在两个右角戳出直角），
+    // 所以两段各自把外侧的两个角圆掉：外圈 9px 减去 1px 边 = 8px。
+
+    property <color> main-fg: !root.enabled
+        ? Theme.faint
+        : (root.primary ? #ffffff : Theme.fg-soft);
+
+    row := HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            min-width: main-label.min-width + 28px;
+            border-top-left-radius: 8px;
+            border-bottom-left-radius: 8px;
+            // 只有一段时右边也得圆
+            border-top-right-radius: root.removable ? 0px : 8px;
+            border-bottom-right-radius: root.removable ? 0px : 8px;
+            background: !root.enabled
+                ? transparent
+                : (root.primary
+                    ? (main-ta.has-hover ? Theme.accent-strong : Theme.accent)
+                    : (main-ta.has-hover ? Theme.border-2 : transparent));
+            main-label := Text {
+                text: root.text;
+                font-family: Theme.font-ui-medium;
+                font-size: 13px;
+                color: root.main-fg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            main-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                clicked => { root.act(); }
+            }
+        }
+
+        if root.removable: Rectangle {
+            width: 1px;
+            background: Theme.border-2;
+        }
+        if root.removable: Rectangle {
+            min-width: rm-label.min-width + 22px;
+            border-top-right-radius: 8px;
+            border-bottom-right-radius: 8px;
+            // 卸载是不可逆的，hover 直接整段变红 + 文字反白，
+            // 与关闭按钮同一套语言（误点的代价最大的那个键要长得不一样）。
+            background: rm-ta.has-hover ? Theme.danger : transparent;
+            HorizontalLayout {
+                padding-left: 11px;
+                padding-right: 11px;
+                spacing: 4px;
+                alignment: center;
+                Text {
+                    text: Icons.trash;
+                    font-family: Theme.font-icons;
+                    font-size: 13px;
+                    color: rm-ta.has-hover ? #ffffff : Theme.muted;
+                    vertical-alignment: center;
+                }
+                rm-label := Text {
+                    text: "卸载";
+                    font-family: Theme.font-ui-medium;
+                    font-size: 13px;
+                    color: rm-ta.has-hover ? #ffffff : Theme.muted;
+                    vertical-alignment: center;
+                }
+            }
+            rm-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}
+
 // ——— 插件市场 ———
 //
 // 三段：搜索 / 操作 → 标签过滤 + 状态 → 卡片列表。
@@ -2373,26 +2479,21 @@ component MarketView inherits Rectangle {
                                 }
                             }
 
-                            HorizontalLayout {
-                                spacing: 6px;
+                            // 操作组：竖向自己居中（外层是横向布局，不给个
+                            // VerticalLayout 的话这一段会被拉到整行高）
+                            VerticalLayout {
                                 alignment: center;
-                                FerricButton {
+                                MarketActions {
                                     text: c.busy
                                         ? "安装中…"
                                         : (c.has-update ? "更新" : (c.is-installed ? "重装" : "安装"));
                                     // 只有「更新」用主色：一屏五张卡全是绿按钮时，
                                     // 真正需要动手的那一张就淹了。
-                                    variant: c.has-update ? "primary" : "default";
+                                    primary: c.has-update;
                                     enabled: !c.busy && !c.queued;
-                                    clicked => { root.do-install(c.slug); }
-                                }
-                                if c.is-installed: IconButton {
-                                    icon: Icons.trash;
-                                    icon-size: 16px;
-                                    danger: true;
-                                    tooltip: "卸载 " + c.name;
-                                    enabled: !c.busy;
-                                    clicked => { root.do-uninstall(c.slug); }
+                                    removable: c.is-installed;
+                                    act => { root.do-install(c.slug); }
+                                    remove => { root.do-uninstall(c.slug); }
                                 }
                             }
                         }
@@ -2747,7 +2848,7 @@ component UuidView inherits Rectangle {
                     Rectangle { horizontal-stretch: 1; }
                     FerricButton {
                         text: "重新生成";
-                        icon: "⟳";
+                        icon: Icons.refresh;
                         variant: "primary";
                         clicked => { root.regenerate(); }
                     }
@@ -2775,7 +2876,7 @@ component UuidView inherits Rectangle {
                     }
                     FerricButton {
                         text: "复制";
-                        icon: "⧉";
+                        icon: Icons.copy;
                         variant: "default";
                         clicked => { root.copy-output(); }
                     }
@@ -2898,6 +2999,8 @@ component SettingsOverlay inherits Rectangle {
     in property <int> source-index: 0;
 
     callback close();
+    // 挪窗口（弹框盖住主标题栏时，标题条就是唯一的抓手）
+    callback window-drag();
     callback open-data-dir();
     callback record-memory();
     callback check-update();
@@ -2933,6 +3036,21 @@ component SettingsOverlay inherits Rectangle {
                 height: 48px;
                 background: Theme.titlebar;
                 border-radius: 14px;
+
+                // 抓着弹框的标题条也能挪窗口。弹框铺满整窗，主标题栏被它盖住，
+                // 于是浮层一开窗口就动不了了 —— 那一刻用户唯一能抓的就是这一条。
+                // 与主标题栏同一个做法：在**按下瞬间**就交给系统拖（winit 的
+                // drag_window 要求鼠标仍按下），并且声明在按钮之前（后声明的
+                // 元素先收事件，关闭按钮才不会被这块吃掉）。
+                TouchArea {
+                    mouse-cursor: default;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down
+                            && ev.button == PointerEventButton.left) {
+                            root.window-drag();
+                        }
+                    }
+                }
                 HorizontalLayout {
                     padding-left: 18px;
                     padding-right: 8px;
@@ -2945,7 +3063,10 @@ component SettingsOverlay inherits Rectangle {
                         horizontal-stretch: 1;
                     }
                     IconButton {
-                        icon: "✕";
+                        // 图标字体是 lucide 子集，只有登记过的私用区码位。
+                        // 这里以前写死了字面量 "✕"（U+2715）—— 子集里没有这个
+                        // 码位，画出来是空白，于是「设置」右上角看着根本没有关闭按钮。
+                        icon: Icons.x;
                         icon-size: 14px;
                         clicked => { root.close(); }
                     }
@@ -3257,6 +3378,8 @@ component ActivityPanel inherits Rectangle {
     in property <[ActivityRow]> rows;
     callback clear();
     callback dismiss();
+    // 挪窗口（同 SettingsOverlay：浮层盖住主标题栏时的唯一抓手）
+    callback window-drag();
 
     background: rgba(0, 0, 0, 0.42);
 
@@ -3284,6 +3407,15 @@ component ActivityPanel inherits Rectangle {
                 height: 48px;
                 background: Theme.titlebar;
                 border-radius: 14px;
+                TouchArea {
+                    mouse-cursor: default;
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down
+                            && ev.button == PointerEventButton.left) {
+                            root.window-drag();
+                        }
+                    }
+                }
                 HorizontalLayout {
                     padding-left: 18px;
                     padding-right: 8px;
@@ -4624,8 +4756,12 @@ export component AppWindow inherits Window {
     //
     // 后台**绝不自动安装**：那一步会关掉用户正在用的应用，必须他自己点。
     if root.update-dialog-open && root.update-phase == 5: Rectangle {
+        // 浮层一律从标题栏**下面**开始（44px）。铺满整窗的话，主标题栏连同
+        // 最小化 / 最大化 / 关闭三颗按钮全被这层挡住：浮层一开，窗口既挪不动
+        // 也关不掉，而且在标题栏上按一下还会被背景那层当成「点外面 → 关弹框」。
+        y: 44px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 44px;
         background: rgba(0, 0, 0, 0.45);
         TouchArea {
             clicked => { root.update-dialog-open = false; }
@@ -4645,12 +4781,26 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 20px;
                 spacing: 12px;
-                Text {
-                    text: "发现新版本 v" + root.update-version;
-                    font-family: Theme.font-ui-bold;
-                    font-weight: Theme.weight-bold;
-                    font-size: 17px;
-                    color: Theme.fg;
+                // 标题行：标题 + 关闭。以前只能点背景或「稍后」关掉 ——
+                // 弹框右上角没有 ✕ 时，第一反应是去点主窗口的关闭按钮，
+                // 而那颗按钮此刻正被这层浮层盖着。
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "发现新版本 v" + root.update-version;
+                        font-family: Theme.font-ui-bold;
+                        font-weight: Theme.weight-bold;
+                        font-size: 17px;
+                        color: Theme.fg;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    IconButton {
+                        icon: Icons.x;
+                        icon-size: 14px;
+                        tooltip: "稍后再说";
+                        clicked => { root.update-dismiss(); }
+                    }
                 }
                 Text {
                     text: "已下载并通过 sha256 + 魔数 + 离线签名三重校验。";
@@ -4696,8 +4846,10 @@ export component AppWindow inherits Window {
 
     // ===== 设置浮层 =====
     SettingsOverlay {
+        // 同上：不盖标题栏，窗口按钮与拖动始终可用
+        y: 44px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 44px;
         open <=> root.settings-open;
         tab <=> root.settings-tab;
         theme-mode <=> root.theme-mode;
@@ -4716,6 +4868,7 @@ export component AppWindow inherits Window {
         last-check-stale: root.last-check-stale;
         source-index: root.source-index;
         close => { root.settings-open = false; }
+        window-drag => { root.window-drag(); }
         open-data-dir => { root.open-data-dir(); }
         record-memory => { root.record-memory(); }
         check-update => { root.check-update(); }
@@ -4730,8 +4883,9 @@ export component AppWindow inherits Window {
     // 用 `if` 而不是 `visible`：每次打开都重建一次，`init` 里的 focus()
     // 才会重新跑（面板是键盘入口，打开后必须已经能直接打字）。
     if root.palette-open: CommandPalette {
+        y: 44px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 44px;
         rows: root.palette-rows;
         query <=> root.palette-query;
         sel <=> root.palette-sel;
@@ -4745,11 +4899,13 @@ export component AppWindow inherits Window {
 
     // ===== 操作记录（侧栏左下角那个图标打开） =====
     if root.log-open: ActivityPanel {
+        y: 44px;
         width: parent.width;
-        height: parent.height;
+        height: parent.height - 44px;
         rows: root.activity;
         clear => { root.clear-activity(); }
         dismiss => { root.log-open = false; }
+        window-drag => { root.window-drag(); }
     }
 
     // ===== 窗口轮廓 =====
