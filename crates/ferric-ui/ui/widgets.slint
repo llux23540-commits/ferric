@@ -287,10 +287,16 @@ export component FerricLineEdit inherits Rectangle {
     in property <length> pad-left: 12px;
     callback edited(string);
     callback accepted(string);
+    // 里面那个 TextInput 有没有焦点。外面要用（查找浮层的边框跟着焦点走），
+    // 而组件本身不是可聚焦元素，`has-focus` 在它身上不存在。
+    out property <bool> focused: input.has-focus;
+    // 「裸」模式：不画底、不画边、不画聚焦光环 —— 嵌在别的容器里时用
+    //（查找浮层已经有自己的圆角边框，再套一层就是框里框）。
+    in property <bool> flat: false;
     height: 38px;
     border-radius: 9px;
-    background: Theme.field;
-    border-width: 1px;
+    background: root.flat ? transparent : Theme.field;
+    border-width: root.flat ? 0px : 1px;
     border-color: input.has-focus ? Theme.accent : Theme.field-bd;
     // 不让内容撑宽：里面的 TextInput 不换行，一条 130 hex 的 SM2 公钥会把整个
     // 布局顶出可视区（实测国密工具右半边被裁掉）。给一个小的 min-width，
@@ -315,7 +321,7 @@ export component FerricLineEdit inherits Rectangle {
         height: parent.height + 6px;
         border-radius: 12px;
         border-width: 3px;
-        border-color: input.has-focus ? Theme.accent-ring : transparent;
+        border-color: !root.flat && input.has-focus ? Theme.accent-ring : transparent;
     }
 
     Rectangle {

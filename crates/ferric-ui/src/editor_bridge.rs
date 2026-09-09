@@ -189,6 +189,26 @@ fn token_kind(t: ferric_core::json::Token) -> i32 {
     }
 }
 
+/// 光标所在整行的文本，**带行尾换行**。
+///
+/// 带换行是有意的：粘到别处时它是完整的一行，而不是接在上一行末尾。
+fn current_line(buf: &TextBuffer) -> String {
+    let (line, _) = buf.cursor_line_col();
+    let mut s = buf.line_text(line);
+    s.push('\n');
+    s
+}
+
+/// 选中光标所在整行，**连行尾换行一起**。
+///
+/// `select_line()` 只到行尾（三连击的语义），照它剪切会留下一个空行 ——
+/// 而「剪掉这一行」的意思是这一行整个没了。
+fn select_current_line(buf: &mut TextBuffer) {
+    buf.select_line();
+    let (start, end) = buf.selection();
+    buf.select_range(start, (end + 1).min(buf.len_chars()));
+}
+
 /// 把一次按键作用到缓冲区上。
 ///
 /// `text` 是 Slint 给的原始按键字符：功能键是约定码点，可打印字符就是它本身。
@@ -210,19 +230,26 @@ pub fn apply_key(
     if ctrl {
         match c.to_ascii_lowercase() {
             'a' => buf.select_all(),
+            // 无选区时按「当前行」处理，而不是整篇。
+            //
+            // 原来 Ctrl+C 在没选区时复制整个文档：习惯性按一下，粘出来是几百 KB
+            // 的全文，而用户以为自己复制的是光标那一行（各家编辑器都是这个语义）。
+            // 复制整篇有明确入口 —— 工具条上的「复制全文」。
+            // Ctrl+X 也一并对齐：原来无选区时它什么都不做，两个键行为不一致。
             'c' => {
                 out.copy = Some(if buf.has_selection() {
                     buf.selected_text()
                 } else {
-                    buf.text()
+                    current_line(buf)
                 });
             }
             'x' if !read_only => {
-                if buf.has_selection() {
-                    out.copy = Some(buf.selected_text());
-                    buf.backspace();
-                    out.edited = true;
+                if !buf.has_selection() {
+                    select_current_line(buf);
                 }
+                out.copy = Some(buf.selected_text());
+                buf.backspace();
+                out.edited = true;
             }
             'v' if !read_only => out.paste = true,
             'z' if !read_only => {
@@ -359,14 +386,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_copies_selection_or_whole_text() {
+    fn ctrl_c_copies_the_selection_or_the_current_line() {
         let mut b = buf();
-        // 无选区 → 复制整篇（用户按 Ctrl+C 想要的是「把结果拿走」）
+        // 无选区 → 当前行（带换行），**不是整篇**：习惯性按一下不该把几百 KB
+        // 全文塞进剪贴板。整篇有工具条上的「复制全文」。
+        b.click(1, 2.0, false);
         let out = apply_key(&mut b, "c", true, false, false);
-        assert_eq!(out.copy.as_deref(), Some("hello\nworld\n"));
+        assert_eq!(out.copy.as_deref(), Some("world\n"));
+        assert_eq!(b.text(), "hello\nworld\n", "复制不该改内容");
 
-        b.select_all();
-        b.move_cursor(Motion::DocStart, false);
         b.click(0, 0.0, false);
         b.click(0, 5.0, true);
         let out = apply_key(&mut b, "c", true, false, false);
@@ -374,18 +402,32 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_cuts_only_when_there_is_a_selection() {
+    fn ctrl_x_cuts_the_selection_or_the_whole_current_line() {
         let mut b = buf();
-        // 没选区时剪切不该把整篇删掉 —— 那是灾难性的误操作
+        // 无选区 → 剪掉当前行，**连换行一起**：只删内容会留一个空行，
+        // 而「剪掉这一行」的意思是这一行整个没了。
+        b.click(0, 3.0, false);
         let out = apply_key(&mut b, "x", true, false, false);
-        assert!(!out.edited);
-        assert_eq!(b.text(), "hello\nworld\n");
+        assert_eq!(out.copy.as_deref(), Some("hello\n"));
+        assert_eq!(b.text(), "world\n");
+        assert!(out.edited);
 
+        let mut b = buf();
         b.click(0, 0.0, false);
         b.click(0, 5.0, true);
         let out = apply_key(&mut b, "x", true, false, false);
         assert_eq!(out.copy.as_deref(), Some("hello"));
         assert_eq!(b.text(), "\nworld\n");
+    }
+
+    #[test]
+    fn read_only_pane_never_cuts() {
+        // 输出面板可以复制，但 Ctrl+X 一个字都不能动
+        let mut b = buf();
+        let out = apply_key(&mut b, "x", true, false, true);
+        assert!(!out.edited);
+        assert!(out.copy.is_none());
+        assert_eq!(b.text(), "hello\nworld\n");
     }
 
     #[test]
