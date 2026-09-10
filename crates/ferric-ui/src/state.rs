@@ -303,6 +303,11 @@ pub struct Shell {
     /// Slint 的 TextInput 在本项目里收不到 Enter（见 `wire_palette` 的按键钩子），
     /// 所以 Enter 由那个钩子分派 —— 而分派前必须知道它该给谁。
     pub find_hint: Rc<std::cell::Cell<bool>>,
+    /// 还没落盘的那个编辑区标识（`None` = 没有欠账）。
+    ///
+    /// 编辑后的「重算 + 落盘」都攒一下再做，见 `wire_editors` 里的两个防抖
+    /// 定时器；这里记住欠着谁，切工具 / 关窗口时能立刻补上。
+    pub pending_edit: Rc<RefCell<Option<String>>>,
 }
 
 impl Default for Shell {
@@ -381,6 +386,7 @@ impl Shell {
             diff: Rc::new(RefCell::new(diff)),
             market: Rc::new(RefCell::new(market)),
             find_hint: Rc::new(std::cell::Cell::new(false)),
+            pending_edit: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -923,7 +929,11 @@ impl Shell {
             }
         });
 
-        win.on_window_close(|| {
+        // 关窗口前把欠着的草稿落盘：打字期间落盘是防抖的，
+        // 直接退出会把最后不到 1 秒的编辑丢掉。
+        let shell = self.clone_handles();
+        win.on_window_close(move || {
+            shell.flush_edits();
             let _ = slint::quit_event_loop();
         });
     }
@@ -933,7 +943,11 @@ impl Shell {
         let state = self.state.clone();
         let market = self.market.clone();
         let w = win.as_weak();
+        let shell = self.clone_handles();
         win.on_select_tool(move |i| {
+            // 切工具前先把上一个工具欠着的草稿落盘 —— 下面的 `s.save()` 存的是
+            // 注册表那一份，而它只在落盘时才被同步，欠着就会存成旧文本。
+            shell.flush_edits();
             let i = i.max(0) as usize;
             let picked = {
                 let mut s = state.borrow_mut();
@@ -2581,6 +2595,17 @@ impl Shell {
         });
 
         // 按键要额外处理「改过内容」→ 重算 + 落盘，以及剪贴板请求。
+        //
+        // ⚠️ 重算与落盘都**攒一下再做**。原来是每按一个字符都同步跑一遍：
+        // 整篇重算（JSON 那条是全文 serde 解析）+ 草稿序列化两遍
+        //（save_draft 出去、load_draft 回注册表，顺带重建一次 rope）
+        // + 把**所有**工具的草稿收齐、整份 app.ron 写盘。
+        // 实测一份 113KB 的 JSON 会把 app.ron 顶到 273KB —— 于是「打一个字」
+        // 等于「全文解析 + 273KB 落盘」，文档越大越粘手（用户报的卡就是这个）。
+        //
+        // 定时器由这个闭包持有：Timer 一旦被 drop 就不会再触发。
+        let recompute_timer = Rc::new(slint::Timer::default());
+        let persist_timer = Rc::new(slint::Timer::default());
         let shell = self.clone_handles();
         let w = win.as_weak();
         win.on_editor_key(move |which, text, ctrl, shift| {
@@ -2631,8 +2656,32 @@ impl Shell {
                 }
             }
             if outcome.edited || pasted {
-                shell.recompute(&which);
-                shell.persist_tool(&which);
+                // 欠着谁：切工具 / 关窗口时按这个补上（见 `flush_edits`）
+                *shell.pending_edit.borrow_mut() = Some(which.clone());
+
+                // 重算晚 120ms：状态行与输出面板慢这一下没人察觉，
+                // 而连续打字期间只会在停手后算一次。
+                let s1 = shell.clone_handles();
+                let w1 = win.as_weak();
+                let which1 = which.clone();
+                recompute_timer.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(120),
+                    move || {
+                        s1.recompute(&which1);
+                        if let Some(win) = w1.upgrade() {
+                            s1.sync_editor(&win, &which1);
+                        }
+                    },
+                );
+
+                // 落盘晚 900ms：草稿是「下次打开还在」，不是每个字符都要留痕。
+                let s2 = shell.clone_handles();
+                persist_timer.start(
+                    slint::TimerMode::SingleShot,
+                    std::time::Duration::from_millis(900),
+                    move || s2.flush_edits(),
+                );
             }
             shell.sync_editor(&win, &which);
         });
@@ -2677,6 +2726,7 @@ impl Shell {
             diff: self.diff.clone(),
             market: self.market.clone(),
             find_hint: self.find_hint.clone(),
+            pending_edit: self.pending_edit.clone(),
         }
     }
 
@@ -2738,6 +2788,19 @@ impl Shell {
                 p.run_if_dirty();
             }
         }
+    }
+
+    /// 把欠着的「重算 + 落盘」立刻做掉。
+    ///
+    /// 打字期间这两件事是防抖的（见 `wire_editors`）。切工具、关窗口这些
+    /// 「之后可能就没机会了」的时刻必须先补上 —— 注册表里那一份草稿只在落盘
+    /// 时才被同步，欠着就存的是上一次的旧文本。
+    pub fn flush_edits(&self) {
+        let Some(which) = self.pending_edit.borrow_mut().take() else {
+            return;
+        };
+        self.recompute(&which);
+        self.persist_tool(&which);
     }
 
     /// 对比工具的左右同步滚动：滚一侧，另一侧跳到同一处 diff 行。

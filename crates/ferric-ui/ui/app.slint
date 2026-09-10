@@ -1911,11 +1911,11 @@ component JsonView inherits Rectangle {
         visible: root.find-open;
         border-radius: 10px;
         background: Theme.bg;
+        // 边框比别处深一档来代替投影。**不要 drop-shadow**：软件渲染器每次
+        // 重绘这块区域都要重新做一遍高斯模糊，而浮层压在正文上 —— 逐像素
+        // 实测按住方向键滚 60 行，带投影 344ms CPU、不带 31ms，差 11 倍。
         border-width: 1px;
-        border-color: finder.focused ? Theme.accent : Theme.border-2;
-        drop-shadow-blur: 12px;
-        drop-shadow-color: rgba(0, 0, 0, 0.16);
-        drop-shadow-offset-y: 2px;
+        border-color: finder.focused ? Theme.accent : Theme.muted;
 
         // 吞掉点击：浮层底下就是正文，漏过去会把光标挪到别处
         TouchArea { enabled: root.find-open; }
