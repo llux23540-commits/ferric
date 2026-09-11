@@ -427,8 +427,12 @@ mod tests {
     #[test]
     fn hunk_navigation_is_a_noop_without_differences() {
         let mut t = DiffTool::default();
-        t.left.set_text("a\nb\n");
-        t.right.set_text("a\nb\n");
+        // 文档要比视口高，第 1 行才是个合法的顶端 —— 三行的文档会被
+        // 「最多滚到最后一屏」夹回 0，那就测不到「跳没跳」了。
+        let same: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        t.left.set_text(&same);
+        t.right.set_text(&same);
+        t.left.set_viewport(30, 80);
         t.compare();
         t.left.scroll_to_doc_line(1);
         t.next_hunk();

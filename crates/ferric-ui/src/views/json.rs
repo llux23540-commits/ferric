@@ -66,6 +66,16 @@ pub struct JsonTool {
     pub renaming: i32,
     /// 抽屉自己的状态行（改名报错、恢复了哪条）。
     pub history_status: String,
+    /// 正在预览的那一行（抽屉里的可见行号），-1 = 没有。
+    ///
+    /// 预览把记录**全文**读进 `preview`，输入区一个字都不动 —— 「看一眼这条
+    /// 是不是我要的」不该把手上正在改的东西覆盖掉，而卡片上那行 110 字的
+    /// 缩略根本认不出内容。
+    pub preview_row: i32,
+    /// 只读的预览缓冲区（虚拟化 + 着色 + 可拖选 Ctrl+C，与正文编辑区同一套）。
+    pub preview: TextBuffer,
+    pub preview_name: String,
+    pub preview_bytes: u64,
 }
 
 impl Default for JsonTool {
@@ -85,6 +95,10 @@ impl Default for JsonTool {
             history_open: false,
             renaming: -1,
             history_status: String::new(),
+            preview_row: -1,
+            preview: TextBuffer::new(""),
+            preview_name: String::new(),
+            preview_bytes: 0,
         };
         t.validate();
         t
@@ -362,13 +376,59 @@ impl JsonTool {
             } else {
                 format!("共 {} 条记录", self.history.len())
             };
+        } else {
+            // 收起时把预览那份正文丢掉：一条记录能有几 MB，没必要一直占着。
+            self.close_preview();
         }
     }
 
     pub fn set_history_query(&mut self, q: &str) {
         self.history.set_query(q);
-        // 搜索一收窄，正在改名的那一行可能已经不在可见列表里了
+        // 搜索一收窄，正在改名 / 正在预览的那一行可能已经不在可见列表里了
         self.renaming = -1;
+        self.close_preview();
+    }
+
+    /// 点一张卡片 = 把那条记录的全文读进只读预览区。**不碰输入区**。
+    pub fn preview_history(&mut self, row: i32) {
+        let Some(i) = self.visible_index(row) else {
+            return;
+        };
+        // 再点一次同一条 = 收起预览（卡片本身就是开关）。
+        if self.preview_row == row {
+            self.close_preview();
+            self.history_status = format!("共 {} 条记录", self.history.len());
+            return;
+        }
+        let Some(text) = self.history.text_of(i) else {
+            self.history_status = "这条记录读不出来（文件可能已被删掉）".to_owned();
+            self.close_preview();
+            return;
+        };
+        let (name, bytes) = {
+            let e = self.history.visible()[row.max(0) as usize];
+            (e.name.clone(), e.bytes)
+        };
+        self.preview.set_text(&text);
+        self.preview_row = row;
+        self.preview_bytes = bytes;
+        self.history_status = format!("预览「{name}」 —— 输入区没动");
+        self.preview_name = name;
+    }
+
+    pub fn close_preview(&mut self) {
+        if self.preview_row < 0 {
+            return;
+        }
+        self.preview_row = -1;
+        self.preview_name.clear();
+        self.preview_bytes = 0;
+        self.preview.set_text("");
+    }
+
+    /// 预览里那份正文（「复制」按钮用）。
+    pub fn preview_text(&self) -> Option<String> {
+        (self.preview_row >= 0).then(|| self.preview.text())
     }
 
     /// 把某条记录读回输入区。
@@ -408,6 +468,10 @@ impl JsonTool {
         match self.history.rename(i, name) {
             Ok(n) => {
                 self.renaming = -1;
+                // 预览的就是这一条：标题跟着改，不然抽屉上半截与下半截对不上
+                if self.preview_row == row {
+                    self.preview_name = n.clone();
+                }
                 self.history_status = format!("已改名为「{n}」");
             }
             // 改名失败要留在编辑状态：把输入框收起来等于把用户刚打的名字扔了
@@ -420,6 +484,8 @@ impl JsonTool {
             return;
         };
         self.renaming = -1;
+        // 删一条之后下面的行号整体上移，预览挂着的那个行号就指到别人身上了
+        self.close_preview();
         if let Some(name) = self.history.remove(i) {
             self.history_status = format!("已删除「{name}」");
         }
@@ -428,6 +494,7 @@ impl JsonTool {
     pub fn clear_history(&mut self) {
         let n = self.history.clear();
         self.renaming = -1;
+        self.close_preview();
         self.history_status = format!("已清空 {n} 条记录");
     }
 
@@ -727,5 +794,71 @@ mod tests {
         let mut t = JsonTool::default();
         t.load_draft(r#"{"input":"{}","indent":"Two","sort":false}"#);
         assert!(t.wrap);
+    }
+
+    /// 记录目录：每个测试线程一个，跑完不留。
+    fn hist_tool() -> JsonTool {
+        let dir = std::env::temp_dir().join(format!(
+            "ferric-json-prev-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        JsonTool {
+            history: JsonHistory::with_dir(dir, 10),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn previewing_a_record_leaves_the_input_alone() {
+        // 预览存在的全部理由：在不覆盖手上这份的前提下看清那条记录是什么。
+        let mut t = hist_tool();
+        t.record_paste(r#"{"记录":"旧的那份"}"#).unwrap();
+        t.input.set_text(r#"{"正在改":true}"#);
+
+        t.preview_history(0);
+        assert_eq!(t.preview_row, 0);
+        assert_eq!(t.preview.text(), r#"{"记录":"旧的那份"}"#);
+        assert_eq!(t.preview_text().as_deref(), Some(r#"{"记录":"旧的那份"}"#));
+        assert_eq!(t.input.text(), r#"{"正在改":true}"#, "预览动了输入区");
+    }
+
+    #[test]
+    fn clicking_the_same_card_again_closes_the_preview() {
+        let mut t = hist_tool();
+        t.record_paste(r#"{"a":1}"#).unwrap();
+        t.preview_history(0);
+        t.preview_history(0);
+        assert_eq!(t.preview_row, -1);
+        assert!(t.preview.text().is_empty(), "关掉要把那份正文放掉");
+        assert!(t.preview_text().is_none());
+    }
+
+    #[test]
+    fn deleting_or_filtering_drops_a_stale_preview() {
+        // 行号是「当前可见列表里的第几条」—— 列表一变，挂着的行号就指到别人
+        // 身上了，抽屉上下两截会对不上。
+        let mut t = hist_tool();
+        t.record_paste(r#"{"a":1}"#).unwrap();
+        t.record_paste(r#"{"b":2}"#).unwrap();
+
+        t.preview_history(0);
+        t.delete_history(0);
+        assert_eq!(t.preview_row, -1);
+
+        t.preview_history(0);
+        t.set_history_query("找不到的名字");
+        assert_eq!(t.preview_row, -1);
+    }
+
+    #[test]
+    fn renaming_the_previewed_record_retitles_the_preview() {
+        let mut t = hist_tool();
+        t.record_paste(r#"{"a":1}"#).unwrap();
+        t.preview_history(0);
+        t.rename_history(0, "订单示例");
+        assert_eq!(t.preview_name, "订单示例");
+        assert_eq!(t.preview_row, 0, "改个名不该把预览关掉");
     }
 }

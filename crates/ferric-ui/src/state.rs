@@ -2119,6 +2119,30 @@ impl Shell {
             }
         });
 
+        // 预览里那份记录 → 剪贴板。直接拿走整条，不必先「恢复到输入区」
+        // 把手上的东西覆盖掉。
+        let json = self.json.clone();
+        let state = self.state.clone();
+        let w = win.as_weak();
+        win.on_json_history_copy(move || {
+            let Some(text) = json.borrow().preview_text() else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+            let n = text.lines().count();
+            let name = json.borrow().preview_name.clone();
+            state.borrow_mut().shared.copy(text);
+            state
+                .borrow_mut()
+                .shared
+                .toast(format!("已复制「{name}」的 {n} 行"));
+            if let Some(win) = w.upgrade() {
+                Self::flush_shared(&state, &win);
+            }
+        });
+
         // ——— 粘贴记录（右侧抽屉）———
         json_cb!(on_json_history_toggle, |t| {
             t.toggle_history();
@@ -2137,6 +2161,12 @@ impl Shell {
         });
         json_cb!(on_json_history_clear, |t| {
             t.clear_history();
+        });
+        json_cb!(on_json_history_preview, |t, i| {
+            t.preview_history(i);
+        });
+        json_cb!(on_json_history_preview_close, |t| {
+            t.close_preview();
         });
         json_cb!(on_json_history_query_edited, |t, q| {
             t.set_history_query(&q);
@@ -2193,6 +2223,17 @@ impl Shell {
             })
             .collect();
         win.set_json_history_rows(ModelRc::new(VecModel::from(rows)));
+        // 预览（点卡片打开的那半截抽屉）。只读编辑区，着色与正文一致。
+        win.set_json_history_preview_row(t.preview_row);
+        win.set_json_history_preview_name(SharedString::from(t.preview_name.clone()));
+        win.set_json_history_preview_size(SharedString::from(fmt_size(t.preview_bytes as i64)));
+        win.set_json_history_preview_state(editor_bridge::state_with_decor(
+            &t.preview,
+            editor_bridge::RowDecor {
+                syntax: editor_bridge::Syntax::Json,
+                ..Default::default()
+            },
+        ));
     }
 
     /// 对比工具。
@@ -2636,7 +2677,10 @@ impl Shell {
             // `paste()`（Slint 的 Rust API 不给读剪贴板的入口）。
             let mut pasted = false;
             if outcome.paste {
-                let payload = win.invoke_paste_from_clipboard().to_string();
+                let raw = win.invoke_paste_from_clipboard().to_string();
+                // CRLF → LF：Windows 的剪贴板一律给 CRLF，原样插进去等于给
+                // 每一行末尾塞一个看不见的 `\r`（还会跟着粘贴记录落盘）。
+                let payload = editor_bridge::normalize_newlines(&raw);
                 if !payload.is_empty() {
                     shell.with_buffer(&which, |b| b.insert_str(&payload));
                     pasted = true;
@@ -2743,6 +2787,8 @@ impl Shell {
             "sql-in" => Some(f(&mut self.sql.borrow_mut().input)),
             "regex-in" => Some(f(&mut self.regex.borrow_mut().text)),
             "json-in" => Some(f(&mut self.json.borrow_mut().input)),
+            // 粘贴记录的预览：只读（`-out`），抽屉里点一张卡片就灌进来
+            "json-hist-out" => Some(f(&mut self.json.borrow_mut().preview)),
             "diff-left-in" => Some(f(&mut self.diff.borrow_mut().left)),
             "diff-right-in" => Some(f(&mut self.diff.borrow_mut().right)),
             // 插件的编辑区在 AppState::tools 里，不是独立字段。

@@ -696,10 +696,16 @@ impl TextBuffer {
     }
 
     fn clamp_scroll(&mut self) {
-        // 最多滚到「最后一屏」，不允许把内容整个滚出视野之外 ——
-        // 那会让用户以为文本没了。
-        let max = self.total_lines().saturating_sub(1);
-        self.scroll_line = self.scroll_line.min(max);
+        // 最多滚到「最后一屏」：再往下滚，屏幕上就只剩末尾几行加一大片空白 ——
+        // 用户会以为文本没了。整份粘贴（Ctrl+A、Ctrl+V）最容易撞上这一下：
+        // 光标落在末行，`scroll_to_cursor` 把末行顶到第一排，一屏只剩一行，
+        // 看起来就是「没粘全」。
+        //
+        // 刻度是**可见行**：折叠之后文档行号与屏幕行号不再一致，按文档行号
+        // 夹会在折叠文档上少滚（或多滚）掉被藏起来的那些行。
+        let last_top = self.view_total_lines().saturating_sub(self.viewport_lines);
+        let row = self.view_rows_between(0, self.scroll_line).min(last_top);
+        self.scroll_line = self.doc_of_view_row(row);
         // 顶端必须落在可见行上：停在被折叠藏起来的行上，第一屏会画成空白。
         self.scroll_line = self.prev_visible(self.scroll_line);
     }
@@ -714,6 +720,9 @@ impl TextBuffer {
             // 距离按**可见行**算：折叠之后「相差 300 行」可能只有 3 行的视觉距离。
             self.scroll_line = self.back_visible(line, self.viewport_lines - 1);
         }
+        // 往回跳时上面把光标行顶到了第一排 —— 光标若在文末，第一排之后就没有
+        // 正文了。夹回最后一屏（光标仍在屏内，只是不再是第一行）。
+        self.clamp_scroll();
         if col < self.scroll_col {
             self.scroll_col = col;
         } else if col >= self.scroll_col + self.viewport_cols {
@@ -1085,6 +1094,32 @@ mod tests {
         b.set_viewport(2, 80);
         b.scroll_by(9999);
         assert!(!b.visible_lines().is_empty(), "滚到底仍必须有内容可见");
+    }
+
+    #[test]
+    fn the_last_screen_stays_full() {
+        // 「最后一屏」而不是「最后一行」：滚到底只剩一行正文加一大片空白时，
+        // 用户报的是「我的文本呢」。
+        let doc: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut b = buf(&doc);
+        b.set_viewport(30, 80);
+        b.scroll_by(9999);
+        assert_eq!(b.visible_lines().len(), 30, "滚到底仍要铺满一屏");
+    }
+
+    #[test]
+    fn pasting_a_whole_document_shows_its_tail_not_a_blank_page() {
+        // 用户报的「粘贴没粘全」：Ctrl+A、Ctrl+V 之后光标停在末行，
+        // `scroll_to_cursor` 把末行顶到第一排 —— 屏幕上只剩那一行。
+        let mut b = buf("old\n");
+        b.set_viewport(30, 80);
+        b.select_all();
+        b.insert_str(&(0..165).map(|i| format!("line {i}\n")).collect::<String>());
+
+        let rows = b.visible_lines();
+        assert_eq!(rows.len(), 30, "粘完必须还是满满一屏");
+        assert_eq!(rows[29].trim_end(), "", "末行（空行）在最后一排");
+        assert_eq!(rows[0].trim_end(), "line 136");
     }
 
     #[test]

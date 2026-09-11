@@ -106,6 +106,20 @@ export component CodeEditor inherits Rectangle {
             : root.total-lines >= 1000 ? 46px : 38px) + root.fold-w + root.sign-w
         : 0px;
 
+    // ===== 拖选到区域外的自动滚动 =====
+    //
+    // 指针离上/下沿多远（还在里面 = 0）。`touch` 在下面才声明 —— 同一个
+    // 组件里的 id 是整体可见的，向后引用没问题。
+    property <length> drag-out: !touch.pressed
+        ? 0px
+        : (touch.mouse-y < 0px
+            ? -touch.mouse-y
+            : (touch.mouse-y > root.height ? touch.mouse-y - root.height : 0px));
+    // 方向：-1 往上、1 往下、0 不滚。
+    property <int> autoscroll: root.drag-out <= 0px ? 0 : (touch.mouse-y < 0px ? -1 : 1);
+    // 离得越远滚得越快 —— 一行一拍的话，往下选一千行要等半分钟。
+    property <int> autoscroll-step: root.drag-out > 180px ? 8 : (root.drag-out > 70px ? 3 : 1);
+
     // ===== 行号槽（底色）=====
     //
     // 内缩 1px 并把左侧两个角圆掉：整块方角铺在 (0,0) 会把编辑区自己的
@@ -303,7 +317,10 @@ export component CodeEditor inherits Rectangle {
                     // 必须显式抢焦点：键盘事件走 FocusScope，而点击落在 TouchArea 上。
                     // 少了这一行的表现是「光标能点、字打不进去」。
                     focus.focus();
-                    root.clicked(self.hit-line, self.hit-cells, false);
+                    // Shift+点 = 从原锚点扩到这里（各家编辑器的通例）。原来这里
+                    // 硬写 false，于是「点开头 → 翻页 → Shift+点结尾」选不出东西，
+                    // 超过一屏的选区用鼠标根本做不出来。
+                    root.clicked(self.hit-line, self.hit-cells, ev.modifiers.shift);
                 }
             }
             moved => {
@@ -316,6 +333,18 @@ export component CodeEditor inherits Rectangle {
                 // delta 是 length，要除以 1px 才能当数字用（单位系统是强类型的）
                 root.scrolled(-round(ev.delta-y / 40px), -round(ev.delta-x / 40px));
                 accept
+            }
+        }
+
+        // 拖出上/下沿之后继续滚 —— 指针被 TouchArea 抓着，停在区域外就不再有
+        // `moved`，选区会卡在最后一个可见行：实测按住往窗口外拖再久，选中的
+        // 也只有一屏。每跳一拍滚几行、顺手把选区扩到新的首/末行。
+        Timer {
+            interval: 40ms;
+            running: root.autoscroll != 0;
+            triggered => {
+                root.scrolled(root.autoscroll * root.autoscroll-step, 0);
+                root.dragged(root.autoscroll < 0 ? 0 : root.visible-rows - 1, touch.hit-cells);
             }
         }
     }

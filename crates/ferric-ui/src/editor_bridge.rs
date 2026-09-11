@@ -25,6 +25,7 @@ const K_UP: char = '\u{F700}';
 const K_DOWN: char = '\u{F701}';
 const K_LEFT: char = '\u{F702}';
 const K_RIGHT: char = '\u{F703}';
+const K_INSERT: char = '\u{F727}';
 const K_HOME: char = '\u{F729}';
 const K_END: char = '\u{F72B}';
 const K_PAGE_UP: char = '\u{F72C}';
@@ -39,6 +40,32 @@ pub struct KeyOutcome {
     pub copy: Option<String>,
     /// 请求从剪贴板粘贴。
     pub paste: bool,
+}
+
+/// 剪贴板文本 → 缓冲区文本：CRLF 与孤立的 CR 一律归成 LF。
+///
+/// Windows 的剪贴板一律给 CRLF（浏览器、Excel、数据库客户端复制出来的都是）。
+/// 原样插进去的后果是每行末尾多一个看不见的 `\r`：它跟着粘贴记录落盘、跟着
+/// 「复制全文」再传出去，列宽也被多算一格。实测粘一段 165 行的 JSON 进来，
+/// 缓冲区里多出 164 个 `\r`。
+///
+/// 没有 CR 时不分配。
+pub fn normalize_newlines(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\r') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_cr = false;
+    for c in s.chars() {
+        match c {
+            '\r' => out.push('\n'),
+            // CRLF 的那个 LF：上一轮已经推过换行了
+            '\n' if prev_cr => {}
+            c => out.push(c),
+        }
+        prev_cr = c == '\r';
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// 语法着色的种类。目前只有 JSON —— 其它工具的正文（SQL / 正则 / 密文）
@@ -266,9 +293,23 @@ pub fn apply_key(
                 K_END => buf.move_cursor(Motion::DocEnd, shift),
                 K_LEFT => buf.move_cursor(Motion::WordLeft, shift),
                 K_RIGHT => buf.move_cursor(Motion::WordRight, shift),
+                // Ctrl+Insert = 复制（Windows 的老组合键，很多人手上还是这个）
+                K_INSERT => {
+                    out.copy = Some(if buf.has_selection() {
+                        buf.selected_text()
+                    } else {
+                        current_line(buf)
+                    });
+                }
                 _ => {}
             },
         }
+        return out;
+    }
+
+    // Shift+Insert = 粘贴。与 Ctrl+V 同义，终端 / 远程桌面里常用。
+    if shift && c == K_INSERT && !read_only {
+        out.paste = true;
         return out;
     }
 
@@ -349,6 +390,47 @@ mod tests {
         let out = apply_key(&mut b, "\u{0007}", false, false, false);
         assert!(!out.edited);
         assert_eq!(b.text(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn clipboard_crlf_becomes_lf() {
+        // Windows 的剪贴板一律给 CRLF。原样插进去，每行末尾都多一个看不见的
+        // `\r`，跟着记录落盘、跟着「复制全文」再传出去。
+        assert_eq!(normalize_newlines("a\r\nb\r\n"), "a\nb\n");
+        // 老 Mac 风格的孤立 CR 也算换行，不能留在正文里
+        assert_eq!(normalize_newlines("a\rb"), "a\nb");
+        assert_eq!(normalize_newlines("\r\n"), "\n");
+    }
+
+    #[test]
+    fn text_without_cr_is_not_copied() {
+        // 粘贴动辄几 MB，没有 CR 时不该白拷一份。
+        let s = "a\nb\n";
+        assert!(matches!(
+            normalize_newlines(s),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn shift_insert_pastes_and_ctrl_insert_copies() {
+        // Windows 的老组合键。少了它们，习惯这套手势的人会以为复制粘贴坏了。
+        let mut b = buf();
+        let out = apply_key(&mut b, &K_INSERT.to_string(), false, true, false);
+        assert!(out.paste, "Shift+Insert = 粘贴");
+
+        let mut b = buf();
+        b.select_range(0, 5);
+        let out = apply_key(&mut b, &K_INSERT.to_string(), true, false, false);
+        assert_eq!(out.copy.as_deref(), Some("hello"));
+        assert_eq!(b.text(), "hello\nworld\n", "复制不许改正文");
+    }
+
+    #[test]
+    fn read_only_panes_never_paste() {
+        let mut b = buf();
+        assert!(!apply_key(&mut b, &K_INSERT.to_string(), false, true, true).paste);
+        assert!(!apply_key(&mut b, "v", true, false, true).paste);
     }
 
     #[test]
