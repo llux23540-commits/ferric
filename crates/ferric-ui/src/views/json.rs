@@ -110,10 +110,49 @@ impl JsonTool {
         INDENTS.iter().position(|i| *i == self.indent).unwrap_or(0) as i32
     }
 
+    /// 换缩进档位 = **当场按新档重排**。
+    ///
+    /// 原来只把设置记下来、状态写一句「点『格式化』生效」——
+    /// 用户点 2 / 4 屏幕上纹丝不动，报的就是「缩进配置没生效」。
+    /// 旁边那颗键名排序一直是即时生效的，两颗挨着的控件行为不一致本身就是毛病。
     pub fn set_indent_index(&mut self, i: i32) {
-        if let Some(v) = INDENTS.get(i.max(0) as usize) {
-            self.indent = *v;
-            self.status = "缩进已改 —— 点「格式化」生效".to_owned();
+        let Some(v) = INDENTS.get(i.max(0) as usize) else {
+            return;
+        };
+        self.indent = *v;
+        let label = self.indent_label();
+
+        // 「关掉排序时退回的那一份」也跟着换缩进，否则关排序会把旧缩进带回来。
+        if let Some(orig) = self.unsorted.take() {
+            self.unsorted = Some(json::format(&orig, self.indent, false).unwrap_or(orig));
+        }
+
+        let text = self.input.text();
+        if text.trim().is_empty() {
+            self.status = format!("缩进：{label}");
+            return;
+        }
+        match json::format(&text, self.indent, self.sort) {
+            Ok(out) => {
+                self.input.replace_keeping_view(&out);
+                self.ok = true;
+                self.status = format!("已按{label}重排");
+                self.hits.clear();
+            }
+            // 正文还不是合法 JSON：档位记下了，等内容改对之后的格式化用。
+            Err(e) => {
+                self.ok = false;
+                self.status = format!("{e}（缩进已设为{label}）");
+            }
+        }
+    }
+
+    fn indent_label(&self) -> &'static str {
+        match self.indent {
+            // 状态行里会拼成「已按两空格重排」，所以不写成「2 空格」
+            Indent::Two => "两空格",
+            Indent::Four => "四空格",
+            Indent::Tab => "Tab",
         }
     }
 
@@ -585,20 +624,49 @@ mod tests {
     }
 
     #[test]
-    fn indent_option_takes_effect_on_next_format() {
+    fn switching_indent_reflows_right_away() {
+        // 用户报的「缩进 2 / 4 没生效」：原来点档位只记下设置，屏幕上纹丝不动，
+        // 要再点一次「格式化」才看得见。
         let mut t = JsonTool::default();
-        t.set_indent_index(1); // 四空格
         t.format();
+
+        t.set_indent_index(1); // 四空格 —— 后面**不再**点格式化
         assert!(
             t.input.text().contains("\n    \"hello\""),
-            "四空格缩进没生效：{}",
+            "四空格没当场生效：{}",
             t.input.text()
         );
         t.set_indent_index(2); // Tab
-        t.format();
         assert!(
             t.input.text().contains("\n\t\"hello\""),
-            "Tab 缩进没生效：{}",
+            "Tab 没当场生效：{}",
+            t.input.text()
+        );
+        t.set_indent_index(0); // 回两空格
+        assert!(
+            t.input.text().contains("\n  \"hello\""),
+            "换回两空格没生效：{}",
+            t.input.text()
+        );
+    }
+
+    #[test]
+    fn switching_indent_on_broken_json_keeps_the_text() {
+        // 打到一半的中间态必然非法：档位记下来，正文一个字都不许动。
+        let mut t = JsonTool::default();
+        t.input.set_text("{\"broken\": ");
+        t.on_edited();
+
+        t.set_indent_index(1);
+        assert_eq!(t.input.text(), "{\"broken\": ", "非法 JSON 被改写了");
+        assert!(!t.ok);
+
+        // 内容改对之后，刚才那一档仍然算数
+        t.input.set_text(r#"{"a":1}"#);
+        t.format();
+        assert!(
+            t.input.text().contains("\n    \"a\""),
+            "档位没留住：{}",
             t.input.text()
         );
     }
@@ -778,13 +846,14 @@ mod tests {
     fn draft_roundtrip_preserves_everything() {
         let mut t = JsonTool::default();
         t.input.set_text(r#"{"z":1}"#);
-        t.set_indent_index(2);
+        t.set_indent_index(2); // 换档当场重排，正文跟着变成 Tab 缩进
         t.toggle_wrap();
+        let want = t.input.text();
         let saved = t.save_draft().expect("必须持久化草稿");
 
         let mut r = JsonTool::default();
         r.load_draft(&saved);
-        assert_eq!(r.input.text(), r#"{"z":1}"#);
+        assert_eq!(r.input.text(), want);
         assert_eq!(r.indent, Indent::Tab);
         assert!(!r.wrap);
         assert!(r.ok, "恢复草稿后应当已经校验过");

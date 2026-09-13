@@ -1807,21 +1807,21 @@ component JsonView inherits Rectangle {
                 label: "2";
                 icon-size: 19px;
                 active: root.indent-index == 0;
-                tooltip: "缩进 2 空格（下次格式化生效）";
+                tooltip: "缩进 2 空格（点了当场重排）";
                 clicked => { root.indent-changed(0); }
             }
             IconButton {
                 label: "4";
                 icon-size: 19px;
                 active: root.indent-index == 1;
-                tooltip: "缩进 4 空格（下次格式化生效）";
+                tooltip: "缩进 4 空格（点了当场重排）";
                 clicked => { root.indent-changed(1); }
             }
             IconButton {
                 icon: Icons.indent-increase;
                 icon-size: 19px;
                 active: root.indent-index == 2;
-                tooltip: "Tab 缩进（下次格式化生效）";
+                tooltip: "Tab 缩进（点了当场重排）";
                 clicked => { root.indent-changed(2); }
             }
             IconButton {
