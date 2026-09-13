@@ -2285,17 +2285,11 @@ impl Shell {
             }};
         }
 
-        diff_cb!(on_diff_compare, |t| {
-            t.compare();
-        });
         diff_cb!(on_diff_next_hunk, |t| {
             t.next_hunk();
         });
         diff_cb!(on_diff_prev_hunk, |t| {
             t.prev_hunk();
-        });
-        diff_cb!(on_diff_swap, |t| {
-            t.swap();
         });
         diff_cb!(on_diff_clear, |t| {
             t.clear();

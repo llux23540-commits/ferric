@@ -2319,8 +2319,6 @@ component DiffView inherits Rectangle {
     in property <string> status;
     in property <bool> has-diff: false;
 
-    callback do-compare();
-    callback do-swap();
     callback clear-input();
     callback copy-result();
     callback next-hunk();
@@ -2339,21 +2337,12 @@ component DiffView inherits Rectangle {
         padding: 16px;
         spacing: 10px;
 
-        // 工具条
+        // 工具条。**没有「对比」按钮**：两侧一改就自动比（编辑区的按键回调里
+        // 已经挂着重算，见 `Shell::recompute`），那颗按钮点不点结果都一样。
+        // 「左右互换」一并撤掉 —— 换个方向只是把加减号对调，看差异用不上。
         HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            FerricButton {
-                text: "对比";
-                variant: "primary";
-                clicked => { root.do-compare(); }
-            }
-            FerricButton {
-                text: "左右互换";
-                clicked => { root.do-swap(); }
-            }
-
-            VDivider {}
 
             // 跳 hunk 取代了从前那份「只看差异」的清单：差异现在就画在原文上，
             // 需要的是「带我去下一处」，而不是把上下文摘掉。
@@ -4372,10 +4361,8 @@ export component AppWindow inherits Window {
     callback json-history-copy();
 
     // 对比工具
-    callback diff-compare();
     callback diff-next-hunk();
     callback diff-prev-hunk();
-    callback diff-swap();
     callback diff-clear();
     callback diff-copy();
 
@@ -5179,10 +5166,8 @@ export component AppWindow inherits Window {
                         right-state: root.diff-right;
                         has-diff: root.diff-has-diff;
                         status: root.diff-status;
-                        do-compare => { root.diff-compare(); }
                         next-hunk => { root.diff-next-hunk(); }
                         prev-hunk => { root.diff-prev-hunk(); }
-                        do-swap => { root.diff-swap(); }
                         clear-input => { root.diff-clear(); }
                         copy-result => { root.diff-copy(); }
                         editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }

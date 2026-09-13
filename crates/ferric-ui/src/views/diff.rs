@@ -238,15 +238,6 @@ impl DiffTool {
             .find_map(|(l, r, _)| if left { *l } else { *r })
     }
 
-    /// 左右互换。对比方向搞反是很常见的事，换一下比重新粘两遍快。
-    pub fn swap(&mut self) {
-        let l = self.left.text();
-        let r = self.right.text();
-        self.left.set_text(&r);
-        self.right.set_text(&l);
-        self.compare();
-    }
-
     pub fn clear(&mut self) {
         self.left.set_text("");
         self.right.set_text("");
@@ -273,7 +264,7 @@ impl Tool for DiffTool {
         ToolMeta {
             id: "diff",
             name: "文本 / 文件对比",
-            desc: "逐行 diff，差异直接画在左右原文上（改动的字加深底色），可跳到下一处差异、可左右互换。",
+            desc: "逐行 diff，差异直接画在左右原文上（改动的字加深底色），改完即时重比，可跳到下一处差异。",
             icon: icons::GIT_COMPARE,
             group: "对比",
             keywords: &["diff", "compare", "对比", "比较", "差异"],
@@ -437,18 +428,6 @@ mod tests {
         t.left.scroll_to_doc_line(1);
         t.next_hunk();
         assert_eq!(t.left.scroll_line(), 1, "没有差异就别乱跳视野");
-    }
-
-    #[test]
-    fn swap_exchanges_both_sides_and_flips_the_counts() {
-        let mut t = DiffTool::default();
-        let (added, removed) = (t.stats.added, t.stats.removed);
-        let (l, r) = (t.left.text(), t.right.text());
-        t.swap();
-        assert_eq!(t.left.text(), r);
-        assert_eq!(t.right.text(), l);
-        assert_eq!(t.stats.added, removed, "互换后新增/删除应当对调");
-        assert_eq!(t.stats.removed, added);
     }
 
     #[test]
