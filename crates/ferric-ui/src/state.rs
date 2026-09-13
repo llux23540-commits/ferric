@@ -45,6 +45,8 @@ pub struct AppState {
     /// 在它之上的倍率 —— 不记住基准，第二次调整就会拿自己下发的值再乘一遍。
     pub base_scale: f32,
     pub rail_width: f32,
+    /// 侧栏收成图标栏（Ctrl+B）。宽度那一项不动 —— 展开时回到用户拖过的宽度。
+    pub rail_collapsed: bool,
     /// 侧栏搜索词。只活在内存里（不持久化）—— 过滤在 Rust 侧算，
     /// Slint 那边只负责显示输入框里的字。
     pub rail_filter: String,
@@ -117,6 +119,7 @@ impl AppState {
             ui_scale: persist.ui_scale.clamp(0.8, 1.6),
             base_scale: 1.0,
             rail_width: persist.rail_width.clamp(RAIL_MIN, RAIL_MAX),
+            rail_collapsed: persist.rail_collapsed,
             rail_filter: String::new(),
             auto_update: persist.auto_update,
             shared,
@@ -259,6 +262,7 @@ impl AppState {
             dark: self.dark,
             theme_mode: Some(self.mode),
             rail_width: self.rail_width,
+            rail_collapsed: self.rail_collapsed,
             favorites: self.favorites.iter().cloned().collect(),
             active_id: self
                 .tools
@@ -463,6 +467,7 @@ impl Shell {
         win.set_ui_scale(s.ui_scale);
         win.set_auto_update(s.auto_update);
         win.set_rail_width(s.rail_width);
+        win.set_rail_collapsed(s.rail_collapsed);
         win.set_version(SharedString::from(crate::version()));
         win.set_build_number(SharedString::from(crate::build_number()));
         win.set_source_index(s.source_pref.index());
@@ -1052,6 +1057,18 @@ impl Shell {
                 // 别把 Ctrl+K 再交给 Slint —— 编辑区里它会被当成普通按键。
                 return EventResult::PreventDefault;
             }
+            // Ctrl+B：侧栏在「全宽 264px」与「56px 图标栏」之间切。省下的
+            // 200 多像素在编辑器类工具里就是一行多出二十几个字符。
+            // 落盘这一下**显式调**，不靠 `changed rail-collapsed`：那个处理器
+            // 要等下一轮事件循环才跑（实测按完 Ctrl+B 半天 app.ron 还是旧值），
+            // 收完就关窗口的话这次收起就丢了。回调里值相同会直接返回，
+            // 所以随后 `changed` 再来一次也不会重复写盘。
+            if ctrl.get() && matches!(key, Key::Character("b" | "B")) {
+                let on = !win.get_rail_collapsed();
+                win.set_rail_collapsed(on);
+                win.invoke_rail_collapsed_changed(on);
+                return EventResult::PreventDefault;
+            }
             // Ctrl+F：只有 JSON 工具有查找条，其它工具下这个键不该被吞掉。
             // 放在这个全局钩子里而不是编辑区的按键分派里：焦点在工具条按钮或
             // 查找框上时也要能开合，那些控件的按键根本不走编辑区。
@@ -1204,6 +1221,18 @@ impl Shell {
             if let Some(win) = w.upgrade() {
                 win.set_rail_width(px);
             }
+        });
+
+        // 侧栏收起 / 展开（标题栏那颗按钮或 Ctrl+B）。宽度不动：展开时回到
+        // 用户自己拖出来的宽度。
+        let state = self.state.clone();
+        win.on_rail_collapsed_changed(move |on| {
+            let mut s = state.borrow_mut();
+            if s.rail_collapsed == on {
+                return;
+            }
+            s.rail_collapsed = on;
+            s.save();
         });
 
         let state = self.state.clone();

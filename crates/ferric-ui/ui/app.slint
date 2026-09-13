@@ -167,6 +167,9 @@ component EditorPane inherits Rectangle {
     in property <EditorState> state;
     in property <bool> read-only: false;
     in property <string> hint: "";
+    // 紧凑：不画标题行。工具条右端已经写着状态与行数时，这一行只是白占
+    // 24px（JSON 工具用的就是这一档）。
+    in property <bool> compact: false;
 
     callback editor-viewport(string, int, int);
     callback editor-wide-ratio(float);
@@ -184,7 +187,7 @@ component EditorPane inherits Rectangle {
     VerticalLayout {
         spacing: 6px;
 
-        HorizontalLayout {
+        if !root.compact: HorizontalLayout {
             spacing: 8px;
             FieldLabel {
                 text: root.title;
@@ -1739,8 +1742,14 @@ component JsonView inherits Rectangle {
     }
 
     VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
+        // 上、左收着（标题条与侧栏就在旁边，留白重复），右、下松一档：
+        // 编辑区的右边框与底边贴着窗口边缘时，整块正文看着是「卡」在窗口里的
+        // —— 竖直滚动条又正好压在右边框内侧，14px 的余量不够它喘气。
+        padding-left: 14px;
+        padding-right: 22px;
+        padding-top: 10px;
+        padding-bottom: 20px;
+        spacing: 8px;
 
         // 工具条：一整排图标按钮（对位 egui 版的 toolbar_row）。
         // 刻意不用文字按钮 —— 十四个中文按钮换行成两排，且每次加一个操作
@@ -1882,6 +1891,15 @@ component JsonView inherits Rectangle {
                     vertical-alignment: center;
                     overflow: elide;
                 }
+                // 行数常驻这里：编辑区那条「JSON · N 行」标题行整条撤了
+                //（见 EditorPane 的 compact），省下的 24px 归正文。
+                Text {
+                    text: root.input-state.doc-lines + " 行";
+                    font-family: Theme.font-mono;
+                    font-size: 11px;
+                    color: Theme.faint;
+                    vertical-alignment: center;
+                }
             }
         }
 
@@ -1889,6 +1907,7 @@ component JsonView inherits Rectangle {
             title: "JSON";
             which: "json-in";
             state: root.input-state;
+            compact: true;
             vertical-stretch: 1;
             editor-viewport(w, r, c) => { root.editor-viewport(w, r, c); }
             editor-wide-ratio(v) => { root.editor-wide-ratio(v); }
@@ -4018,6 +4037,9 @@ export component AppWindow inherits Window {
     in-out property <int> active-tool: 0;
     in-out property <string> rail-filter: "";
     in-out property <length> rail-width: 264px;
+    // 侧栏收成 56px 图标栏（Ctrl+B / 侧栏左下角那颗箭头）。`rail-width` 不动，
+    // 展开时回到用户自己拖出来的宽度。
+    in-out property <bool> rail-collapsed: false;
     in-out property <bool> settings-open: false;
     // 命令面板（Ctrl+K）：行由 Rust 侧按搜索词给
     in-out property <bool> palette-open: false;
@@ -4233,6 +4255,7 @@ export component AppWindow inherits Window {
     // 命令面板的搜索词（行由 Rust 侧算完灌回 palette-rows）
     callback palette-query-changed(string);
     callback rail-width-changed(float);
+    callback rail-collapsed-changed(bool);
     callback open-data-dir();
     callback record-memory();
     callback check-update();
@@ -4384,6 +4407,7 @@ export component AppWindow inherits Window {
     changed ui-scale => { root.scale-changed(self.ui-scale); }
     changed auto-update => { root.auto-update-changed(self.auto-update); }
     changed rail-width => { root.rail-width-changed(self.rail-width / 1px); }
+    changed rail-collapsed => { root.rail-collapsed-changed(self.rail-collapsed); }
 
     VerticalLayout {
         // ===== 标题栏 44px =====
@@ -4471,10 +4495,84 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             // ===== 侧栏 =====
             Rectangle {
-                width: root.rail-width;
+                // 收起 ≠ 消失：缩成一条 56px 的图标栏，工具照样一点就切
+                //（收成 0 的话除了 Ctrl+K 就没有别的切换入口了）。
+                // 两套内容各自实例化：图标栏的行是方块按钮，与展开态的
+                // 行布局不是一回事，硬用同一棵树反而要处处写条件。
+                width: root.rail-collapsed ? 56px : root.rail-width;
+                animate width { duration: 140ms; easing: ease-out; }
+                clip: true;
                 background: Theme.rail;
 
-                VerticalLayout {
+                // ——— 收起态：只有图标 ———
+                if root.rail-collapsed: VerticalLayout {
+                    padding: 8px;
+                    spacing: 4px;
+
+                    // 搜索 = 命令面板。图标栏里塞不下输入框，而命令面板本来
+                    // 就是更强的那个入口（能搜、回车即跳）。
+                    IconButton {
+                        icon: Icons.search;
+                        icon-size: 19px;
+                        tooltip: "搜索工具（Ctrl K）";
+                        clicked => {
+                            root.palette-query = "";
+                            root.palette-query-changed("");
+                            root.palette-open = true;
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+                            // Slint 不许 `for` 直接接 `if`，中间垫一层。
+                            // 分组标题在图标栏里没有位置 —— 退化成一点间隙。
+                            for r in root.rail: HorizontalLayout {
+                                height: r.group ? 10px : 34px;
+                                alignment: center;
+                                if !r.group: IconButton {
+                                    icon: r.icon;
+                                    icon-size: 19px;
+                                    active: r.idx == root.active-tool;
+                                    tooltip: r.label;
+                                    clicked => { root.select-tool(r.idx); }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    IconButton {
+                        icon: Theme.dark ? Icons.sun : Icons.moon;
+                        icon-size: 19px;
+                        clicked => { root.theme-mode = Theme.dark ? 1 : 2; }
+                    }
+                    IconButton {
+                        icon: Icons.settings;
+                        icon-size: 19px;
+                        active: root.settings-open;
+                        tooltip: "设置";
+                        clicked => {
+                            root.settings-tab = 0;
+                            root.settings-open = true;
+                        }
+                    }
+                    // 展开按钮与展开态的收起按钮同在左下角，位置不跳
+                    IconButton {
+                        icon: Icons.chevron-right;
+                        icon-size: 19px;
+                        tooltip: "展开侧栏（Ctrl+B）";
+                        clicked => { root.rail-collapsed = false; }
+                    }
+                }
+
+                // ——— 展开态 ———
+                if !root.rail-collapsed: VerticalLayout {
                     padding: 12px;
                     spacing: 8px;
 
@@ -4664,6 +4762,13 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle { horizontal-stretch: 1; }
+                        // 收起：与收起态的展开按钮同在左下角这一格
+                        IconButton {
+                            icon: Icons.chevron-left;
+                            icon-size: 19px;
+                            tooltip: "收起侧栏（Ctrl+B）";
+                            clicked => { root.rail-collapsed = true; }
+                        }
                     }
                 }
 
@@ -4681,6 +4786,8 @@ export component AppWindow inherits Window {
                     x: parent.width - 3px;
                     width: 6px;
                     height: parent.height;
+                    // 收起时整条栏宽 0，手柄会贴在内容区左缘上吃掉点击
+                    enabled: !root.rail-collapsed;
                     mouse-cursor: col-resize;
                     // 宽度 = 指针在窗口内的横坐标（手柄贴着侧栏右缘，抓点即等宽）。
                     //
@@ -4701,22 +4808,33 @@ export component AppWindow inherits Window {
                 background: Theme.bg;
 
                 VerticalLayout {
-                    // 工具标题条：名称 + 收藏
+                    // 工具标题条：名称 + 收藏。
+                    //
+                    // 编辑器类工具（`wide`：JSON / 对比 / SQL / YAML）矮一档：
+                    // 那几个页面全部空间都归正文，标题条 60px + 说明条 44px
+                    // 合起来就是六行 JSON。
                     Rectangle {
-                        height: 60px;
+                        height: root.current.wide ? 44px : 60px;
                         HorizontalLayout {
                             padding-left: 24px;
                             padding-right: 14px;
-                            spacing: 12px;
+                            spacing: 8px;
                             Text {
                                 text: root.current.name;
                                 font-family: Theme.font-ui-bold;
                                 font-weight: Theme.weight-bold;
-                                font-size: 19px;
+                                font-size: root.current.wide ? 16px : 19px;
                                 color: Theme.fg;
                                 vertical-alignment: center;
-                                horizontal-stretch: 1;
                             }
+                            // 编辑器类工具的说明收进这颗 ⓘ：那一句话读过一次就
+                            // 不必再占一整条，但新用户仍要有地方看到它。
+                            if root.current.wide && root.current.desc != "": IconButton {
+                                icon: Icons.info;
+                                icon-size: 14px;
+                                tooltip: root.current.desc;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
                             // 收藏：收藏组会置顶到侧栏最上，所以这颗心是有用的。
                             IconButton {
                                 icon: Icons.heart;
@@ -4735,7 +4853,8 @@ export component AppWindow inherits Window {
 
                     // 说明条：accent 竖条 + 描述（对位 egui 版的 page-intro；
                     // 挤在标题下面当小灰字读起来太轻，那是页面在自我介绍）。
-                    if root.current.desc != "": HorizontalLayout {
+                    // 编辑器类工具不画 —— 见上面那颗 ⓘ。
+                    if !root.current.wide && root.current.desc != "": HorizontalLayout {
                         padding-left: 24px;
                         padding-right: 24px;
                         padding-top: 14px;

@@ -67,6 +67,10 @@ pub struct Persist {
     pub theme_mode: Option<ThemeMode>,
     #[serde(default = "default_rail_width")]
     pub rail_width: f32,
+    /// 侧栏收成图标栏（Ctrl+B）。宽度那一项原样留着 —— 展开时回到用户
+    /// 自己拖过的宽度，而不是默认宽度。
+    #[serde(default)]
+    pub rail_collapsed: bool,
     #[serde(default)]
     pub favorites: Vec<String>,
     #[serde(default = "default_active_id")]
@@ -101,6 +105,7 @@ impl Default for Persist {
             dark: false,
             theme_mode: Some(ThemeMode::System),
             rail_width: default_rail_width(),
+            rail_collapsed: false,
             favorites: Vec::new(),
             active_id: default_active_id(),
             drafts: HashMap::new(),

@@ -128,7 +128,9 @@ impl JsonTool {
         match json::validate(&text) {
             Ok(()) => {
                 self.ok = true;
-                self.status = format!("JSON 有效 · {} 行", self.input.total_lines());
+                // 行数不写在这里：工具条右端常驻一个「N 行」，写两遍反而让
+                // 状态这句话被挤掉一半（overflow: elide）。
+                self.status = "JSON 有效".to_owned();
             }
             Err(e) => {
                 self.ok = false;
@@ -152,7 +154,7 @@ impl JsonTool {
                 // 原地格式化：保留视野与光标行列，用户在第 500 行按格式化不该跳回顶部。
                 self.input.replace_keeping_view(&out);
                 self.ok = true;
-                self.status = format!("已格式化 · {} 行", self.input.total_lines());
+                self.status = "已格式化".to_owned();
                 self.hits.clear();
             }
             Err(e) => {
