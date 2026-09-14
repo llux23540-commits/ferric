@@ -40,7 +40,13 @@ wasmtime = "27.0.0"
 slint-build = "1.17"
 
 [target.'cfg(windows)'.dependencies]
+# Windows 走系统 schannel（纯系统 API，不需要 C 工具链去编 ring）。
+# ⚠️ ureq 2.x 的 native-tls **不会**自动成为默认后端，必须自己
+# `AgentBuilder::tls_connector()` 挂上 —— 所以这里要直接依赖 native-tls
+# 本体（装配在 `net::agent_builder()`）。少了那一步，Windows 版所有 https
+# 请求都会被 ureq 的 NoTlsConfig 挡回来（「no TLS backend is configured」）。
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2"

@@ -211,10 +211,46 @@ fn open(key: &[u8], iv_hex: &str, d_hex: &str, t_hex: &str) -> Result<Vec<u8>, N
         .map_err(|_| NetErr::Crypto("完整性校验不通过".into()))
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
+/// 所有出网 agent 的公共底座：超时 + **TLS 后端**。
+///
+/// ⚠️ TLS 必须在这里装上。Windows 上 `ureq` 开的是 `native-tls`（系统 schannel，
+/// 这样本地编译不需要 C 工具链去编 ring），而 ureq 2.x 的 `native-tls`
+/// **不会**被当成默认后端 —— 它自己的注释写得很清楚：「native-tls is a feature
+/// that must be configured via the AgentBuilder, it is never picked up as a
+/// default」。不显式 `tls_connector()`，每一个 https 请求都会在握手前就被
+/// 内置的 `NoTlsConfig` 挡回来：
+///
+/// > Unknown Scheme: cannot make HTTPS request because no TLS backend is configured
+///
+/// 也就是 Windows 版**任何**联网功能（检查更新、下载安装包、插件市场）全废，
+/// 而 Linux / macOS 走 rustls 一切正常 —— 用户报的「更新失败」就是这个。
+///
+/// 新加 agent 一律从这里起手，别再 `AgentBuilder::new()`。
+pub(crate) fn agent_builder() -> ureq::AgentBuilder {
+    let b = ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
+        .timeout_read(READ_TIMEOUT);
+    with_tls(b)
+}
+
+#[cfg(windows)]
+fn with_tls(b: ureq::AgentBuilder) -> ureq::AgentBuilder {
+    match native_tls::TlsConnector::new() {
+        Ok(c) => b.tls_connector(std::sync::Arc::new(c)),
+        // 造不出连接器（系统层面的事）时不 panic：请求照旧会失败，
+        // 但失败点在请求里，用户看得到一条可读的错误。
+        Err(_) => b,
+    }
+}
+
+/// 非 Windows 走 rustls（ureq 的 `tls` feature），它本来就是默认后端。
+#[cfg(not(windows))]
+fn with_tls(b: ureq::AgentBuilder) -> ureq::AgentBuilder {
+    b
+}
+
+fn agent() -> ureq::Agent {
+    agent_builder()
         // 禁跟随重定向：302 到别的 host 会把一次性下载票据泄露出去，
         // 也让「固定服务器地址」这件事失去意义。
         .redirects(0)
@@ -352,6 +388,37 @@ pub fn download_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// https 请求必须有 TLS 后端 —— Windows 上曾经整整一版没有。
+    ///
+    /// 不出网：起一个本地监听，连上就把连接扔掉。
+    /// - 有后端 → 握手失败，错误是 IO / ConnectionFailed 之类；
+    /// - 没后端 → ureq 在握手之前就用内置的 `NoTlsConfig` 挡回来，
+    ///   错误是 `UnknownScheme`「cannot make HTTPS request because no TLS
+    ///   backend is configured」，也就是用户报的那一条。
+    #[test]
+    fn https_agents_have_a_tls_backend() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("本地监听");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                drop(stream);
+            }
+        });
+
+        let url = format!("https://127.0.0.1:{port}/");
+        for (who, agent) in [("net", agent()), ("github", crate::github::agent())] {
+            let err = agent
+                .get(&url)
+                .call()
+                .expect_err("本地端口不会有真 TLS 服务");
+            assert_ne!(
+                err.kind(),
+                ureq::ErrorKind::UnknownScheme,
+                "{who} 的 agent 没装 TLS 后端：{err}"
+            );
+        }
+    }
 
     /// seal/open 回环，且篡改任一部分都必须失败。
     #[test]

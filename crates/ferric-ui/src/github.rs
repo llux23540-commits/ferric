@@ -47,15 +47,12 @@
 use crate::release;
 use crate::updater::{ext_allowed, fresh_update_dir, platform_arch, ReleaseInfo};
 use std::io::{Read, Write};
-use std::time::Duration;
 
 /// manifest.json 的体积上限。它只是一份小清单，几 KB 顶天；
 /// 给出上限是防「对面返回一个无限大的响应把内存吃光」。
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 /// 安装包体积上限，与服务端 `VERSION_MAX_BYTES` 一致。
 const MAX_ASSET_BYTES: u64 = 200 * 1024 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 允许跟随的重定向次数。GitHub 正常是 1~2 跳，给 5 已经很宽。
 const MAX_REDIRECTS: u32 = 5;
 
@@ -125,12 +122,11 @@ impl GithubSource {
 }
 
 /// 跟随重定向的 agent。**只给 GitHub 这条路用**，理由见模块头部。
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
-        .redirects(MAX_REDIRECTS)
-        .build()
+///
+/// 底座走 `net::agent_builder()` —— 超时与 TLS 后端只在那一处装配
+///（Windows 的 schannel 必须显式挂上，见那边的说明）。
+pub(crate) fn agent() -> ureq::Agent {
+    crate::net::agent_builder().redirects(MAX_REDIRECTS).build()
 }
 
 /// manifest 里的一个平台条目（已经按本机平台/架构筛选过，故不再重复存那两项）。

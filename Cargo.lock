@@ -1657,6 +1657,7 @@ dependencies = [
  "hex",
  "libc",
  "libsm",
+ "native-tls",
  "rand 0.8.7",
  "rfd",
  "ropey",
