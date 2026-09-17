@@ -121,6 +121,59 @@ impl Default for TextBuffer {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum CharCategory {
+    Word,
+    Cjk,
+    Whitespace,
+    Punct,
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{20000}'..='\u{2A6DF}'
+        | '\u{F900}'..='\u{FAFF}'
+    )
+}
+
+fn char_category(c: char) -> CharCategory {
+    if is_cjk_char(c) {
+        CharCategory::Cjk
+    } else if c.is_alphanumeric() || c == '_' {
+        CharCategory::Word
+    } else if c.is_whitespace() {
+        CharCategory::Whitespace
+    } else {
+        CharCategory::Punct
+    }
+}
+
+fn is_same_word_char(c: char, cat: CharCategory, target_char: char) -> bool {
+    if c == '\n' || c == '\r' {
+        return false;
+    }
+    match cat {
+        CharCategory::Word => c.is_alphanumeric() || c == '_',
+        CharCategory::Cjk => is_cjk_char(c),
+        CharCategory::Whitespace => c.is_whitespace(),
+        CharCategory::Punct => {
+            let is_delimiter = |ch: char| {
+                matches!(
+                    ch,
+                    '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+                )
+            };
+            if is_delimiter(target_char) {
+                false
+            } else {
+                char_category(c) == CharCategory::Punct && !is_delimiter(c) && c == target_char
+            }
+        }
+    }
+}
+
 impl TextBuffer {
     pub fn new(text: &str) -> Self {
         Self {
@@ -832,6 +885,51 @@ impl TextBuffer {
         self.cursor = self.anchor + self.line_len(line);
     }
 
+    /// 选中光标所在的词 / 字符序列（双击）。
+    ///
+    /// 英文/数字/下划线、CJK 汉字、连续空白、符号标点各自独立成组扩张，
+    /// 严格限制在当前行内，不跨行。
+    pub fn select_word(&mut self) {
+        let n = self.rope.len_chars();
+        if n == 0 {
+            return;
+        }
+        let (line, col) = self.cursor_line_col();
+        let line_len = self.line_len(line);
+        if line_len == 0 {
+            return;
+        }
+        let line_start = self.rope.line_to_char(line);
+        let target_col = if col >= line_len {
+            line_len.saturating_sub(1)
+        } else {
+            col
+        };
+        let ch = self.rope.char(line_start + target_col);
+        let cat = char_category(ch);
+
+        let mut left = target_col;
+        while left > 0 {
+            let prev = self.rope.char(line_start + left - 1);
+            if !is_same_word_char(prev, cat, ch) {
+                break;
+            }
+            left -= 1;
+        }
+
+        let mut right = target_col + 1;
+        while right < line_len {
+            let next = self.rope.char(line_start + right);
+            if !is_same_word_char(next, cat, ch) {
+                break;
+            }
+            right += 1;
+        }
+
+        self.anchor = line_start + left;
+        self.cursor = line_start + right;
+    }
+
     /// 选中 `[start, end)`（字符索引），并把选区滚进视野。
     ///
     /// 搜索跳转用。越界索引夹到文档范围内 —— 命中位置来自调用方的搜索结果，
@@ -1037,10 +1135,24 @@ impl TextBuffer {
             .filter_map(|(row, l)| {
                 let start = if l == la { ca } else { 0 };
                 let end = if l == lb { cb } else { self.line_len(l) };
-                let (x, w) = self.cells_of_range(l, start, end.saturating_sub(start))?;
-                // 空行 / 行尾换行也要看得见「这一行被选中了」——给一格宽度
-                let w = if l < lb { w.max(1.0) } else { w };
-                (w > 0.0).then_some((row, x, w))
+                if l < lb {
+                    // 跨行选区：该行的行尾换行符也是选区的一部分
+                    if start >= end {
+                        let x = self.cells_between(l, self.scroll_col, start);
+                        Some((row, x, 1.0))
+                    } else {
+                        let (x, w) = self.cells_of_range(l, start, end.saturating_sub(start))?;
+                        Some((row, x, w + 1.0))
+                    }
+                } else {
+                    // 选区末行：行尾换行符未被选中，仅当 start < end 时有可见高亮
+                    if start >= end {
+                        None
+                    } else {
+                        let (x, w) = self.cells_of_range(l, start, end - start)?;
+                        (w > 0.0).then_some((row, x, w))
+                    }
+                }
             })
             .collect()
     }
@@ -1275,6 +1387,196 @@ mod tests {
         assert_eq!(b.text(), "abc");
         b.redo();
         assert_eq!(b.text(), "abcdef");
+    }
+
+    #[test]
+    fn drag_selection_in_json_text() {
+        let text =
+            "{\n  \"items\": [\n    {\n      \"id\": 1,\n      \"name\": \"行-1\"\n    }\n  ]\n}";
+        let mut b = buf(text);
+        b.set_viewport(20, 80);
+
+        // JSON 中行内拖动：在 `      "id": 1,`（第 4 行，行号 3）上从 0 拖到超出行末的大 cells（如 100）
+        // 防御性检查：超出列宽自动夹取至整行字符数，不越界、不含换行符
+        b.click(3, 0.0, false);
+        b.click(3, 100.0, true);
+        assert_eq!(b.selected_text(), "      \"id\": 1,");
+
+        // 跨行拖动：从第 3 行行首拖到第 4 行行首，应完整包含第 3 行及其换行符
+        b.click(3, 0.0, false);
+        b.click(4, 0.0, true);
+        assert_eq!(b.selected_text(), "      \"id\": 1,\n");
+
+        // 含中文双宽字符行（第 5 行，行号 4 `      "name": "行-1"`）：拖选到行末
+        b.click(4, 0.0, false);
+        b.click(4, 120.0, true);
+        assert_eq!(b.selected_text(), "      \"name\": \"行-1\"");
+    }
+
+    #[test]
+    fn drag_selection_in_sql_text() {
+        let sql = "SELECT\n  id,\n  name\nFROM users;\n";
+        let mut b = buf(sql);
+        b.set_viewport(20, 80);
+
+        // 单行行内拖选超出末尾：夹取至 "SELECT"（不含换行）
+        b.click(0, 0.0, false);
+        b.click(0, 80.0, true);
+        assert_eq!(b.selected_text(), "SELECT");
+
+        // 跨行拖选第 0 行到第 1 行：包含换行符
+        b.click(0, 0.0, false);
+        b.click(1, 0.0, true);
+        assert_eq!(b.selected_text(), "SELECT\n");
+    }
+
+    #[test]
+    fn drag_selection_in_plain_and_diff_text() {
+        let plain = "line 0\nline 1\nline 7\nline 8\n";
+        let mut b = buf(plain);
+        b.set_viewport(20, 80);
+
+        // 对比工具样本复现：在 `line 7`（第 3 行，行号 2）行内拖动
+        // 行内拖选 0 到 50 cells：取到 "line 7"（6 字符，不含换行）
+        b.click(2, 0.0, false);
+        b.click(2, 50.0, true);
+        assert_eq!(b.selected_text(), "line 7");
+
+        // 跨行拖选至下一行行首：包含换行，共 7 字符 "line 7\n"
+        b.click(2, 0.0, false);
+        b.click(3, 0.0, true);
+        assert_eq!(b.selected_text(), "line 7\n");
+
+        // 在行末空白区点击未拖动：无选区，anchor == cursor
+        b.click(2, 50.0, false);
+        assert_eq!(b.selected_text(), "");
+        assert!(!b.has_selection());
+    }
+
+    #[test]
+    fn defensive_click_and_drag_boundaries() {
+        let mut b = buf("abc\ndef\n");
+        b.set_viewport(10, 40);
+
+        // 负数 cells 自动夹取到 0，不 panic
+        b.click(0, -100.0, false);
+        assert_eq!(b.cursor_line_col(), (0, 0));
+
+        // 超大行号自动夹取到最后一行，不越界
+        b.click(99999, 0.0, false);
+        let (line, _) = b.cursor_line_col();
+        assert!(line <= b.total_lines());
+
+        // 空缓冲区防御：点击与拖选不 panic，selected_text 为空
+        let mut empty = buf("");
+        empty.click(0, 0.0, false);
+        empty.click(0, 50.0, true);
+        assert_eq!(empty.selected_text(), "");
+    }
+
+    #[test]
+    fn select_word_alphanumeric_and_underscore() {
+        let mut b = buf("hello_world 12345 foo");
+        b.set_viewport(10, 80);
+
+        // 点击在 "hello_world" 的第 3 列 ('l')，双击选词
+        b.click(0, 3.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "hello_world");
+
+        // 点击在 "12345" 的第 13 列 ('3')，双击选词
+        b.click(0, 13.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "12345");
+
+        // 点击在 "foo" 的第 18 列 ('f')，双击选词
+        b.click(0, 18.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "foo");
+    }
+
+    #[test]
+    fn select_word_cjk_characters() {
+        set_wide_ratio(2.0);
+        let mut b = buf("let msg = \"你好世界\";\n");
+        b.set_viewport(10, 80);
+
+        // 选词：点击在 "好"（x 坐标在引号后面）
+        // "let msg = \"" 是 11 字符 (11 窄字宽)
+        // "你" 占 2 宽 (11..13), "好" 占 2 宽 (13..15)
+        b.click(0, 14.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "你好世界");
+
+        // 双击在定界符引号 '"' 上，仅选中该定界字符
+        b.click(0, 10.2, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "\"");
+        // 双击在变量名 "msg" 上
+        b.click(0, 5.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "msg");
+    }
+
+    #[test]
+    fn select_word_whitespace_and_punctuation() {
+        let mut b = buf("a ===   b");
+        b.set_viewport(10, 80);
+
+        // 双击在连续运算符 "===" 上，选中全段连续符号
+        b.click(0, 3.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "===");
+
+        // 双击在空白区上，选中连续空白
+        b.click(0, 6.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "   ");
+    }
+
+    #[test]
+    fn select_word_at_line_end_and_empty_buffer() {
+        let mut b = buf("alpha beta");
+        b.set_viewport(10, 80);
+
+        // 光标落在行末超出处（如 cells = 50.0），双击选中行末词
+        b.click(0, 50.0, false);
+        b.select_word();
+        assert_eq!(b.selected_text(), "beta");
+
+        // 空缓冲区双击选词，防御无 panic，无选区
+        let mut empty = buf("");
+        empty.select_word();
+        assert_eq!(empty.selected_text(), "");
+        assert!(!empty.has_selection());
+    }
+
+    #[test]
+    fn multiline_selection_spans_include_empty_lines_and_newlines() {
+        let mut b = buf("hello\n\nworld\n");
+        b.set_viewport(10, 80);
+
+        // 跨越空行选择：第 0 行 0 列到第 2 行末尾 "world" 字符后（未包含第 2 行行尾换行符）
+        b.click(0, 0.0, false);
+        b.click(2, 5.0, true);
+        let spans = b.selection_spans();
+        assert_eq!(
+            spans.len(),
+            3,
+            "第 0 行、第 1 行（空行）、第 2 行都应有高亮矩形"
+        );
+
+        // 第 0 行："hello\n" (5 文本宽度 + 1 换行标记 = 6.0)
+        assert_eq!(spans[0].0, 0);
+        assert_eq!(spans[0].2, 6.0);
+
+        // 第 1 行：空行换行标记 (宽度 1.0)
+        assert_eq!(spans[1].0, 1);
+        assert_eq!(spans[1].2, 1.0);
+
+        // 第 2 行："world" (未选中行尾换行符，宽度为 5.0)
+        assert_eq!(spans[2].0, 2);
+        assert_eq!(spans[2].2, 5.0);
     }
 
     #[test]

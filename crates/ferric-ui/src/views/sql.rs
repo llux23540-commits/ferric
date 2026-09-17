@@ -53,14 +53,24 @@ impl SqlTool {
     }
 
     pub fn format(&mut self) {
-        let out = sql::format(&self.input.text(), self.case());
+        let text = self.input.text();
+        if text.trim().is_empty() {
+            self.status = "输入为空".to_owned();
+            return;
+        }
+        let out = sql::format(&text, self.case());
         self.input.replace_keeping_view(&out);
         self.last_out = out;
         self.status = "已格式化".to_owned();
     }
 
     pub fn minify(&mut self) {
-        let out = sql::minify(&self.input.text());
+        let text = self.input.text();
+        if text.trim().is_empty() {
+            self.status = "输入为空".to_owned();
+            return;
+        }
+        let out = sql::minify(&text);
         self.input.replace_keeping_view(&out);
         // 压缩结果不是排版结果：此后切大小写不该把它重新展开成多行。
         self.last_out.clear();
@@ -255,5 +265,15 @@ mod tests {
         t.input.set_viewport(28, 100);
         assert!(t.input.total_lines() > 2190);
         assert_eq!(t.input.visible_lines().len(), 28);
+    }
+
+    #[test]
+    fn empty_input_defensive_status() {
+        let mut t = SqlTool::default();
+        t.clear();
+        t.format();
+        assert_eq!(t.status, "输入为空");
+        t.minify();
+        assert_eq!(t.status, "输入为空");
     }
 }

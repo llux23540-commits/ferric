@@ -220,6 +220,9 @@ fn token_kind(t: ferric_core::json::Token) -> i32 {
 ///
 /// 带换行是有意的：粘到别处时它是完整的一行，而不是接在上一行末尾。
 fn current_line(buf: &TextBuffer) -> String {
+    if buf.len_chars() == 0 {
+        return String::new();
+    }
     let (line, _) = buf.cursor_line_col();
     let mut s = buf.line_text(line);
     s.push('\n');
@@ -231,6 +234,9 @@ fn current_line(buf: &TextBuffer) -> String {
 /// `select_line()` 只到行尾（三连击的语义），照它剪切会留下一个空行 ——
 /// 而「剪掉这一行」的意思是这一行整个没了。
 fn select_current_line(buf: &mut TextBuffer) {
+    if buf.len_chars() == 0 {
+        return;
+    }
     buf.select_line();
     let (start, end) = buf.selection();
     buf.select_range(start, (end + 1).min(buf.len_chars()));
@@ -510,6 +516,18 @@ mod tests {
         assert!(!out.edited);
         assert!(out.copy.is_none());
         assert_eq!(b.text(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn empty_buffer_copy_and_cut_are_safe() {
+        let mut b = TextBuffer::new("");
+        // 空缓冲区无选区按 Ctrl+C，不应放入空换行
+        let out_c = apply_key(&mut b, "c", true, false, false);
+        assert_eq!(out_c.copy.as_deref(), Some(""));
+        // 空缓冲区按 Ctrl+X 不应越界或崩溃
+        let out_x = apply_key(&mut b, "x", true, false, false);
+        assert_eq!(out_x.copy.as_deref(), Some(""));
+        assert_eq!(b.text(), "");
     }
 
     #[test]

@@ -21,6 +21,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::Instant;
 
 // Slint 编译产物：AppWindow 与它的结构体（ToolEntry / UuidHistEntry）。
 slint::include_modules!();
@@ -1441,16 +1442,29 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_uuid_copy(move || {
-            let text = uuid.borrow().output.clone();
+            let text = {
+                let u = uuid.borrow();
+                if u.out.has_selection() {
+                    u.out.selected_text()
+                } else {
+                    u.output.clone()
+                }
+            };
             if text.is_empty() {
                 return;
             }
-            let n = text.lines().count();
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                let n = text.lines().count();
+                format!("已复制 {n} 行")
+            } else {
+                let c = text.chars().count();
+                format!("已复制 {c} 个字符")
+            };
             {
                 let mut s = state.borrow_mut();
-                // 真写剪贴板 —— 以前这里只弹「已复制 N 行」，剪贴板里什么也没进。
                 s.shared.copy(text);
-                s.shared.toast(format!("已复制 {n} 行"));
+                s.shared.toast(toast_msg);
             }
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
@@ -1505,16 +1519,27 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_yaml_copy(move || {
-            let text = yaml.borrow().output.text();
+            let text = {
+                let y = yaml.borrow();
+                if y.output.has_selection() {
+                    y.output.selected_text()
+                } else {
+                    y.output.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
-            let n = text.lines().count();
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                let n = text.lines().count();
+                format!("已复制 {n} 行 YAML")
+            } else {
+                let c = text.chars().count();
+                format!("已复制 {c} 个字符")
+            };
             state.borrow_mut().shared.copy(text);
-            state
-                .borrow_mut()
-                .shared
-                .toast(format!("已复制 {n} 行 YAML"));
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -1582,16 +1607,27 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_sql_copy(move || {
-            let text = sql.borrow().input.text();
+            let text = {
+                let s = sql.borrow();
+                if s.input.has_selection() {
+                    s.input.selected_text()
+                } else {
+                    s.input.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
-            let n = text.lines().count();
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                let n = text.lines().count();
+                format!("已复制 {n} 行 SQL")
+            } else {
+                let c = text.chars().count();
+                format!("已复制 {c} 个字符")
+            };
             state.borrow_mut().shared.copy(text);
-            state
-                .borrow_mut()
-                .shared
-                .toast(format!("已复制 {n} 行 SQL"));
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -1714,12 +1750,25 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_rsa_copy_pub(move || {
-            let text = rsa.borrow().pub_pem.text();
+            let text = {
+                let r = rsa.borrow();
+                if r.pub_pem.has_selection() {
+                    r.pub_pem.selected_text()
+                } else {
+                    r.pub_pem.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                "已复制公钥".to_string()
+            } else {
+                format!("已复制 {} 个字符", text.chars().count())
+            };
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast("已复制公钥");
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -1729,12 +1778,25 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_rsa_copy_priv(move || {
-            let text = rsa.borrow().priv_pem.text();
+            let text = {
+                let r = rsa.borrow();
+                if r.priv_pem.has_selection() {
+                    r.priv_pem.selected_text()
+                } else {
+                    r.priv_pem.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                "已复制私钥 —— 注意保管".to_string()
+            } else {
+                format!("已复制 {} 个字符", text.chars().count())
+            };
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast("已复制私钥 —— 注意保管");
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -1804,12 +1866,25 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_crypto_copy_enc(move || {
-            let text = crypto.borrow().enc.output.text();
+            let text = {
+                let c = crypto.borrow();
+                if c.enc.output.has_selection() {
+                    c.enc.output.selected_text()
+                } else {
+                    c.enc.output.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                "已复制密文".to_string()
+            } else {
+                format!("已复制 {} 个字符", text.chars().count())
+            };
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast("已复制密文");
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -1819,12 +1894,25 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_crypto_copy_dec(move || {
-            let text = crypto.borrow().dec.output.text();
+            let text = {
+                let c = crypto.borrow();
+                if c.dec.output.has_selection() {
+                    c.dec.output.selected_text()
+                } else {
+                    c.dec.output.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                "已复制明文".to_string()
+            } else {
+                format!("已复制 {} 个字符", text.chars().count())
+            };
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast("已复制明文");
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -2136,13 +2224,27 @@ impl Shell {
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_json_copy(move || {
-            let text = json.borrow().input.text();
+            let text = {
+                let j = json.borrow();
+                if j.input.has_selection() {
+                    j.input.selected_text()
+                } else {
+                    j.input.text()
+                }
+            };
             if text.is_empty() {
                 return;
             }
-            let n = text.lines().count();
+            let has_newline = text.contains('\n');
+            let toast_msg = if has_newline {
+                let n = text.lines().count();
+                format!("已复制 {n} 行")
+            } else {
+                let c = text.chars().count();
+                format!("已复制 {c} 个字符")
+            };
             state.borrow_mut().shared.copy(text);
-            state.borrow_mut().shared.toast(format!("已复制 {n} 行"));
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -2160,13 +2262,17 @@ impl Shell {
             if text.is_empty() {
                 return;
             }
-            let n = text.lines().count();
+            let has_newline = text.contains('\n');
             let name = json.borrow().preview_name.clone();
+            let toast_msg = if has_newline {
+                let n = text.lines().count();
+                format!("已复制「{name}」的 {n} 行")
+            } else {
+                let c = text.chars().count();
+                format!("已复制「{name}」的 {c} 个字符")
+            };
             state.borrow_mut().shared.copy(text);
-            state
-                .borrow_mut()
-                .shared
-                .toast(format!("已复制「{name}」的 {n} 行"));
+            state.borrow_mut().shared.toast(toast_msg);
             if let Some(win) = w.upgrade() {
                 Self::flush_shared(&state, &win);
             }
@@ -2636,11 +2742,38 @@ impl Shell {
             s.with_buffer(&which, |b| b.scroll_to_line(line.max(0) as usize));
             s.mirror_diff_scroll(&which);
         });
+        let last_click = Rc::new(RefCell::new(None::<(Instant, String, usize, f32, u8)>));
+        let last_click_clone = last_click.clone();
         editor_cb!(on_editor_click, |s, which, line, cells, extend| {
             // 点回正文 = 焦点离开查找框，Enter 重新归换行。
             s.find_hint.set(false);
-            s.with_buffer(&which, |b| {
-                b.click(line.max(0) as usize, cells, extend);
+            let view_line = line.max(0) as usize;
+            let now = Instant::now();
+            let mut tracker = last_click_clone.borrow_mut();
+            let count = if !extend {
+                if let Some((t, ref w, l, c, cnt)) = *tracker {
+                    if w == &which
+                        && l == view_line
+                        && (cells - c).abs() < 5.0
+                        && now.duration_since(t).as_millis() < 450
+                    {
+                        (cnt % 3) + 1
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
+            *tracker = Some((now, which.clone(), view_line, cells, count));
+            drop(tracker);
+
+            s.with_buffer(&which, |b| match count {
+                2 => b.select_word(),
+                3 => b.select_line(),
+                _ => b.click(view_line, cells, extend),
             });
         });
         editor_cb!(on_editor_drag, |s, which, line, cells| {
@@ -2650,7 +2783,11 @@ impl Shell {
             });
         });
         editor_cb!(on_editor_triple, |s, which| {
-            s.with_buffer(&which, |b| b.select_line());
+            s.with_buffer(&which, |b| {
+                if !b.has_selection() {
+                    b.select_word();
+                }
+            });
         });
         // 行号槽里的折叠箭头。参数是视口内行号 —— 折叠之后它与文档行号
         // 不再一致，换算只在 TextBuffer 里做。
@@ -2686,13 +2823,22 @@ impl Shell {
                 .unwrap_or_default();
 
             if let Some(payload) = outcome.copy {
-                let n = payload.lines().count();
+                if payload.is_empty() {
+                    return;
+                }
+                let has_newline = payload.contains('\n');
+                let count = if has_newline {
+                    payload.lines().count()
+                } else {
+                    payload.chars().count()
+                };
+                let toast_msg = if has_newline {
+                    format!("已复制 {count} 行")
+                } else {
+                    format!("已复制 {count} 个字符")
+                };
                 shell.state.borrow_mut().shared.copy(payload);
-                shell
-                    .state
-                    .borrow_mut()
-                    .shared
-                    .toast(format!("已复制 {n} 行"));
+                shell.state.borrow_mut().shared.toast(toast_msg);
                 Self::flush_shared(&shell.state, &win);
             }
             // Ctrl+V：`KeyOutcome.paste` 以前没有消费者 —— 粘贴在所有编辑区里
@@ -3158,5 +3304,132 @@ mod tests {
             tool_rows(&s, "没有这个工具的名字").is_empty(),
             "一个都不命中就该是空列表（而不是全部照旧）"
         );
+    }
+
+    #[test]
+    fn app_window_copy_and_paste_clipboard() {
+        let win = match AppWindow::new() {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Skipping clipboard test (window creation error): {e}");
+                return;
+            }
+        };
+
+        // 1. 英文与 ASCII
+        let token = "ferric-clipboard-smoke-test-payload";
+        win.invoke_copy_to_clipboard(token.into());
+        assert_eq!(win.invoke_paste_from_clipboard().to_string(), token);
+
+        // 2. 中文与特殊符号
+        let cjk = "测试中文字符串复制与特殊符号: ⌘ ⌥ ✕ ★ 123";
+        win.invoke_copy_to_clipboard(cjk.into());
+        assert_eq!(win.invoke_paste_from_clipboard().to_string(), cjk);
+
+        // 3. 多行格式化 JSON
+        let multiline = "{\n  \"hello\": \"世界\",\n  \"count\": 42\n}";
+        win.invoke_copy_to_clipboard(multiline.into());
+        assert_eq!(win.invoke_paste_from_clipboard().to_string(), multiline);
+    }
+
+    #[test]
+    fn shared_copy_flushes_to_window_clipboard() {
+        let shell = Shell::new();
+        let win = match shell.build_window() {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Skipping window test: {e}");
+                return;
+            }
+        };
+
+        let payload = "{\"msg\": \"来自 shared.copy 的测试数据\"}";
+        shell.state.borrow_mut().shared.copy(payload);
+        Shell::flush_shared(&shell.state, &win);
+
+        // 确认 shared 里的 clipboard 已被 take
+        assert!(shell.state.borrow().shared.clipboard.is_none());
+        // 确认系统剪贴板已写入
+        assert_eq!(win.invoke_paste_from_clipboard().to_string(), payload);
+    }
+
+    #[test]
+    fn uuid_copy_prefers_selection_over_full_output() {
+        let shell = Shell::new();
+        let win = match shell.build_window() {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Skipping window test: {e}");
+                return;
+            }
+        };
+
+        // 1. 有选区时：只复制选中的字符，提示精准字符数
+        {
+            let mut u = shell.uuid.borrow_mut();
+            u.regen();
+            // 选中前 8 个字符（例如 UUID 的第一段）
+            u.out.select_range(0, 8);
+            assert_eq!(u.out.selected_text().len(), 8);
+        }
+        win.invoke_uuid_copy();
+        Shell::flush_shared(&shell.state, &win);
+
+        let clip = win.invoke_paste_from_clipboard().to_string();
+        assert_eq!(clip.len(), 8);
+        let last_toast = shell
+            .state
+            .borrow()
+            .shared
+            .toasts
+            .last()
+            .unwrap()
+            .text
+            .clone();
+        assert_eq!(last_toast, "已复制 8 个字符");
+
+        // 2. 无选区时：复制全量输出，提示行数
+        {
+            let mut u = shell.uuid.borrow_mut();
+            u.out.click(0, 0.0, false); // 取消选区
+            assert!(!u.out.has_selection());
+        }
+        win.invoke_uuid_copy();
+        Shell::flush_shared(&shell.state, &win);
+
+        let full_clip = win.invoke_paste_from_clipboard().to_string();
+        assert!(full_clip.lines().count() >= 10);
+        let last_toast2 = shell
+            .state
+            .borrow()
+            .shared
+            .toasts
+            .last()
+            .unwrap()
+            .text
+            .clone();
+        assert_eq!(last_toast2, "已复制 10 行");
+    }
+
+    #[test]
+    fn copy_toast_differentiates_characters_and_lines() {
+        // 验证单行选区复制时是「已复制 N 个字符」，多行是「已复制 N 行」
+        let single = "abc_123";
+        let single_has_nl = single.contains('\n');
+        let single_msg = if single_has_nl {
+            format!("已复制 {} 行", single.lines().count())
+        } else {
+            format!("已复制 {} 个字符", single.chars().count())
+        };
+        assert_eq!(single_msg, "已复制 7 个字符");
+
+        let multiline = "line1\nline2\n";
+        let multi_has_nl = multiline.contains('\n');
+        let multi_msg = if multi_has_nl {
+            format!("已复制 {} 行", multiline.lines().count())
+        } else {
+            format!("已复制 {} 个字符", multiline.chars().count())
+        };
+        assert_eq!(multi_msg, "已复制 2 行");
     }
 }

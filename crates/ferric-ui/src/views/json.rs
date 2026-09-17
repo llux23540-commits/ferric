@@ -220,7 +220,13 @@ impl JsonTool {
 
     /// 转义成 JSON 字符串字面量（把当前正文整体变成一个字符串）。
     pub fn escape(&mut self) {
-        let out = json::escape(&self.input.text());
+        let text = self.input.text();
+        if text.trim().is_empty() {
+            self.ok = false;
+            self.status = "输入为空".to_owned();
+            return;
+        }
+        let out = json::escape(&text);
         self.input.replace_keeping_view(&out);
         self.ok = true;
         self.status = "已转义".to_owned();
@@ -230,7 +236,13 @@ impl JsonTool {
     /// 去转义。多层嵌套与内嵌 JSON 字符串一次剥完（`unescape_deep`）——
     /// 日志里捞出来的 JSON 常常被转义了两三层，一层层点是最烦人的操作之一。
     pub fn unescape(&mut self) {
-        match json::unescape_deep(&self.input.text()) {
+        let text = self.input.text();
+        if text.trim().is_empty() {
+            self.ok = false;
+            self.status = "输入为空".to_owned();
+            return;
+        }
+        match json::unescape_deep(&text) {
             Ok(out) => {
                 self.input.replace_keeping_view(&out);
                 self.ok = true;
