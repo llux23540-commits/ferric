@@ -24,6 +24,24 @@ use serde::{Deserialize, Serialize};
 /// 缩进档位（对应界面上的分段控件）。
 pub const INDENTS: [Indent; 3] = [Indent::Two, Indent::Four, Indent::Tab];
 
+/// 解析 serde_json 返回的错误串，提取 `at line X column Y`，
+/// 优先将行号列号前置显示，避免被工具条右侧的 `overflow: elide` 截断。
+pub fn parse_json_error(raw: &str) -> (Option<(usize, usize)>, String) {
+    if let Some(pos) = raw.rfind(" at line ") {
+        let err_part = raw[..pos].trim();
+        let loc_part = &raw[pos + " at line ".len()..];
+        if let Some(col_pos) = loc_part.find(" column ") {
+            let line_str = &loc_part[..col_pos];
+            let col_str = &loc_part[col_pos + " column ".len()..];
+            if let (Ok(line), Ok(col)) = (line_str.parse::<usize>(), col_str.parse::<usize>()) {
+                let friendly = format!("第 {line} 行 第 {col} 列：{err_part}");
+                return (Some((line, col)), friendly);
+            }
+        }
+    }
+    (None, raw.to_string())
+}
+
 fn default_wrap() -> bool {
     true
 }
@@ -47,10 +65,11 @@ pub struct JsonTool {
     pub wrap: bool,
     pub ok: bool,
     pub status: String,
+    /// 校验或格式化出错时的行列位置 (1 基)，供点击定位跳转。
+    pub error_loc: Option<(usize, usize)>,
     /// 开启键名排序前的那份正文：关掉排序时据此**退回原始键序**。
     /// 只存运行时 —— 重启后原始键序已不可考，退回当前正文即可。
     unsorted: Option<String>,
-
     // ——— 搜索 ———
     pub find: String,
     /// 命中位置（字符索引）。搜索是显式动作，不随打字实时重算 ——
@@ -87,6 +106,7 @@ impl Default for JsonTool {
             wrap: true,
             ok: true,
             status: String::new(),
+            error_loc: None,
             unsorted: None,
             find: String::new(),
             hits: Vec::new(),
@@ -101,6 +121,7 @@ impl Default for JsonTool {
             preview_bytes: 0,
         };
         t.validate();
+        t.input.set_wrap(t.wrap);
         t
     }
 }
@@ -170,10 +191,13 @@ impl JsonTool {
                 // 行数不写在这里：工具条右端常驻一个「N 行」，写两遍反而让
                 // 状态这句话被挤掉一半（overflow: elide）。
                 self.status = "JSON 有效".to_owned();
+                self.error_loc = None;
             }
             Err(e) => {
                 self.ok = false;
-                self.status = e;
+                let (loc, friendly) = parse_json_error(&e);
+                self.error_loc = loc;
+                self.status = friendly;
             }
         }
     }
@@ -194,11 +218,14 @@ impl JsonTool {
                 self.input.replace_keeping_view(&out);
                 self.ok = true;
                 self.status = "已格式化".to_owned();
+                self.error_loc = None;
                 self.hits.clear();
             }
             Err(e) => {
                 self.ok = false;
-                self.status = e;
+                let (loc, friendly) = parse_json_error(&e);
+                self.error_loc = loc;
+                self.status = friendly;
             }
         }
     }
@@ -209,11 +236,14 @@ impl JsonTool {
                 self.input.replace_keeping_view(&out);
                 self.ok = true;
                 self.status = format!("已压缩 · {} 字节", self.input.len_bytes());
+                self.error_loc = None;
                 self.hits.clear();
             }
             Err(e) => {
                 self.ok = false;
-                self.status = e;
+                let (loc, friendly) = parse_json_error(&e);
+                self.error_loc = loc;
+                self.status = friendly;
             }
         }
     }
@@ -269,13 +299,16 @@ impl JsonTool {
                     self.input.replace_keeping_view(&out);
                     self.ok = true;
                     self.status = "键名已排序".to_owned();
+                    self.error_loc = None;
                 }
                 Err(e) => {
                     // 排不动就把开关退回去，别让界面显示「已排序」而内容没变。
                     self.sort = false;
                     self.unsorted = None;
                     self.ok = false;
-                    self.status = e;
+                    let (loc, friendly) = parse_json_error(&e);
+                    self.error_loc = loc;
+                    self.status = friendly;
                 }
             }
         } else {
@@ -293,11 +326,26 @@ impl JsonTool {
 
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
+        self.input.set_wrap(self.wrap);
         self.status = if self.wrap {
             "自动换行：开".to_owned()
         } else {
             "自动换行：关（横向滚动）".to_owned()
         };
+    }
+
+    /// 光标跳转到校验/格式化出错的行和列，并滚入视野。返回是否有错误位置。
+    pub fn jump_to_error(&mut self) -> bool {
+        let Some((line, col)) = self.error_loc else {
+            return false;
+        };
+        let l = line.saturating_sub(1);
+        let c = col.saturating_sub(1);
+        let char_idx = self.input.char_of_line_col(l, c);
+        let end_idx = (char_idx + 1).min(self.input.len_chars());
+        self.input.select_range(char_idx, end_idx);
+        self.input.scroll_to_cursor();
+        true
     }
 
     pub fn clear(&mut self) {
@@ -596,6 +644,7 @@ impl Tool for JsonTool {
             self.indent = d.indent;
             self.sort = d.sort;
             self.wrap = d.wrap;
+            self.input.set_wrap(self.wrap);
             self.validate();
         }
     }
@@ -943,5 +992,162 @@ mod tests {
         t.rename_history(0, "订单示例");
         assert_eq!(t.preview_name, "订单示例");
         assert_eq!(t.preview_row, 0, "改个名不该把预览关掉");
+    }
+
+    #[test]
+    fn parse_json_error_extracts_line_and_col() {
+        let raw = "expected `,` or `]` at line 1 column 1234";
+        let (loc, friendly) = parse_json_error(raw);
+        assert_eq!(loc, Some((1, 1234)));
+        assert_eq!(friendly, "第 1 行 第 1234 列：expected `,` or `]`");
+
+        let raw_eof = "EOF while parsing a value at line 3 column 10";
+        let (loc, friendly) = parse_json_error(raw_eof);
+        assert_eq!(loc, Some((3, 10)));
+        assert_eq!(friendly, "第 3 行 第 10 列：EOF while parsing a value");
+
+        let raw_no_loc = "custom error message without location";
+        let (loc, friendly) = parse_json_error(raw_no_loc);
+        assert_eq!(loc, None);
+        assert_eq!(friendly, raw_no_loc);
+    }
+
+    #[test]
+    fn jump_to_error_positions_cursor() {
+        let mut t = JsonTool::default();
+        // 输入存在语法错误的 JSON（trailing comma）
+        t.input.set_text("{\n  \"a\": 1,\n}");
+        t.validate();
+        assert!(!t.ok);
+        assert!(t.error_loc.is_some());
+        assert!(t.status.starts_with("第 "));
+
+        let jumped = t.jump_to_error();
+        assert!(jumped);
+        assert!(t.input.has_selection());
+    }
+
+    #[test]
+    fn toggle_wrap_syncs_to_buffer() {
+        let mut t = JsonTool::default();
+        assert!(t.wrap);
+        assert!(t.input.wrap());
+
+        t.toggle_wrap();
+        assert!(!t.wrap);
+        assert!(!t.input.wrap());
+
+        t.toggle_wrap();
+        assert!(t.wrap);
+        assert!(t.input.wrap());
+    }
+
+    #[test]
+    fn ultra_long_single_line_json_format_and_minify_roundtrip() {
+        // 构建一个超长单行压缩 JSON（10,000 个复杂嵌套对象，长度超 180,000 字符）
+        let items: Vec<String> = (0..10_000)
+            .map(|i| {
+                format!(
+                    "{{\"id\":{i},\"name\":\"user_{i}\",\"score\":{:.2},\"tags\":[\"tag_a\",\"{i}\"],\"active\":{}}}",
+                    i as f64 * 1.5,
+                    i % 2 == 0
+                )
+            })
+            .collect();
+        let single_line_raw = format!("{{\"total\":10000,\"items\":[{}]}}", items.join(","));
+        assert_eq!(
+            single_line_raw.lines().count(),
+            1,
+            "输入必须是纯单行压缩 JSON"
+        );
+        assert!(
+            single_line_raw.len() > 180_000,
+            "样本长度应当远超常规视口宽度"
+        );
+
+        let mut t = JsonTool::default();
+        t.input.set_text(&single_line_raw);
+        assert_eq!(t.input.total_lines(), 1);
+
+        // 1. 格式化超长单行 JSON
+        t.format();
+        assert!(t.ok, "超长 JSON 格式化必须成功：{}", t.status);
+        assert_eq!(t.status, "已格式化");
+        assert!(
+            t.input.total_lines() > 20_000,
+            "格式化后行数应扩展至 2 万行以上，实际为 {}",
+            t.input.total_lines()
+        );
+
+        // 2. 压缩回单行
+        t.minify();
+        assert!(t.ok, "压缩必须成功：{}", t.status);
+        assert_eq!(t.input.total_lines(), 1, "压缩后必须还原为单行");
+        assert!(t.input.len_chars() > 150_000);
+
+        // 3. 换档 4 空格缩进并按键名排序重排
+        t.indent = Indent::Four;
+        t.sort = true;
+        t.format();
+        assert!(t.ok, "4 空格与键名排序重排必须成功：{}", t.status);
+        assert!(t.input.total_lines() > 20_000);
+    }
+
+    #[test]
+    fn ultra_long_single_line_json_with_syntax_error_jump() {
+        // 构建 100,000+ 字符单行 JSON，并在第 85,000+ 字符处注入断裂语法错误
+        let prefix: Vec<String> = (0..5000)
+            .map(|i| format!("{{\"idx\":{i},\"val\":\"ok_{i}\"}}"))
+            .collect();
+        let prefix_str = prefix.join(",");
+        assert!(prefix_str.len() > 80_000, "前缀长度必须跨越数万字符");
+
+        // 在第 8 万+ 字符后制造非法 JSON 标记（缺少键名冒号与未闭合）
+        let broken_raw = format!(
+            "{{\"list\":[{}, {{\"corrupted\": oops missing quotes",
+            prefix_str
+        );
+        assert_eq!(broken_raw.lines().count(), 1, "必须为单行超长残缺 JSON");
+
+        let mut t = JsonTool::default();
+        t.input.set_text(&broken_raw);
+        t.validate();
+
+        // 必须校验报错，且错误位置列号必须精确落在 80,000 列之后
+        assert!(!t.ok, "残缺 JSON 必须报错");
+        let (err_line, err_col) = t.error_loc.expect("必须提取出错误行列号");
+        assert_eq!(err_line, 1, "单行 JSON 出错必须在第 1 行");
+        assert!(
+            err_col > 80_000,
+            "错误列号必须精确位于超长位置，实际为 {}",
+            err_col
+        );
+
+        // 提示信息必须以行号列号作为前缀，绝不能被 elide 切断
+        assert!(t.status.starts_with("第 1 行 第 "));
+        assert!(t.status.contains(&format!("第 {err_col} 列")));
+
+        // 测试一键定位跳转
+        let jumped = t.jump_to_error();
+        assert!(jumped, "必须成功跳转");
+        assert!(t.input.has_selection(), "跳转后应高亮出错字符");
+        let (sel_start, _) = t.input.selection();
+        assert_eq!(sel_start, err_col - 1, "选区起点必须精确对齐错误列坐标");
+    }
+
+    #[test]
+    fn ultra_long_json_with_deep_nesting() {
+        // 深度嵌套测试（40 层嵌套对象，防御栈溢出与深层展开）
+        let mut nested = "{\"val\": 42}".to_string();
+        for i in 0..40 {
+            nested = format!("{{\"level_{i}\": {nested}}}");
+        }
+        let mut t = JsonTool::default();
+        t.input.set_text(&nested);
+        t.validate();
+        assert!(t.ok, "40 层嵌套必须能成功校验");
+        t.format();
+        assert!(t.ok, "40 层嵌套格式化必须成功");
+        assert!(t.input.total_lines() > 80);
     }
 }

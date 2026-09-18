@@ -2221,6 +2221,16 @@ impl Shell {
         });
 
         let json = self.json.clone();
+        let shell = self.clone_handles();
+        let w = win.as_weak();
+        win.on_json_jump_error(move || {
+            let Some(win) = w.upgrade() else { return };
+            if json.borrow_mut().jump_to_error() {
+                shell.sync_editor(&win, "json-in");
+            }
+        });
+
+        let json = self.json.clone();
         let state = self.state.clone();
         let w = win.as_weak();
         win.on_json_copy(move || {
@@ -3351,6 +3361,12 @@ mod tests {
         assert!(shell.state.borrow().shared.clipboard.is_none());
         // 确认系统剪贴板已写入
         assert_eq!(win.invoke_paste_from_clipboard().to_string(), payload);
+
+        // 4. 超长 JSON (200KB / 20万字符)
+        let big = "{\"key\": \"".to_string() + &"a".repeat(200_000) + "\"}";
+        win.invoke_copy_to_clipboard(big.clone().into());
+        let back = win.invoke_paste_from_clipboard().to_string();
+        assert_eq!(back.len(), big.len(), "超长内容不应被截断");
     }
 
     #[test]
@@ -3431,5 +3447,26 @@ mod tests {
             format!("已复制 {} 个字符", multiline.chars().count())
         };
         assert_eq!(multi_msg, "已复制 2 行");
+    }
+
+    #[test]
+    fn json_jump_error_moves_cursor_to_error() {
+        let shell = Shell::new();
+        let win = match shell.build_window() {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Skipping window test: {e}");
+                return;
+            }
+        };
+
+        {
+            let mut j = shell.json.borrow_mut();
+            j.input.set_text("{\n  \"a\": 1,\n}");
+            j.validate();
+            assert!(j.error_loc.is_some());
+        }
+        win.invoke_json_jump_error();
+        assert!(shell.json.borrow().input.has_selection());
     }
 }

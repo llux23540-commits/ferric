@@ -120,28 +120,28 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
 
     // 行号与折叠标记都按**可见行**对齐：折叠之后行号不再连续
     //（收起 3..9 的话行号槽是 …2, 3, 10, 11…），必须逐行给。
-    let rows = buf.visible_rows();
-    let line_nos: Vec<i32> = rows.iter().map(|l| (*l + 1) as i32).collect();
-    let marks: Vec<i32> = rows.iter().map(|l| buf.fold_mark_of(*l)).collect();
-    // `foldable` 决定行号槽要不要让出折叠列 —— 一份没有任何区块的文本
-    //（SQL、纯文本）不该白占 16px。
+    let rows_info = buf.visible_rows_info();
+    let line_nos: Vec<i32> = rows_info
+        .iter()
+        .map(|(l, sub)| if *sub == 0 { (*l + 1) as i32 } else { 0 })
+        .collect();
+    let marks: Vec<i32> = rows_info
+        .iter()
+        .map(|(l, sub)| if *sub == 0 { buf.fold_mark_of(*l) } else { 0 })
+        .collect();
     let foldable = marks.iter().any(|m| *m != 0);
 
-    let kinds: Vec<i32> = rows
+    let kinds: Vec<i32> = rows_info
         .iter()
-        .map(|l| decor.kinds.get(*l).copied().unwrap_or(0))
+        .map(|(l, _)| decor.kinds.get(*l).copied().unwrap_or(0))
         .collect();
     let diffed = kinds.iter().any(|k| *k != 0);
 
-    // 字符级高亮裁到视口：行不在这一屏、或整段被横向滚动推出去的都不画。
-    // 坐标同样是窄字宽的倍数（`cells_of_range` 负责裁剪与换算）。
-    let left = buf.scroll_col();
-    let right = left + buf.viewport_cols() + 1;
     let emph: Vec<CellSpan> = decor
         .emph
         .iter()
         .filter_map(|(line, col, len)| {
-            let row = rows.iter().position(|l| l == line)?;
+            let row = rows_info.iter().position(|(l, _)| l == line)?;
             let (x, w) = buf.cells_of_range(*line, *col, *len)?;
             Some(CellSpan {
                 row: row as i32,
@@ -151,20 +151,25 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         })
         .collect();
 
-    // 语法着色：**只对这一屏的行**跑词法。每行给出一串片段（文本 + 颜色），
-    // UI 侧顺次排出来 —— 不按 char 列绝对定位，因为中文是双宽字符，
-    // 「一个 char 一格」会让相邻片段互相压字。
     let tokens: Vec<TokenLine> = if decor.syntax == Syntax::None {
         Vec::new()
     } else {
-        rows.iter()
-            .map(|line| {
+        rows_info
+            .iter()
+            .map(|(line, sub)| {
                 let text = buf.line_text(*line);
                 let chars: Vec<char> = text.chars().collect();
+                let cols = buf.wrap_cols();
+                let (left, right) = if buf.wrap() {
+                    let s = sub * cols;
+                    (s, (s + cols).min(chars.len()))
+                } else {
+                    let l = buf.scroll_col();
+                    (l, l + buf.viewport_cols() + 1)
+                };
                 let runs: Vec<TokenRun> = ferric_core::json::highlight_line(&text)
                     .into_iter()
                     .filter_map(|(col, len, kind)| {
-                        // 裁到横向滚动窗口：整段在窗口外的不画，跨边界的切一刀。
                         let (a, b) = (col.max(left), (col + len).min(right));
                         (b > a).then(|| TokenRun {
                             text: SharedString::from(
@@ -199,6 +204,9 @@ pub fn state_with_decor(buf: &TextBuffer, decor: RowDecor) -> EditorState {
         tokens: ModelRc::new(VecModel::from(tokens)),
         highlighted,
         selection_spans: ModelRc::new(VecModel::from(spans)),
+        wrap: buf.wrap(),
+        max_line_len: buf.max_line_len() as i32,
+        scroll_col: buf.scroll_col() as i32,
     }
 }
 

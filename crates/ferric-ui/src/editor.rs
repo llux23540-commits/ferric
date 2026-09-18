@@ -102,6 +102,10 @@ pub struct TextBuffer {
     scroll_col: usize,
     /// 视口宽度（字符数）。
     viewport_cols: usize,
+    /// 是否启用软换行。
+    wrap: bool,
+    /// 视口顶端在 `scroll_line` 行内的第几个折行（0 基）。`!wrap` 时恒为 0。
+    scroll_sub_row: usize,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     undo_bytes: usize,
@@ -189,6 +193,8 @@ impl TextBuffer {
             undo_bytes: 0,
             folds: Vec::new(),
             dirty: false,
+            wrap: false,
+            scroll_sub_row: 0,
         }
     }
 
@@ -229,6 +235,44 @@ impl TextBuffer {
 
     pub fn viewport_cols(&self) -> usize {
         self.viewport_cols
+    }
+
+    pub fn wrap(&self) -> bool {
+        self.wrap
+    }
+
+    pub fn set_wrap(&mut self, wrap: bool) {
+        if self.wrap != wrap {
+            self.wrap = wrap;
+            self.scroll_col = 0;
+            self.scroll_sub_row = 0;
+            self.scroll_to_cursor();
+        }
+    }
+
+    pub fn wrap_cols(&self) -> usize {
+        self.viewport_cols.max(20)
+    }
+
+    pub fn sub_rows_of_line(&self, line: usize) -> usize {
+        if !self.wrap {
+            return 1;
+        }
+        let len = self.line_len(line);
+        if len == 0 {
+            1
+        } else {
+            let cols = self.wrap_cols();
+            len.div_ceil(cols)
+        }
+    }
+
+    pub fn scroll_to_col(&mut self, col: usize) {
+        if self.wrap {
+            return;
+        }
+        let max_len = self.max_line_len();
+        self.scroll_col = col.min(max_len.saturating_sub(1));
     }
 
     pub fn dirty(&self) -> bool {
@@ -273,7 +317,7 @@ impl TextBuffer {
         (line, ch - line_start)
     }
 
-    fn char_of_line_col(&self, line: usize, col: usize) -> usize {
+    pub fn char_of_line_col(&self, line: usize, col: usize) -> usize {
         let line = line.min(self.total_lines().saturating_sub(1));
         let start = self.rope.line_to_char(line);
         // 行长度不含换行符 —— 光标不该停在换行符之后。
@@ -305,13 +349,17 @@ impl TextBuffer {
     /// 这是虚拟化的出口：**只有这几十行**会进 Slint 的布局，
     /// 所以布局高度恒等于视口高度，与文档多大无关。
     pub fn visible_lines(&self) -> Vec<String> {
-        self.visible_rows()
+        let cols = self.wrap_cols();
+        self.visible_rows_info()
             .into_iter()
-            .map(|i| {
-                let mut s = self.sliced_line(i);
-                // 折叠头补一个「… }」：不然收起来的那一行看着跟普通行一样，
-                // 用户不知道底下还藏着东西。
-                if self.folded_end(i).is_some() {
+            .map(|(i, sub)| {
+                let mut s = if self.wrap {
+                    self.wrapped_line_slice(i, sub, cols)
+                } else {
+                    self.sliced_line(i)
+                };
+                let is_last_sub = sub + 1 >= self.sub_rows_of_line(i);
+                if is_last_sub && self.folded_end(i).is_some() {
                     if let Some((_, open)) = self.line_opener(i) {
                         s.push_str(" … ");
                         s.push(if open == '{' { '}' } else { ']' });
@@ -320,6 +368,17 @@ impl TextBuffer {
                 s
             })
             .collect()
+    }
+
+    fn wrapped_line_slice(&self, line: usize, sub: usize, cols: usize) -> String {
+        let len = self.line_len(line);
+        let start_col = sub * cols;
+        if start_col >= len {
+            return String::new();
+        }
+        let take = (len - start_col).min(cols);
+        let start = self.rope.line_to_char(line) + start_col;
+        self.rope.slice(start..start + take).to_string()
     }
 
     /// 某一行的完整文本（不含行尾换行）。
@@ -349,8 +408,7 @@ impl TextBuffer {
 
     /// 最长可见行的字符数（横向滚动条用）。
     pub fn max_line_len(&self) -> usize {
-        self.visible_rows()
-            .into_iter()
+        (0..self.total_lines())
             .map(|i| self.line_len(i))
             .max()
             .unwrap_or(0)
@@ -365,12 +423,44 @@ impl TextBuffer {
     /// 可见行数（折叠之后的行数）。滚动条比例与视口内换算都用这个，
     /// 文档真实行数仍然是 [`Self::total_lines`]。
     pub fn view_total_lines(&self) -> usize {
-        self.total_lines() - self.hidden_total()
+        let physical = self.total_lines() - self.hidden_total();
+        if !self.wrap {
+            return physical;
+        }
+        let mut extra = 0;
+        let cols = self.wrap_cols();
+        for l in 0..self.total_lines() {
+            if self.folds.iter().any(|(s, e)| *s < l && l <= *e) {
+                continue;
+            }
+            let len = self.line_len(l);
+            if len > cols {
+                extra += len.div_ceil(cols) - 1;
+            }
+        }
+        physical + extra
     }
 
     /// 视口顶端是第几个**可见行**（滚动条位置用）。
     pub fn view_first_row(&self) -> usize {
-        self.scroll_line - self.hidden_before(self.scroll_line)
+        let base = self
+            .scroll_line
+            .saturating_sub(self.hidden_before(self.scroll_line));
+        if !self.wrap {
+            return base;
+        }
+        let cols = self.wrap_cols();
+        let mut extra = 0;
+        for l in 0..self.scroll_line {
+            if self.folds.iter().any(|(s, e)| *s < l && l <= *e) {
+                continue;
+            }
+            let len = self.line_len(l);
+            if len > cols {
+                extra += len.div_ceil(cols) - 1;
+            }
+        }
+        base + extra + self.scroll_sub_row
     }
 
     /// 某一行的折叠标记：`0` = 不是区块开头、`1` = 可折叠、`2` = 已折叠。
@@ -422,13 +512,12 @@ impl TextBuffer {
     ///
     /// 折叠算在内：藏起来的行不占视觉行，光标落在折叠里就算在折叠头那一行。
     pub fn cursor_view_row(&self) -> Option<usize> {
-        let (line, _) = self.cursor_line_col();
+        let (line, col) = self.cursor_line_col();
         let line = self.prev_visible(line);
-        if line < self.scroll_line {
-            return None;
-        }
-        let row = self.view_rows_between(self.scroll_line, line);
-        (row < self.viewport_lines).then_some(row)
+        let sub = if self.wrap { col / self.wrap_cols() } else { 0 };
+        self.visible_rows_info()
+            .iter()
+            .position(|&(l, s)| l == line && s == sub)
     }
 
     // ——— 横向坐标（窄字宽为单位） ———
@@ -462,22 +551,39 @@ impl TextBuffer {
             .sum()
     }
 
-    /// 光标在视口内的横向位置（窄字宽的倍数）。
     pub fn cursor_cells(&self) -> f32 {
         let (line, col) = self.cursor_line_col();
-        self.cells_between(line, self.scroll_col, col)
+        if self.wrap {
+            let cols = self.wrap_cols();
+            let sub = col / cols;
+            let start_col = sub * cols;
+            self.cells_between(line, start_col, col)
+        } else {
+            self.cells_between(line, self.scroll_col, col)
+        }
     }
 
     /// 行内某个字符区间在视口里的 `(起点, 宽度)`，都以窄字宽为单位。
     /// 完全被横向滚动推出视野时返回 `None`。
     pub fn cells_of_range(&self, line: usize, from: usize, len: usize) -> Option<(f32, f32)> {
-        let right = self.scroll_col + self.viewport_cols + 1;
-        let (a, b) = (from.max(self.scroll_col), (from + len).min(right));
+        let base_col = if self.wrap {
+            let cols = self.wrap_cols();
+            (from / cols) * cols
+        } else {
+            self.scroll_col
+        };
+        let span_cols = if self.wrap {
+            self.wrap_cols()
+        } else {
+            self.viewport_cols + 1
+        };
+        let right = base_col + span_cols;
+        let (a, b) = (from.max(base_col), (from + len).min(right));
         if b <= a {
             return None;
         }
         Some((
-            self.cells_between(line, self.scroll_col, a),
+            self.cells_between(line, base_col, a),
             self.cells_between(line, a, b),
         ))
     }
@@ -500,6 +606,29 @@ impl TextBuffer {
             col += 1;
         }
         len
+    }
+
+    fn col_at_cells_offset(
+        &self,
+        line: usize,
+        start_col: usize,
+        max_cols: usize,
+        cells: f32,
+    ) -> usize {
+        let len = self.line_len(line);
+        let end_col = (start_col + max_cols).min(len);
+        let start = self.rope.line_to_char(line);
+        let mut at = 0.0f32;
+        let mut col = start_col;
+        while col < end_col {
+            let w = self.char_cells(self.rope.char(start + col));
+            if cells < at + w / 2.0 {
+                return col - start_col;
+            }
+            at += w;
+            col += 1;
+        }
+        end_col - start_col
     }
 
     /// 展开所有把 `line` 藏起来的折叠（搜索命中落在折叠里时要先露出来）。
@@ -592,20 +721,50 @@ impl TextBuffer {
     ///
     /// 行号槽的数字、折叠标记、选区高亮全部照它对齐 —— 折叠之后
     /// 「第 N 个视觉行 = 文档第 N 行」不再成立，只有这一处知道真实映射。
-    pub fn visible_rows(&self) -> Vec<usize> {
+    /// 视口内当前可见的 `(文档行, 折行号)` 序列。
+    pub fn visible_rows_info(&self) -> Vec<(usize, usize)> {
         let total = self.total_lines();
         let mut out = Vec::with_capacity(self.viewport_lines);
         let mut l = self.next_visible(self.scroll_line);
+        let mut sub = if l == self.scroll_line {
+            self.scroll_sub_row
+        } else {
+            0
+        };
+
         while out.len() < self.viewport_lines && l < total {
-            out.push(l);
+            let n_sub = self.sub_rows_of_line(l);
+            while sub < n_sub && out.len() < self.viewport_lines {
+                out.push((l, sub));
+                sub += 1;
+            }
+            sub = 0;
             l = self.next_visible(l + 1);
         }
         out
     }
 
+    /// 当前视口里那几十个可见行的文档行号（0 基）。
+    ///
+    /// 行号槽的数字、折叠标记、选区高亮全部照它对齐 —— 折叠之后
+    /// 「第 N 个视觉行 = 文档第 N 行」不再成立，只有这一处知道真实映射。
+    pub fn visible_rows(&self) -> Vec<usize> {
+        self.visible_rows_info()
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect()
+    }
+
     /// 视口第 `rows` 行对应的文档行（越界夹到最后一个可见行）。
     fn doc_line_from_top(&self, rows: usize) -> usize {
-        self.forward_visible(self.scroll_line, rows)
+        if self.wrap {
+            self.visible_rows_info()
+                .get(rows)
+                .map(|(l, _)| *l)
+                .unwrap_or_else(|| self.total_lines().saturating_sub(1))
+        } else {
+            self.forward_visible(self.scroll_line, rows)
+        }
     }
 
     /// 第 `row` 个可见行（从文档开头数）对应的文档行。
@@ -719,78 +878,162 @@ impl TextBuffer {
 
     /// 滚动 `delta` **可见行**（正 = 往下）。折叠区间整块跳过。
     pub fn scroll_by(&mut self, delta: i32) {
-        self.scroll_line = if delta >= 0 {
-            self.forward_visible(self.scroll_line, delta as usize)
+        if delta == 0 {
+            return;
+        }
+        if delta > 0 {
+            for _ in 0..delta {
+                let n_sub = self.sub_rows_of_line(self.scroll_line);
+                if self.wrap && self.scroll_sub_row + 1 < n_sub {
+                    self.scroll_sub_row += 1;
+                } else {
+                    let next = self.forward_visible(self.scroll_line, 1);
+                    if next > self.scroll_line {
+                        self.scroll_line = next;
+                        self.scroll_sub_row = 0;
+                    } else {
+                        break;
+                    }
+                }
+            }
         } else {
-            self.back_visible(self.scroll_line, (-delta) as usize)
-        };
+            for _ in 0..(-delta) {
+                if self.wrap && self.scroll_sub_row > 0 {
+                    self.scroll_sub_row -= 1;
+                } else if self.scroll_line > 0 {
+                    self.scroll_line = self.prev_visible(self.scroll_line - 1);
+                    self.scroll_sub_row = if self.wrap {
+                        self.sub_rows_of_line(self.scroll_line).saturating_sub(1)
+                    } else {
+                        0
+                    };
+                } else {
+                    break;
+                }
+            }
+        }
         self.clamp_scroll();
     }
 
-    /// 把视口顶端设到第 `row` 个**可见行**（滚动条拖动用 —— 滚动条的刻度是
-    /// 可见行数 [`Self::view_total_lines`]，不是文档行数）。
+    /// 把视口顶端设到第 `row` 个**可见行**（滚动条拖动用）。
     pub fn scroll_to_line(&mut self, row: usize) {
-        self.scroll_line = self.doc_of_view_row(row);
+        if !self.wrap {
+            self.scroll_line = self.doc_of_view_row(row);
+            self.scroll_sub_row = 0;
+        } else {
+            let mut left = row;
+            let mut line = 0usize;
+            let total = self.total_lines();
+            while line < total {
+                line = self.next_visible(line);
+                if line >= total {
+                    break;
+                }
+                let n_sub = self.sub_rows_of_line(line);
+                if left < n_sub {
+                    self.scroll_line = line;
+                    self.scroll_sub_row = left;
+                    self.clamp_scroll();
+                    return;
+                }
+                left -= n_sub;
+                line += 1;
+            }
+            self.scroll_line = total.saturating_sub(1);
+            self.scroll_sub_row = 0;
+        }
         self.clamp_scroll();
     }
 
     /// 把视口顶端设到**文档**某一行。
-    ///
-    /// 与 [`Self::scroll_to_line`] 的区别是刻度：那个收的是可见行序号
-    ///（滚动条给的），这个收的是文档行号（对比工具的左右同步滚动用）。
     pub fn scroll_to_doc_line(&mut self, line: usize) {
         self.scroll_line = line;
+        self.scroll_sub_row = 0;
         self.clamp_scroll();
     }
 
     pub fn scroll_cols_by(&mut self, delta: i32) {
+        if self.wrap {
+            return;
+        }
         let t = self.scroll_col as i64 + delta as i64;
         self.scroll_col = t.max(0) as usize;
     }
 
     fn clamp_scroll(&mut self) {
-        // 最多滚到「最后一屏」：再往下滚，屏幕上就只剩末尾几行加一大片空白 ——
-        // 用户会以为文本没了。整份粘贴（Ctrl+A、Ctrl+V）最容易撞上这一下：
-        // 光标落在末行，`scroll_to_cursor` 把末行顶到第一排，一屏只剩一行，
-        // 看起来就是「没粘全」。
-        //
-        // 刻度是**可见行**：折叠之后文档行号与屏幕行号不再一致，按文档行号
-        // 夹会在折叠文档上少滚（或多滚）掉被藏起来的那些行。
-        let last_top = self.view_total_lines().saturating_sub(self.viewport_lines);
-        let row = self.view_rows_between(0, self.scroll_line).min(last_top);
-        self.scroll_line = self.doc_of_view_row(row);
-        // 顶端必须落在可见行上：停在被折叠藏起来的行上，第一屏会画成空白。
-        self.scroll_line = self.prev_visible(self.scroll_line);
+        let total_view = self.view_total_lines();
+        let last_top = total_view.saturating_sub(self.viewport_lines);
+        if !self.wrap {
+            let row = self.view_rows_between(0, self.scroll_line).min(last_top);
+            self.scroll_line = self.doc_of_view_row(row);
+            self.scroll_line = self.prev_visible(self.scroll_line);
+            self.scroll_sub_row = 0;
+        } else {
+            let cur_row = self.view_first_row();
+            if cur_row > last_top {
+                self.scroll_to_line(last_top);
+            }
+            self.scroll_line = self.prev_visible(self.scroll_line);
+            let n_sub = self.sub_rows_of_line(self.scroll_line);
+            self.scroll_sub_row = self.scroll_sub_row.min(n_sub.saturating_sub(1));
+        }
     }
 
     /// 把光标滚进视野（每次移动光标/插入后调用）。
     pub fn scroll_to_cursor(&mut self) {
         let (line, col) = self.cursor_line_col();
         let line = self.prev_visible(line);
-        if line < self.scroll_line {
-            self.scroll_line = line;
-        } else if self.view_rows_between(self.scroll_line, line) >= self.viewport_lines {
-            // 距离按**可见行**算：折叠之后「相差 300 行」可能只有 3 行的视觉距离。
-            self.scroll_line = self.back_visible(line, self.viewport_lines - 1);
-        }
-        // 往回跳时上面把光标行顶到了第一排 —— 光标若在文末，第一排之后就没有
-        // 正文了。夹回最后一屏（光标仍在屏内，只是不再是第一行）。
-        self.clamp_scroll();
-        if col < self.scroll_col {
-            self.scroll_col = col;
-        } else if col >= self.scroll_col + self.viewport_cols {
-            self.scroll_col = col + 1 - self.viewport_cols;
+        if self.wrap {
+            self.scroll_col = 0;
+            let cols = self.wrap_cols();
+            let sub = col / cols;
+            let is_before =
+                line < self.scroll_line || (line == self.scroll_line && sub < self.scroll_sub_row);
+            if is_before {
+                self.scroll_line = line;
+                self.scroll_sub_row = sub;
+            } else {
+                let in_view = self
+                    .visible_rows_info()
+                    .iter()
+                    .any(|&(l, s)| l == line && s == sub);
+                if !in_view {
+                    self.scroll_line = line;
+                    self.scroll_sub_row = sub.saturating_sub(self.viewport_lines.saturating_sub(1));
+                }
+            }
+            self.clamp_scroll();
+        } else {
+            self.scroll_sub_row = 0;
+            if line < self.scroll_line {
+                self.scroll_line = line;
+            } else if self.view_rows_between(self.scroll_line, line) >= self.viewport_lines {
+                self.scroll_line = self.back_visible(line, self.viewport_lines - 1);
+            }
+            self.clamp_scroll();
+            if col < self.scroll_col {
+                self.scroll_col = col;
+            } else if col >= self.scroll_col + self.viewport_cols {
+                self.scroll_col = col + 1 - self.viewport_cols;
+            }
         }
     }
 
     // ——— 光标 ———
 
-    /// 点击定位。`view_line` 是视口内行号，`cells` 是横向位置（窄字宽的倍数，
-    /// 由 UI 侧用像素除以窄字宽得到）——**不是字符数**：中文一个字占两格上下，
-    /// 按字符数换算会让光标落在别的字上。
     pub fn click(&mut self, view_line: usize, cells: f32, extend: bool) {
-        let line = self.doc_line_from_top(view_line);
-        let col = self.col_at_cells(line, cells.max(0.0));
+        let rows = self.visible_rows_info();
+        let (line, sub) = rows
+            .get(view_line)
+            .copied()
+            .unwrap_or((self.total_lines().saturating_sub(1), 0));
+        let col = if self.wrap {
+            let cols = self.wrap_cols();
+            let offset = self.col_at_cells_offset(line, sub * cols, cols, cells.max(0.0));
+            sub * cols + offset
+        } else {
+            self.col_at_cells(line, cells.max(0.0))
+        };
         self.cursor = self.char_of_line_col(line, col);
         if !extend {
             self.anchor = self.cursor;
@@ -802,7 +1045,6 @@ impl TextBuffer {
         let (line, col) = self.cursor_line_col();
         self.cursor = match m {
             Motion::Left => {
-                // 有选区时不带 shift 的左移 = 塌缩到选区左端（编辑器通例）
                 if !extend && self.has_selection() {
                     self.selection().0
                 } else {
@@ -816,16 +1058,53 @@ impl TextBuffer {
                     (self.cursor + 1).min(n)
                 }
             }
-            // 上/下与翻页都按**可见行**走：折叠起来的区块整块跳过，
-            // 否则光标会掉进看不见的行里（表现为「按一下方向键光标没了」）。
             Motion::Up => {
-                if line == 0 {
+                if self.wrap {
+                    let cols = self.wrap_cols();
+                    let sub = col / cols;
+                    let col_in_row = col % cols;
+                    if sub > 0 {
+                        let target_sub = sub - 1;
+                        let target_col = (target_sub * cols + col_in_row).min(self.line_len(line));
+                        self.char_of_line_col(line, target_col)
+                    } else if line > 0 {
+                        let prev = self.prev_visible(line - 1);
+                        let prev_n_sub = self.sub_rows_of_line(prev);
+                        let target_sub = prev_n_sub.saturating_sub(1);
+                        let target_col = (target_sub * cols + col_in_row).min(self.line_len(prev));
+                        self.char_of_line_col(prev, target_col)
+                    } else {
+                        0
+                    }
+                } else if line == 0 {
                     0
                 } else {
                     self.char_of_line_col(self.prev_visible(line - 1), col)
                 }
             }
-            Motion::Down => self.char_of_line_col(self.forward_visible(line, 1), col),
+            Motion::Down => {
+                if self.wrap {
+                    let cols = self.wrap_cols();
+                    let sub = col / cols;
+                    let col_in_row = col % cols;
+                    let n_sub = self.sub_rows_of_line(line);
+                    if sub + 1 < n_sub {
+                        let target_sub = sub + 1;
+                        let target_col = (target_sub * cols + col_in_row).min(self.line_len(line));
+                        self.char_of_line_col(line, target_col)
+                    } else {
+                        let next = self.forward_visible(line, 1);
+                        if next > line {
+                            let target_col = col_in_row.min(self.line_len(next));
+                            self.char_of_line_col(next, target_col)
+                        } else {
+                            self.char_of_line_col(line, self.line_len(line))
+                        }
+                    }
+                } else {
+                    self.char_of_line_col(self.forward_visible(line, 1), col)
+                }
+            }
             Motion::LineStart => self.rope.line_to_char(line),
             Motion::LineEnd => self.rope.line_to_char(line) + self.line_len(line),
             Motion::DocStart => 0,
@@ -942,9 +1221,16 @@ impl TextBuffer {
         let (line, _) = self.cursor_line_col();
         self.reveal(line);
         self.scroll_to_cursor();
-        // 把命中行尽量放到视口中间：搜索结果贴在最后一行上很难看清上下文。
+        // 把命中行/折行尽量放到视口中间：搜索结果贴在最后一行上很难看清上下文。
         let half = self.viewport_lines / 2;
-        self.scroll_line = self.back_visible(line, half);
+        if self.wrap {
+            let (_, col) = self.cursor_line_col();
+            let sub = col / self.wrap_cols();
+            self.scroll_line = line;
+            self.scroll_sub_row = sub.saturating_sub(half);
+        } else {
+            self.scroll_line = self.back_visible(line, half);
+        }
         self.clamp_scroll();
     }
 
@@ -1071,6 +1357,8 @@ impl TextBuffer {
         self.cursor = self.char_of_line_col(line, col);
         self.anchor = self.cursor;
         self.scroll_line = scroll.min(self.total_lines().saturating_sub(1));
+        self.scroll_sub_row = 0;
+        self.clamp_scroll();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1127,31 +1415,47 @@ impl TextBuffer {
         let (la, ca) = self.line_col_of(a);
         let (lb, cb) = self.line_col_of(b);
 
-        // 按视口里的可见行走：折叠藏起来的行不画，后面的行往上顶。
-        self.visible_rows()
+        let cols = self.wrap_cols();
+        self.visible_rows_info()
             .into_iter()
             .enumerate()
-            .filter(|(_, l)| *l >= la && *l <= lb)
-            .filter_map(|(row, l)| {
-                let start = if l == la { ca } else { 0 };
-                let end = if l == lb { cb } else { self.line_len(l) };
-                if l < lb {
-                    // 跨行选区：该行的行尾换行符也是选区的一部分
-                    if start >= end {
-                        let x = self.cells_between(l, self.scroll_col, start);
-                        Some((row, x, 1.0))
-                    } else {
-                        let (x, w) = self.cells_of_range(l, start, end.saturating_sub(start))?;
-                        Some((row, x, w + 1.0))
-                    }
+            .filter(|(_, (l, _))| *l >= la && *l <= lb)
+            .filter_map(|(row_idx, (l, sub))| {
+                let n_sub = self.sub_rows_of_line(l);
+                let is_last_sub = sub + 1 >= n_sub;
+                let (row_start_col, row_end_col) = if self.wrap {
+                    let s = sub * cols;
+                    let e = (s + cols).min(self.line_len(l));
+                    (s, e)
                 } else {
-                    // 选区末行：行尾换行符未被选中，仅当 start < end 时有可见高亮
-                    if start >= end {
-                        None
+                    (0, self.line_len(l))
+                };
+
+                let sel_start = if l == la { ca } else { 0 };
+                let sel_end = if l == lb { cb } else { self.line_len(l) };
+
+                let start = sel_start.max(row_start_col).min(row_end_col);
+                let end = sel_end.max(row_start_col).min(row_end_col);
+
+                let is_past_line = l < lb;
+                if start < end {
+                    let (x, w) = self.cells_of_range(l, start, end - start)?;
+                    let w = if is_past_line && is_last_sub {
+                        w + 1.0
                     } else {
-                        let (x, w) = self.cells_of_range(l, start, end - start)?;
-                        (w > 0.0).then_some((row, x, w))
-                    }
+                        w
+                    };
+                    Some((row_idx, x, w))
+                } else if is_past_line && is_last_sub && sel_start >= self.line_len(l) {
+                    let from_col = if self.wrap {
+                        row_start_col
+                    } else {
+                        self.scroll_col
+                    };
+                    let x = self.cells_between(l, from_col, row_end_col);
+                    Some((row_idx, x, 1.0))
+                } else {
+                    None
                 }
             })
             .collect()
@@ -1816,5 +2120,97 @@ mod tests {
         b.toggle_fold(0);
         b.scroll_to_line(20);
         assert_eq!(b.view_first_row(), 20, "没有折叠时可见行号 = 文档行号");
+    }
+
+    #[test]
+    fn soft_wrap_breaks_long_line_into_sub_rows() {
+        let text = "a".repeat(200);
+        let mut b = buf(&text);
+        b.set_viewport(10, 50); // wrap_cols = 50
+        b.set_wrap(true);
+
+        assert_eq!(b.sub_rows_of_line(0), 4, "200 字符按 50 列折成 4 个视觉行");
+        assert_eq!(b.view_total_lines(), 4);
+        let lines = b.visible_lines();
+        assert_eq!(lines.len(), 4);
+        for l in &lines {
+            assert_eq!(l.len(), 50);
+        }
+    }
+
+    #[test]
+    fn soft_wrap_cursor_down_navigates_sub_rows() {
+        let text = "a".repeat(200);
+        let mut b = buf(&text);
+        b.set_viewport(10, 50);
+        b.set_wrap(true);
+
+        assert_eq!(b.cursor, 0);
+        // 向下移动光标：行内折行步进
+        b.move_cursor(Motion::Down, false);
+        assert_eq!(b.cursor, 50);
+        b.move_cursor(Motion::Down, false);
+        assert_eq!(b.cursor, 100);
+        b.move_cursor(Motion::Up, false);
+        assert_eq!(b.cursor, 50);
+    }
+
+    #[test]
+    fn soft_wrap_click_on_sub_row_lands_on_correct_char() {
+        let text = "0123456789".repeat(20); // 200 字符
+        let mut b = buf(&text);
+        b.set_viewport(10, 50);
+        b.set_wrap(true);
+
+        // 点击第 1 个子行（第二行）的第 10 格：字符索引应为 50 + 10 = 60
+        b.click(1, 10.0, false);
+        assert_eq!(b.cursor, 60);
+    }
+
+    #[test]
+    fn horizontal_scroll_to_col_and_max_line_len() {
+        let text = "x".repeat(200);
+        let mut b = buf(&text);
+        b.set_viewport(10, 50);
+        b.set_wrap(false);
+
+        assert_eq!(b.max_line_len(), 200);
+        assert_eq!(b.scroll_col(), 0);
+
+        b.scroll_to_col(100);
+        assert_eq!(b.scroll_col(), 100);
+    }
+
+    #[test]
+    fn ultra_long_single_line_json_soft_wrap_browsing() {
+        // 100,000 字符单行 JSON
+        let text = "{\"id\":1,\"data\":\"".to_string() + &"x".repeat(99_982) + "\"}";
+        assert_eq!(text.len(), 100_000);
+        let mut b = buf(&text);
+        b.set_viewport(30, 100);
+        b.set_wrap(true);
+
+        assert_eq!(
+            b.sub_rows_of_line(0),
+            1000,
+            "100,000 字符按 100 列折为 1000 个视觉行"
+        );
+        assert_eq!(b.view_total_lines(), 1000);
+
+        // 滚动到第 500 个视觉行
+        b.scroll_by(500);
+        assert_eq!(b.view_first_row(), 500);
+
+        // 获取视口可见行
+        let lines = b.visible_lines();
+        assert_eq!(lines.len(), 30, "视口行数应为 30");
+        for l in &lines {
+            assert_eq!(l.len(), 100, "每个折行行宽为 100 字符");
+        }
+
+        b.select_range(50_000, 50_250);
+        assert_eq!(b.selected_text().len(), 250);
+        let spans = b.selection_spans();
+        assert_eq!(spans.len(), 3, "跨越 3 个子行");
     }
 }

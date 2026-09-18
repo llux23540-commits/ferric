@@ -155,6 +155,9 @@ struct EditorState {
     highlighted: bool,
     // 选区高亮，已裁到视口内（坐标同为窄字宽的倍数）
     selection-spans: [CellSpan],
+    wrap: bool,
+    max-line-len: int,
+    scroll-col: int,
 }
 
 // 带标题栏的编辑区面板。
@@ -228,6 +231,9 @@ component EditorPane inherits Rectangle {
             cursor-visible: root.state.cursor-visible;
             selection-spans: root.state.selection-spans;
             read-only: root.read-only;
+            wrap: root.state.wrap;
+            max-line-len: root.state.max-line-len;
+            scroll-col: root.state.scroll-col;
 
             viewport-changed(r, c) => { root.editor-viewport(root.which, r, c); }
             wide-ratio-changed(v) => { root.editor-wide-ratio(v); }
@@ -1714,6 +1720,7 @@ component JsonView inherits Rectangle {
     callback preview-history(int);
     callback close-preview();
     callback copy-preview();
+    callback jump-error();
     callback editor-viewport(string, int, int);
     callback editor-wide-ratio(float);
     callback editor-click(string, int, float, bool);
@@ -1874,31 +1881,58 @@ component JsonView inherits Rectangle {
             Rectangle { horizontal-stretch: 1; min-width: 12px; }
 
             // 实时校验结果。工具条右端而不是单独一行：那一行只有这一句话。
-            HorizontalLayout {
-                spacing: 5px;
-                Text {
-                    text: root.ok ? Icons.circle-check : Icons.circle-alert;
-                    font-family: Theme.font-icons;
-                    font-size: 13px;
-                    color: root.ok ? Theme.ok : Theme.danger;
-                    vertical-alignment: center;
+            status-area := TouchArea {
+                property <bool> hovering: self.has-hover && root.status != "";
+                mouse-cursor: !root.ok ? pointer : default;
+                clicked => {
+                    Tooltip.text = "";
+                    if (!root.ok) {
+                        root.jump-error();
+                    }
                 }
-                Text {
-                    text: root.status;
-                    font-family: Theme.font-ui;
-                    font-size: 12px;
-                    color: root.ok ? Theme.muted : Theme.danger;
-                    vertical-alignment: center;
-                    overflow: elide;
+
+                Timer {
+                    interval: 250ms;
+                    running: status-area.hovering && Tooltip.text == "";
+                    triggered => {
+                        Tooltip.text = !root.ok ? (root.status + "（点击跳转到出错位置）") : root.status;
+                        Tooltip.x = min(status-area.absolute-position.x, root.width - 360px);
+                        Tooltip.y = status-area.absolute-position.y + status-area.height + 6px;
+                    }
                 }
-                // 行数常驻这里：编辑区那条「JSON · N 行」标题行整条撤了
-                //（见 EditorPane 的 compact），省下的 24px 归正文。
-                Text {
-                    text: root.input-state.doc-lines + " 行";
-                    font-family: Theme.font-mono;
-                    font-size: 11px;
-                    color: Theme.faint;
-                    vertical-alignment: center;
+
+                changed hovering => {
+                    if (!status-area.hovering && Tooltip.text != "") {
+                        Tooltip.text = "";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 5px;
+                    Text {
+                        text: root.ok ? Icons.circle-check : Icons.circle-alert;
+                        font-family: Theme.font-icons;
+                        font-size: 13px;
+                        color: root.ok ? Theme.ok : Theme.danger;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.status;
+                        font-family: Theme.font-ui;
+                        font-size: 12px;
+                        color: root.ok ? Theme.muted : Theme.danger;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    // 行数常驻这里：编辑区那条「JSON · N 行」标题行整条撤了
+                    //（见 EditorPane 的 compact），省下的 24px 归正文。
+                    Text {
+                        text: root.input-state.doc-lines + " 行";
+                        font-family: Theme.font-mono;
+                        font-size: 11px;
+                        color: Theme.faint;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -4342,6 +4376,7 @@ export component AppWindow inherits Window {
     callback json-indent-changed(int);
     callback json-clear();
     callback json-copy();
+    callback json-jump-error();
     callback json-undo();
     callback json-redo();
     callback json-find-edited(string);
@@ -5124,6 +5159,7 @@ export component AppWindow inherits Window {
                         indent-changed(i) => { root.json-indent-changed(i); }
                         clear-input => { root.json-clear(); }
                         copy-output => { root.json-copy(); }
+                        jump-error => { root.json-jump-error(); }
                         do-undo => { root.json-undo(); }
                         do-redo => { root.json-redo(); }
                         find-edited(f) => { root.json-find-edited(f); }

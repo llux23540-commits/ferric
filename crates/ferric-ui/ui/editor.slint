@@ -48,7 +48,9 @@ export component CodeEditor inherits Rectangle {
     // 语法着色：每个可见行一份片段序列。空 = 不着色，走纯文本那条。
     in property <[TokenLine]> tokens;
     in property <bool> highlighted: false;
-
+    in property <bool> wrap: false;
+    in property <int> max-line-len: 0;
+    in property <int> scroll-col: 0;
     callback viewport-changed(int, int);
     /// 宽字符（中文等）的步进 / 窄字宽。字体一变就报一次，Rust 侧据此算横向坐标。
     callback wide-ratio-changed(float);
@@ -152,7 +154,7 @@ export component CodeEditor inherits Rectangle {
             y: root.pad + i * root.line-height;
             width: root.gutter-w - root.fold-w - root.sign-w - 8px;
             height: root.line-height;
-            text: no;
+            text: no > 0 ? no : (root.wrap ? "↳" : "");
             font-family: Theme.font-mono;
             font-size: root.font-size - 1px;
             color: i == root.cursor-line ? Theme.fg-soft : Theme.faint;
@@ -373,6 +375,41 @@ export component CodeEditor inherits Rectangle {
             moved => {
                 if (self.pressed) {
                     root.scroll-to-line(round((self.mouse-y / parent.height) * root.total-lines));
+                }
+            }
+        }
+    }
+
+    // ===== 横向滚动条 =====
+    if !root.wrap && root.max-line-len > root.visible-cols: Rectangle {
+        x: root.gutter-w;
+        y: parent.height - 8px;
+        width: parent.width - root.gutter-w - 12px;
+        height: 6px;
+        background: transparent;
+
+        property <float> frac-visible: min(1.0, root.visible-cols / max(1, root.max-line-len));
+        property <float> frac-pos: min(1.0 - self.frac-visible, max(0.0, root.scroll-col / max(1, root.max-line-len)));
+        Rectangle {
+            y: 0px;
+            height: 6px;
+            x: parent.width * parent.frac-pos;
+            width: max(24px, parent.width * parent.frac-visible);
+            border-radius: 3px;
+            background: hbar.has-hover || hbar.pressed ? Theme.muted : Theme.border-2;
+        }
+
+        hbar := TouchArea {
+            moved => {
+                if (self.pressed) {
+                    let target-col = round((self.mouse-x / parent.width) * root.max-line-len);
+                    root.scrolled(0, target-col - root.scroll-col);
+                }
+            }
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    let target-col = round((self.mouse-x / parent.width) * root.max-line-len);
+                    root.scrolled(0, target-col - root.scroll-col);
                 }
             }
         }
