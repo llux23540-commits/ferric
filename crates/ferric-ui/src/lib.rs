@@ -10,6 +10,7 @@ mod github;
 mod icons;
 pub mod launch;
 mod market;
+mod mem;
 mod mock;
 mod net;
 mod plugin_host;
@@ -20,7 +21,6 @@ mod tool;
 mod updater;
 mod views;
 mod widgets;
-mod mem;
 
 pub use app::{FerricApp, APP_NAME};
 pub use fonts::install_fonts;

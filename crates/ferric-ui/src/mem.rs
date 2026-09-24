@@ -103,11 +103,7 @@ impl MemoryRecorder {
     /// `app_persist` / `app_drafts` 由调用方从 `FerricApp` 拿；`fonts` 与 OS
     /// 字段由本模块自行获取。这条签名刻意避免直接依赖 `FerricApp`——让
     /// `mem` 模块单测不需要 eframe 上下文。
-    pub fn tick(
-        &mut self,
-        app_persist_bytes: u64,
-        app_drafts_bytes: u64,
-    ) -> TickOutcome {
+    pub fn tick(&mut self, app_persist_bytes: u64, app_drafts_bytes: u64) -> TickOutcome {
         let now = self.elapsed_ms_so_far();
         if now < self.next_tick_ms {
             return TickOutcome::Pending;

@@ -239,8 +239,11 @@ impl Tool for UuidTool {
             if widgets::primary_icon(ui, &theme, icons::REFRESH_CW, "刷新").clicked() {
                 self.regen();
             }
-            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制").clicked() {
-                let out = self.output.clone();
+            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制")
+                .on_hover_text("复制选中内容（未选中时复制全部，保留原文）")
+                .clicked()
+            {
+                let out = widgets::selected_or_all(ui.ctx(), "uuid-out", &self.output);
                 shared.copy(ui.ctx(), out);
             }
             ui.add_space(6.0);

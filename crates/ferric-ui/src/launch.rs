@@ -716,14 +716,16 @@ mod tests {
         assert!(p.contains(&Backend::Auto));
     }
 
-    /// 上次成功的后端优先复用（自动模式下省掉重新枚举）。
+    /// 没锁定且没失败时软渲染优先（全新/升级默认），随后是上次成功的后端。
     #[test]
     fn last_good_is_preferred_in_auto_mode() {
         let cfg = LaunchCfg {
             last_good: Some(Backend::Dx12),
             ..Default::default()
         };
-        assert_eq!(plan(&cfg).first(), Some(&Backend::Dx12));
+        let p = plan(&cfg);
+        assert_eq!(p.first(), Some(&Backend::Soft));
+        assert_eq!(p.get(1), Some(&Backend::Dx12));
     }
 
     /// 没能跑起来的那个降到最后 —— 这是「崩了还能再进去」的关键。

@@ -414,8 +414,13 @@ impl Tool for PluginTool {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制输出").clicked() {
-                shared.copy(ui.ctx(), self.output.clone());
+            let out_id = format!("{}-out", self.st_id);
+            if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制输出")
+                .on_hover_text("复制选中内容（未选中时复制全部，保留原文）")
+                .clicked()
+            {
+                let out = widgets::selected_or_all(ui.ctx(), &out_id, &self.output);
+                shared.copy(ui.ctx(), out);
             }
             ui.add_space(6.0);
             widgets::status_line(ui, &theme, self.ok, &self.status);

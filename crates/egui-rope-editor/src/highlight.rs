@@ -28,7 +28,10 @@ impl Highlighter for PlainHighlighter {
         colors: &Colors,
         line_height: Option<f32>,
     ) -> LayoutJob {
-        let mut job = LayoutJob::default();
+        let mut job = LayoutJob {
+            keep_trailing_whitespace: true,
+            ..Default::default()
+        };
         job.append(
             text,
             0.0,
@@ -60,7 +63,10 @@ impl Highlighter for JsonHighlighter {
         } else {
             Color32::from_rgb(0xb0, 0x6f, 0x00)
         };
-        let mut job = LayoutJob::default();
+        let mut job = LayoutJob {
+            keep_trailing_whitespace: true,
+            ..Default::default()
+        };
         let mk = |c: Color32| TextFormat {
             font_id: font_id.clone(),
             color: c,

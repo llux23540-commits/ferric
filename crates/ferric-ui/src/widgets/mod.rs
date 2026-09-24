@@ -269,6 +269,13 @@ fn icon_flat(ui: &mut Ui, theme: &Theme, ch: char, w: f32) -> Response {
 
 /// 等宽多行编辑框：包在主题化容器里（code_bg 底 + 极浅细边 + 圆角），
 /// 内部 TextEdit 透明，避免"白色空白"。`editable=false` 时内容仅供选中复制。
+#[derive(Clone, Copy)]
+struct AreaSelection {
+    start: usize,
+    end: usize,
+    text_len: usize,
+}
+
 pub fn code_area(
     ui: &mut Ui,
     id: &str,
@@ -279,56 +286,157 @@ pub fn code_area(
     let fill = ui.visuals().extreme_bg_color;
     let border = ui.visuals().window_stroke; // border_2，很浅
     let accent = ui.visuals().hyperlink_color; // = accent
-    let out = Frame::NONE
-        .fill(fill)
-        .stroke(border)
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::symmetric(16, 12)) // 舒适内边距，文字不贴边
-        .show(ui, |ui| {
-            if editable {
-                ui.add(
-                    TextEdit::multiline(text)
-                        .id_salt(id)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(rows)
-                        .code_editor()
-                        .frame(egui::Frame::NONE),
-                )
-            } else {
-                // 只读：以不可变缓冲呈现——仍可选中/复制，键入不会改动内容。
-                let mut ro = text.as_str();
-                ui.add(
-                    TextEdit::multiline(&mut ro)
-                        .id_salt(id)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(rows)
-                        .code_editor()
-                        .frame(egui::Frame::NONE),
-                )
+    let edit_id = egui::Id::new(id);
+    let sel_id = edit_id.with("__sel");
+
+    // 在 TextEdit 运行前加载状态：若有活跃选区，先记忆下来，避免失焦时被 egui 的 TextEdit 内部折叠为单点
+    if let Some(state) = egui::text_edit::TextEditState::load(ui.ctx(), edit_id) {
+        if let Some(range) = state.cursor.char_range() {
+            if !range.is_empty() {
+                let [min, max] = range.sorted_cursors();
+                if min.index < max.index {
+                    ui.data_mut(|d| {
+                        d.insert_temp(
+                            sel_id,
+                            AreaSelection {
+                                start: min.index.0,
+                                end: max.index.0,
+                                text_len: text.chars().count(),
+                            },
+                        );
+                    });
+                }
             }
-        });
-    // 首次聚焦时不要全选默认文本：把光标折叠到文本末尾。
-    if out.inner.gained_focus() {
-        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), out.inner.id) {
-            let end = egui::text::CCursor::new(text.chars().count());
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(end)));
-            state.store(ui.ctx(), out.inner.id);
+        }
+    }
+
+    let (response, frame_rect) = {
+        let out = Frame::NONE
+            .fill(fill)
+            .stroke(border)
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(16, 12)) // 舒适内边距，文字不贴边
+            .show(ui, |ui| {
+                let edit = if editable {
+                    TextEdit::multiline(text)
+                        .id(edit_id)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(rows)
+                        .code_editor()
+                        .frame(egui::Frame::NONE)
+                        .show(ui)
+                } else {
+                    // 只读：以不可变缓冲呈现——仍可选中/复制，键入不会改动内容。
+                    let mut ro = text.as_str();
+                    TextEdit::multiline(&mut ro)
+                        .id(edit_id)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(rows)
+                        .code_editor()
+                        .frame(egui::Frame::NONE)
+                        .show(ui)
+                };
+                (edit.response.response, edit.galley, edit.galley_pos)
+            });
+        let frame_rect = out.response.rect;
+        let (resp, galley, galley_pos) = out.inner;
+        // 点击编辑框外边距（如左侧/顶部内边距或底端留白）：将焦点与光标引导至正确行与列
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
+                if frame_rect.contains(ptr) && !resp.rect.contains(ptr) {
+                    ui.memory_mut(|m| m.request_focus(edit_id));
+                    if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), edit_id)
+                    {
+                        let cursor_at = galley.cursor_from_pos(ptr - galley_pos);
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(cursor_at)));
+                        state.store(ui.ctx(), edit_id);
+                    }
+                }
+            }
+        }
+        (resp, frame_rect)
+    };
+
+    // 在 TextEdit 运行后：若处于聚焦交互状态，更新当前最新选区；若有焦点且发生单击（或按了 Esc），清除旧记忆
+    if response.has_focus() {
+        if let Some(state) = egui::text_edit::TextEditState::load(ui.ctx(), edit_id) {
+            if let Some(range) = state.cursor.char_range() {
+                if !range.is_empty() {
+                    let [min, max] = range.sorted_cursors();
+                    if min.index < max.index {
+                        ui.data_mut(|d| {
+                            d.insert_temp(
+                                sel_id,
+                                AreaSelection {
+                                    start: min.index.0,
+                                    end: max.index.0,
+                                    text_len: text.chars().count(),
+                                },
+                            );
+                        });
+                    }
+                } else if response.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    ui.data_mut(|d| d.remove::<AreaSelection>(sel_id));
+                }
+            }
         }
     }
     // 聚焦时显示主色环
-    if out.inner.has_focus() {
+    if response.has_focus() {
         ui.painter().rect_stroke(
-            out.response.rect,
+            frame_rect,
             CornerRadius::same(10),
             Stroke::new(1.5_f32, accent),
             egui::StrokeKind::Inside,
         );
     }
-    out.inner
+    response
 }
 
+/// 若指定 ID 的编辑框/展示区中有选中文本，则返回该选区；否则返回 None。
+pub fn selected_text(ctx: &egui::Context, id: &str, text: &str) -> Option<String> {
+    let edit_id = egui::Id::new(id);
+    let sel_id = edit_id.with("__sel");
+
+    // 1. 优先检查当前 TextEditState 中是否有活跃选区（有焦点时直接命中）
+    if let Some(state) = egui::text_edit::TextEditState::load(ctx, edit_id) {
+        if let Some(range) = state.cursor.char_range() {
+            if !range.is_empty() {
+                let [min, max] = range.sorted_cursors();
+                if min.index < max.index {
+                    let s = range.slice_str(text);
+                    if !s.is_empty() {
+                        return Some(s.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. 检查失焦记忆选区（点击工具条复制按钮导致编辑框失焦时，依然能正确获取点击前选中的内容）
+    if let Some(saved) = ctx.data(|d| d.get_temp::<AreaSelection>(sel_id)) {
+        let total_chars = text.chars().count();
+        if saved.text_len == total_chars && saved.start < saved.end && saved.end <= total_chars {
+            let range = egui::text::CCursorRange::two(
+                egui::text::CCursor::new(saved.start),
+                egui::text::CCursor::new(saved.end),
+            );
+            let s = range.slice_str(text);
+            if !s.is_empty() {
+                return Some(s.to_owned());
+            }
+        }
+    }
+
+    None
+}
+
+/// 优先获取指定 ID 编辑框/展示区中的选中文本；若无选区则返回全文。
+pub fn selected_or_all(ctx: &egui::Context, id: &str, text: &str) -> String {
+    selected_text(ctx, id, text).unwrap_or_else(|| text.to_owned())
+}
 /// code_bg 卡片面板：标题头（左标题 + 右侧自定义内容）+ 任意主体内容，
 /// SQL 格式化 / JSON→YAML / 对比等页面的统一版式。
 pub fn panel(
@@ -448,14 +556,19 @@ pub fn code_area_diff(
             // 行底色占位：先占一个绘制槽，TextEdit 画完后回填，保证底色在文字下方。
             let bg_idx = ui.painter().add(egui::Shape::Noop);
 
+            let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
             let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
                 let font_id = egui::TextStyle::Monospace.resolve(ui.style());
                 let plain = egui::TextFormat {
                     font_id: font_id.clone(),
                     color: fg,
+                    line_height: Some(row_h),
                     ..Default::default()
                 };
-                let mut job = egui::text::LayoutJob::default();
+                let mut job = egui::text::LayoutJob {
+                    keep_trailing_whitespace: true,
+                    ..Default::default()
+                };
                 job.wrap.max_width = wrap_width;
                 let lines: Vec<&str> = buf.as_str().split('\n').collect();
                 let mut line_start = 0usize; // 行首在全文中的 byte 偏移
@@ -666,21 +779,29 @@ pub fn code_area_diff(
                     edit.galley_pos.y + row_y - (inner.top() - 12.0)
                 });
 
-            (edit.response.response, current_match_y)
+            (
+                edit.response.response,
+                edit.galley,
+                edit.galley_pos,
+                current_match_y,
+            )
         });
-    let (response, current_match_y) = out.inner;
-    // 键盘（Tab）聚焦时不要全选默认文本：把光标折叠到文本末尾。
-    //
-    // ⚠️ 只对**非点击**的聚焦做：点击聚焦时 TextEdit 已把光标放在点击处，
-    // 再折到文末会触发「滚动到光标」——视图瞬移到文本末尾，左右同步又把另一栏
-    // 也带走，用户看到的就是「一点击位置就飞了，选择根本没法用」。
-    if response.gained_focus() && !response.is_pointer_button_down_on() {
-        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), response.id) {
-            let end = egui::text::CCursor::new(text.chars().count());
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(end)));
-            state.store(ui.ctx(), response.id);
+    let (response, galley, galley_pos, current_match_y) = out.inner;
+    let frame_rect = out.response.rect;
+    // 点击编辑框外边距（如左侧/顶部内边距或底端留白）：将焦点与光标引导至正确行与列
+    if ui.input(|i| i.pointer.primary_clicked()) {
+        if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
+            if frame_rect.contains(ptr) && !response.rect.contains(ptr) {
+                ui.memory_mut(|m| m.request_focus(response.id));
+                if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), response.id)
+                {
+                    let cursor_at = galley.cursor_from_pos(ptr - galley_pos);
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(cursor_at)));
+                    state.store(ui.ctx(), response.id);
+                }
+            }
         }
     }
     // 聚焦时显示主色环
@@ -698,8 +819,14 @@ pub fn code_area_diff(
     }
 }
 
-/// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。返回复制点击。
-pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usize) -> bool {
+/// 代码盒子：field 底 + 右上角复制按钮覆盖，展示只读文本。若点击复制按钮，返回待复制文本（优先选区，无选区则全文）。
+pub fn code_box(
+    ui: &mut Ui,
+    theme: &Theme,
+    id: &str,
+    text: &str,
+    min_rows: usize,
+) -> Option<String> {
     let mut copied = false;
     Frame::NONE
         .fill(theme.code_bg)
@@ -728,12 +855,17 @@ pub fn code_box(ui: &mut Ui, theme: &Theme, id: &str, text: &str, min_rows: usiz
                         .stroke(Stroke::new(1.0_f32, theme.border))
                         .corner_radius(CornerRadius::same(8)),
                 )
+                .on_hover_text("复制选中内容（未选中时复制全部，保留原文）")
                 .clicked()
             {
                 copied = true;
             }
         });
-    copied
+    if copied {
+        Some(selected_or_all(ui.ctx(), id, text))
+    } else {
+        None
+    }
 }
 
 // ---- 状态行 ----
@@ -936,5 +1068,367 @@ mod tests {
             "点击面板顶部后光标跑到了后半段（{cur:?} / 共 {total}）—— \
              多半又被折叠到文末，视图会瞬移"
         );
+    }
+
+    #[test]
+    fn clicking_margin_in_code_area_focuses_and_keeps_cursor_at_line_start() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::light().apply(&ctx);
+        let mut text: String = (0..200).map(|i| format!("line {i} content\n")).collect();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        // 点击左侧内边距（例如 x = 6.0，属于 16px 边距内，位于第二行高度附近）
+        let at = egui::pos2(6.0, 30.0);
+        let area_id = "code-area-margin-probe";
+
+        let frames: Vec<Vec<egui::Event>> = vec![
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+        ];
+        for events in frames {
+            let _ = ctx.run_ui_cleared(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_area(ui, area_id, &mut text, true, 20);
+                },
+            );
+        }
+        let state = egui::text_edit::TextEditState::load(&ctx, egui::Id::new(area_id))
+            .expect("点击边距后应有编辑状态");
+        let cur = state
+            .cursor
+            .char_range()
+            .expect("点击边距后应有光标")
+            .primary
+            .index;
+        // 落在前两行内，而不是跳到文末
+        assert!(cur.0 < 50, "点击边距后光标未落在行首附近：{cur:?}");
+    }
+
+    #[test]
+    fn clicking_margin_in_diff_pane_focuses_and_keeps_cursor_at_line_start() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::light().apply(&ctx);
+        let mut text: String = (0..200).map(|i| format!("line {i} content\n")).collect();
+        let styles: Vec<DiffLineStyle> = Vec::new();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        // 点击左侧内边距（例如 x = 6.0，属于 16px 边距内）
+        let at = egui::pos2(6.0, 30.0);
+
+        let frames: Vec<Vec<egui::Event>> = vec![
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+        ];
+        let mut edit_id = None;
+        for events in frames {
+            let _ = ctx.run_ui_cleared(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let out = code_area_diff(
+                        ui,
+                        &crate::theme::Theme::light(),
+                        "diff-margin-probe",
+                        &mut text,
+                        20,
+                        &styles,
+                        &[],
+                        380.0,
+                        None,
+                    );
+                    edit_id = Some(out.response.id);
+                },
+            );
+        }
+        let state = egui::text_edit::TextEditState::load(&ctx, edit_id.unwrap())
+            .expect("点击边距后应有编辑状态");
+        let cur = state
+            .cursor
+            .char_range()
+            .expect("点击边距后应有光标")
+            .primary
+            .index;
+        assert!(cur.0 < 50, "点击边距后光标未落在行首附近：{cur:?}");
+    }
+
+    #[test]
+    fn diff_pane_keeps_trailing_whitespace_cursor_position() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::light().apply(&ctx);
+        let mut text = "hello   \nworld".to_owned();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        let area_id = "diff-ws-probe";
+        let styles: Vec<DiffLineStyle> = Vec::new();
+
+        let mut edit_id = None;
+        let _ = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let out = code_area_diff(
+                    ui,
+                    &crate::theme::Theme::light(),
+                    area_id,
+                    &mut text,
+                    4,
+                    &styles,
+                    &[],
+                    100.0,
+                    None,
+                );
+                edit_id = Some(out.response.id);
+            },
+        );
+
+        // 取得 galley：对比 index 5 ("hello" 结尾) 与 index 8 ("hello   " 结尾) 的光标位置
+        // 若 trailing whitespace 被裁剪，两者 x 会完全重合，导致光标偏移
+        let _ = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+                let plain = egui::TextFormat {
+                    font_id: font_id.clone(),
+                    color: egui::Color32::WHITE,
+                    line_height: Some(row_h),
+                    ..Default::default()
+                };
+                let mut job = egui::text::LayoutJob {
+                    keep_trailing_whitespace: true,
+                    ..Default::default()
+                };
+                job.append("hello   \nworld", 0.0, plain);
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let p5 = galley.pos_from_cursor(egui::text::CCursor::new(5));
+                let p8 = galley.pos_from_cursor(egui::text::CCursor::new(8));
+                assert!(
+                    p8.min.x > p5.min.x + 10.0,
+                    "尾随空格被裁剪：index 5 x={:?}, index 8 x={:?}",
+                    p5.min.x,
+                    p8.min.x
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clicking_code_area_keeps_cursor_at_click_not_end() {
+        let ctx = egui::Context::default();
+        crate::theme::Theme::light().apply(&ctx);
+        let mut text: String = (0..200).map(|i| format!("line {i} content\n")).collect();
+        let total = text.chars().count();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        let at = egui::pos2(120.0, 40.0);
+        let area_id = "code-area-click-probe";
+
+        let frames: Vec<Vec<egui::Event>> = vec![
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+        ];
+        for events in frames {
+            let _ = ctx.run_ui_cleared(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    code_area(ui, area_id, &mut text, true, 20);
+                },
+            );
+        }
+        let state = egui::text_edit::TextEditState::load(&ctx, egui::Id::new(area_id))
+            .expect("点击后应有编辑状态");
+        let cur = state
+            .cursor
+            .char_range()
+            .expect("点击后应有光标")
+            .primary
+            .index;
+        assert!(
+            cur.0 < total / 2,
+            "点击面板顶部后光标跑到了后半段（{cur:?} / 共 {total}）—— 多半又被折叠到文末"
+        );
+    }
+
+    #[test]
+    fn selected_or_all_prefers_selection_and_preserves_unicode() {
+        let ctx = egui::Context::default();
+        let mut text = "SELECT 字段名, '中文𐐀\\n\\u4e2d' FROM 表名;".to_owned();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
+        let area_id = "test-sql-area";
+
+        // 1. 无选区时，selected_text 返回 None，selected_or_all 返回全文
+        ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                code_area(ui, area_id, &mut text, true, 8);
+            },
+        );
+        assert_eq!(selected_text(&ctx, area_id, &text), None);
+        assert_eq!(selected_or_all(&ctx, area_id, &text), text);
+
+        // 2. 设置选区为 "字段名, '中文𐐀\\n\\u4e2d'"（包含多字节中文与特殊字符）
+        let start_char = "SELECT ".chars().count();
+        let selected_part = "字段名, '中文𐐀\\n\\u4e2d'";
+        let end_char = start_char + selected_part.chars().count();
+        let mut state = egui::text_edit::TextEditState::load(&ctx, egui::Id::new(area_id))
+            .expect("存在编辑状态");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(start_char),
+                egui::text::CCursor::new(end_char),
+            )));
+        state.store(&ctx, egui::Id::new(area_id));
+
+        assert_eq!(
+            selected_text(&ctx, area_id, &text),
+            Some(selected_part.to_owned())
+        );
+        assert_eq!(
+            selected_or_all(&ctx, area_id, &text),
+            selected_part.to_owned()
+        );
+    }
+
+    #[test]
+    fn code_box_copies_selected_text_when_selection_exists() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let theme = Theme::dark();
+        let text = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\n-----END PUBLIC KEY-----";
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        let box_id = "test-rsa-box";
+
+        // 渲染一次建立状态
+        ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                let _ = code_box(ui, &theme, box_id, text, 6);
+            },
+        );
+
+        // 选取 base64 内容部分
+        let base64_part = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A";
+        let start_char = "-----BEGIN PUBLIC KEY-----\n".chars().count();
+        let end_char = start_char + base64_part.chars().count();
+        let mut state =
+            egui::text_edit::TextEditState::load(&ctx, egui::Id::new(box_id)).expect("存在状态");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(start_char),
+                egui::text::CCursor::new(end_char),
+            )));
+        state.store(&ctx, egui::Id::new(box_id));
+
+        // 未点击复制按钮时返回 None
+        let mut res = None;
+        ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                res = code_box(ui, &theme, box_id, text, 6);
+            },
+        );
+        assert_eq!(res, None);
+
+        // 点击复制按钮（右上角，位于内容区右边缘减去内边距与按钮偏移）
+        let btn_pos = egui::pos2(540.0, 15.0);
+        ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(0.1),
+                events: vec![
+                    egui::Event::PointerMoved(btn_pos),
+                    egui::Event::PointerButton {
+                        pos: btn_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                res = code_box(ui, &theme, box_id, text, 6);
+            },
+        );
+        ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(0.2),
+                events: vec![egui::Event::PointerButton {
+                    pos: btn_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                res = code_box(ui, &theme, box_id, text, 6);
+            },
+        );
+        assert_eq!(res, Some(base64_part.to_owned()));
     }
 }

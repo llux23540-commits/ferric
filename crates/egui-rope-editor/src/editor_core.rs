@@ -54,6 +54,8 @@ struct EditInfo {
 #[derive(Clone, Default)]
 struct EditorState {
     cursor: TextCursorState,
+    /// Fingerprint of the source after the last frame, including pending edits.
+    document: Option<u64>,
     /// 已折叠区间：以「开括号 `{`/`[` 的源字符下标」为键（编辑时随文本平移）。
     folded: HashSet<usize>,
     /// 结构性编辑后待重映射的源光标（下一帧重建后换算回可见坐标）。
@@ -67,6 +69,19 @@ struct EditorState {
     want_focus: bool,
     /// 调试：最近事件日志（临时）。
     dbg: Vec<String>,
+}
+
+impl EditorState {
+    fn sync_document(&mut self, document: u64) {
+        if self.document.is_some_and(|previous| previous != document) {
+            // A host replacement is not the edit described by pending/edit.
+            self.cursor = TextCursorState::default();
+            self.pending = None;
+            self.ime = None;
+            self.edit = None;
+        }
+        self.document = Some(document);
+    }
 }
 
 /// Ctrl+F 搜索条状态。与 [`EditorState`] 分开存：搜索是叠加在编辑器上的视图物件，
@@ -160,16 +175,8 @@ impl LayoutKey {
         ppp: f32,
     ) -> Self {
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut h);
-        let text = h.finish();
-
-        // 折叠集是无序集合：逐元素异或，与遍历顺序无关。
-        let folded = folded.iter().fold(0u64, |acc, br| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            br.hash(&mut h);
-            acc ^ h.finish()
-        });
+        let text = hash_text(text);
+        let folded = hash_folds(folded);
 
         // 字号 / 行距 / 字重都进哈希：它们既改高亮段的 line_height，也改字形宽度，
         // 任何一项变了整块 galley 都要重排。
@@ -186,6 +193,51 @@ impl LayoutKey {
             ppp: ppp.to_bits(),
         }
     }
+}
+
+fn hash_text(text: &ropey::Rope) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+fn hash_folds(folded: &HashSet<usize>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    // Fold order is irrelevant to the visible/source mapping.
+    folded.iter().fold(0, |acc, br| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        br.hash(&mut h);
+        acc ^ h.finish()
+    })
+}
+
+pub fn selected_text(ctx: &egui::Context, id: egui::Id, text: &ropey::Rope) -> Option<String> {
+    ctx.data_mut(|d| {
+        if text.len_chars() > VIRTUALIZE_CHARS {
+            let layout = d.get_temp::<std::sync::Arc<VirtualLayout>>(id.with("__vlayout"))?;
+            let state = &d.get_temp_mut_or_default::<VirtualState>(id).ed;
+            if state.pending.is_some()
+                || state.document != Some(layout.key.text)
+                || hash_text(text) != layout.key.text
+                || hash_folds(&state.folded) != layout.key.folded
+            {
+                return None;
+            }
+            selection_src(text, &layout.segs, layout.n, &state.cursor.char_range()?)
+        } else {
+            let layout = d.get_temp::<std::sync::Arc<Layout>>(id.with("__layout"))?;
+            let state = d.get_temp_mut_or_default::<EditorState>(id);
+            if state.pending.is_some()
+                || state.document != Some(layout.key.text)
+                || hash_text(text) != layout.key.text
+                || hash_folds(&state.folded) != layout.key.folded
+            {
+                return None;
+            }
+            selection_src(text, &layout.segs, layout.n, &state.cursor.char_range()?)
+        }
+    })
 }
 
 /// 搜索条（停靠行）占用的高度：32px 内容 + 分隔线与间距。
@@ -495,6 +547,8 @@ fn code_editor_inner(
                 theme.dark,
                 ui.ctx().pixels_per_point(),
             );
+            state.sync_document(key.text);
+            state.edit = None;
             let cached = ui
                 .data(|d| d.get_temp::<std::sync::Arc<Layout>>(lay_id))
                 .filter(|l| l.key == key);
@@ -522,6 +576,7 @@ fn code_editor_inner(
                     // JSON 里的长 token（base64 / URL / 长字符串）中间没有空格，
                     // 只按词断等于不断
                     job.wrap.break_anywhere = wrap;
+                    job.keep_trailing_whitespace = true;
                     let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
 
                     let l = std::sync::Arc::new(Layout {
@@ -1074,6 +1129,9 @@ fn code_editor_inner(
             resp
         });
 
+    if state.edit.is_some() {
+        state.document = Some(hash_text(text));
+    }
     ui.data_mut(|d| d.insert_temp(id, state));
     ui.data_mut(|d| d.insert_temp(sid, search));
     out.inner
@@ -1197,9 +1255,7 @@ fn apply_edit(
     // 1. char 数组：make_mut 后 splice。未折叠时 chars 与 vis_chars 共享同一份
     //    Arc，make_mut 会自动 copy-on-write（只写这一份，旧份由 vis_chars 继续持有）。
     let mut chars = old.chars.clone();
-    let ins: String = text
-        .slice(text.char_to_byte(e.lo)..text.char_to_byte(e.lo + e.added))
-        .to_string();
+    let ins = text.slice(e.lo..e.lo + e.added);
     {
         let chars_mut = std::sync::Arc::make_mut(&mut chars);
         chars_mut.reserve(e.added.saturating_sub(e.hi - e.lo));
@@ -1465,6 +1521,7 @@ fn code_editor_virtualized(
         theme.dark,
         ui.ctx().pixels_per_point(),
     );
+    st.ed.sync_document(key.text);
     // 增量：本帧的编辑（若有）只作用于上一帧的 char 级结构，无需全量重建。
     let edit = st.ed.edit.take();
     let old = ui.data(|d| d.get_temp::<std::sync::Arc<VirtualLayout>>(lay_id));
@@ -1518,6 +1575,7 @@ fn code_editor_virtualized(
         let mut job = highlighter.highlight(&line, &font_id, theme, Some(row_h));
         job.wrap.max_width = f32::INFINITY;
         job.wrap.break_anywhere = false;
+        job.keep_trailing_whitespace = true;
         galleys.push(ui.ctx().fonts_mut(|f| f.layout_job(job)));
     }
 
@@ -1702,6 +1760,15 @@ fn code_editor_virtualized(
                     if let Some(s) = selection_src(text, segs, n, &vrange) {
                         if !s.is_empty() {
                             ui.ctx().copy_text(s);
+                        }
+                    }
+                }
+                Event::Cut => {
+                    if let Some(s) = selection_src(text, segs, n, &vrange) {
+                        ui.ctx().copy_text(s);
+                        if edit_replace(text, segs, n, &mut st.ed, &vrange, "") {
+                            ui.ctx().request_repaint();
+                            break 'ev;
                         }
                     }
                 }
@@ -1999,6 +2066,9 @@ fn code_editor_virtualized(
         }
     }
 
+    if st.ed.edit.is_some() {
+        st.ed.document = Some(hash_text(text));
+    }
     ui.data_mut(|d| d.insert_temp(id, st));
     resp
 }
@@ -2516,15 +2586,20 @@ fn selection_src(
     n: usize,
     vrange: &CCursorRange,
 ) -> Option<String> {
+    let vis_len = segs.last().map_or(0, |seg| seg.vis_start + seg.len);
+    if n != text.len_chars()
+        || vrange.primary.index.0 > vis_len
+        || vrange.secondary.index.0 > vis_len
+    {
+        return None;
+    }
     let (p, _) = map_vis(segs, vrange.primary.index.0, n);
     let (s, _) = map_vis(segs, vrange.secondary.index.0, n);
     let (lo, hi) = (p.min(s), p.max(s));
-    if hi <= lo {
-        return Some(String::new());
+    if hi <= lo || hi > n {
+        return None;
     }
-    let b_lo = text.char_to_byte(lo);
-    let b_hi = text.char_to_byte(hi);
-    Some(text.slice(b_lo..b_hi).to_string())
+    Some(text.slice(lo..hi).to_string())
 }
 
 // ============================ 搜索 / 快速选值 ============================
@@ -2693,67 +2768,189 @@ fn draw_arrow(painter: &egui::Painter, hit: Rect, folded: bool, color: Color32) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodeEditor, Colors};
+    use crate::CodeEditor;
 
-    fn drive(text: &mut ropey::Rope, wrap: bool, per_frame: Vec<Vec<egui::Event>>) {
-        let ctx = egui::Context::default();
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0));
-        let click_at = egui::pos2(400.0, 20.0);
-        let btn = |pressed: bool| egui::Event::PointerButton {
-            pos: click_at,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
+    fn clipboard_frame(
+        ctx: &egui::Context,
+        text: &mut ropey::Rope,
+        events: Vec<Event>,
+    ) -> (egui::Id, Vec<String>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 400.0))),
+            events,
+            ..Default::default()
         };
-        let mut frames = vec![
-            vec![egui::Event::PointerMoved(click_at)],
-            vec![btn(true)],
-            vec![btn(false)],
-        ];
-        frames.extend(per_frame);
-        for (i, events) in frames.into_iter().enumerate() {
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                time: Some(i as f64 * 0.05),
-                events,
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| {
-                CodeEditor::new("test-editor")
+        let mut id = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            id = Some(
+                CodeEditor::new("clipboard-editor")
                     .height(300.0)
-                    .wrap(wrap)
-                    .colors(Colors::dark())
-                    .show(ui, text);
-            });
-            // 单测不接 GPU，字体纹理 delta 无法消费，drop 前 clear 掉。
-            out.textures_delta.clear();
+                    .highlighter(&crate::PlainHighlighter)
+                    .show(ui, text)
+                    .id,
+            );
+        });
+        out.textures_delta.clear();
+        let copied = out
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                egui::output::OutputCommand::CopyText(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        (id.unwrap(), copied)
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
         }
     }
 
-    /// 小文件走全文路径，编辑落点正确。
-    #[test]
-    fn edits_small_text() {
-        let mut buf = ropey::Rope::from_str("{\n  \"a\": 1\n}");
-        drive(
-            &mut buf,
-            true,
-            vec![vec![egui::Event::Text("X".to_owned())]],
-        );
-        assert!(buf.to_string().contains('X'), "编辑应生效：{}", buf);
+    fn source_with_size(prefix: &str, virtualized: bool) -> String {
+        if virtualized {
+            format!("{prefix}\n{}", "x".repeat(VIRTUALIZE_CHARS + 1))
+        } else {
+            format!("{prefix}\n后缀")
+        }
     }
 
-    /// 大文件走虚拟化路径，单行超长文本不 OOM、编辑生效。
     #[test]
-    fn edits_huge_single_line() {
-        let s = "1234567890".repeat(60_000);
-        let mut buf = ropey::Rope::from_str(&s);
-        assert!(buf.len_chars() > VIRTUALIZE_CHARS);
-        drive(
-            &mut buf,
-            false,
-            vec![vec![egui::Event::Text("X".to_owned())]],
+    fn clipboard_round_trip_preserves_source_in_both_renderers() {
+        let prefix = "中𐐀e\u{301} \\u4e2d\\n\\\\\\\" \t";
+        for virtualized in [false, true] {
+            let source = source_with_size(prefix, virtualized);
+            let mut text = ropey::Rope::from_str(&source);
+            let ctx = egui::Context::default();
+            let (id, _) = clipboard_frame(&ctx, &mut text, vec![]);
+            ctx.memory_mut(|m| m.request_focus(id));
+            let (_, copied) = clipboard_frame(
+                &ctx,
+                &mut text,
+                vec![key(Key::A, Modifiers::COMMAND), Event::Copy],
+            );
+            assert_eq!(copied, vec![source.clone()]);
+            assert_eq!(crate::selected_text(&ctx, id, &text), Some(source.clone()));
+
+            // Select only the first line, then cut exactly those source bytes.
+            let (_, copied) = clipboard_frame(
+                &ctx,
+                &mut text,
+                vec![
+                    key(
+                        if virtualized { Key::Home } else { Key::ArrowUp },
+                        Modifiers::COMMAND,
+                    ),
+                    key(Key::End, Modifiers::SHIFT),
+                    Event::Cut,
+                ],
+            );
+            assert_eq!(copied, vec![prefix.to_owned()]);
+            assert_eq!(text.to_string(), source[prefix.len()..]);
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+
+            clipboard_frame(&ctx, &mut text, vec![]);
+            clipboard_frame(&ctx, &mut text, vec![Event::Paste(prefix.to_owned())]);
+            assert_eq!(text.to_string(), source);
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+            // Rebuild the edited layout before copying; this exercises Unicode
+            // insertion into the virtual renderer's incremental source mapping.
+            clipboard_frame(&ctx, &mut text, vec![]);
+            let (_, copied) = clipboard_frame(
+                &ctx,
+                &mut text,
+                vec![key(Key::A, Modifiers::COMMAND), Event::Copy],
+            );
+            assert_eq!(copied, vec![source]);
+        }
+    }
+
+    #[test]
+    fn toolbar_selection_survives_focus_loss_but_not_replacement() {
+        for virtualized in [false, true] {
+            let source = source_with_size("中𐐀e\u{301}\\u4e2d", virtualized);
+            let mut text = ropey::Rope::from_str(&source);
+            let ctx = egui::Context::default();
+            let (id, _) = clipboard_frame(&ctx, &mut text, vec![]);
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+            ctx.memory_mut(|m| m.request_focus(id));
+            clipboard_frame(&ctx, &mut text, vec![key(Key::A, Modifiers::COMMAND)]);
+            ctx.memory_mut(|m| m.surrender_focus(id));
+            clipboard_frame(&ctx, &mut text, vec![]);
+            assert!(!ctx.memory(|m| m.has_focus(id)));
+            assert_eq!(crate::selected_text(&ctx, id, &text), Some(source));
+
+            // Same character and byte lengths must not make a stale selection valid.
+            text.remove(0..1);
+            text.insert(0, "文");
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+            clipboard_frame(&ctx, &mut text, vec![]);
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+            ctx.memory_mut(|m| m.request_focus(id));
+            clipboard_frame(&ctx, &mut text, vec![key(Key::A, Modifiers::COMMAND)]);
+            assert_eq!(
+                crate::selected_text(&ctx, id, &text),
+                Some(text.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn folded_selection_copies_and_cuts_original_source() {
+        for virtualized in [false, true] {
+            let source = source_with_size("{\n  \"中\": \"𐐀e\u{301}\\\\\\u4e2d\"\n}", virtualized);
+            let mut text = ropey::Rope::from_str(&source);
+            let ctx = egui::Context::default();
+            let (id, _) = clipboard_frame(&ctx, &mut text, vec![]);
+            // Establish the fold, then exercise the real public/event paths.
+            ctx.data_mut(|d| {
+                if virtualized {
+                    let mut state = d.get_temp::<VirtualState>(id).unwrap();
+                    state.ed.folded.insert(0);
+                    d.insert_temp(id, state);
+                } else {
+                    let mut state = d.get_temp::<EditorState>(id).unwrap();
+                    state.folded.insert(0);
+                    d.insert_temp(id, state);
+                }
+            });
+            clipboard_frame(&ctx, &mut text, vec![]);
+            ctx.memory_mut(|m| m.request_focus(id));
+            let (_, copied) = clipboard_frame(
+                &ctx,
+                &mut text,
+                vec![key(Key::A, Modifiers::COMMAND), Event::Copy],
+            );
+            assert_eq!(copied, vec![source.clone()]);
+            assert_eq!(crate::selected_text(&ctx, id, &text), Some(source.clone()));
+            let (_, copied) = clipboard_frame(&ctx, &mut text, vec![Event::Cut]);
+            assert_eq!(copied, vec![source]);
+            assert_eq!(text.to_string(), "");
+            assert_eq!(crate::selected_text(&ctx, id, &text), None);
+        }
+    }
+
+    #[test]
+    fn selection_uses_character_indices_for_nonzero_unicode_offsets() {
+        let source = "前中𐐀e\u{301}\\u4e2d\\n\\\\末";
+        let text = ropey::Rope::from_str(source);
+        let n = text.len_chars();
+        let segs = [Seg {
+            vis_start: 0,
+            len: n,
+            kind: SegKind::Real(0),
+        }];
+        let range = CCursorRange::two(CCursor::new(n - 1), CCursor::new(1));
+        assert_eq!(
+            selection_src(&text, &segs, n, &range),
+            Some("中𐐀e\u{301}\\u4e2d\\n\\\\".to_owned())
         );
-        assert!(buf.to_string().contains('X'), "单行超长文本下编辑也应生效");
     }
 
     /// 折叠区间扫描：忽略字符串内的括号，数出直接子节点数。

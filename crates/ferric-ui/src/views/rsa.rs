@@ -126,16 +126,16 @@ impl Tool for RsaTool {
         // 公钥
         widgets::field_label(ui, &theme, "公钥");
         ui.add_space(6.0);
-        if widgets::code_box(ui, &theme, "rsa-pub", &self.pub_pem, 6) {
-            shared.copy(ui.ctx(), self.pub_pem.clone());
+        if let Some(text) = widgets::code_box(ui, &theme, "rsa-pub", &self.pub_pem, 6) {
+            shared.copy(ui.ctx(), text);
         }
         ui.add_space(14.0);
 
         // 私钥
         widgets::field_label(ui, &theme, "私钥");
         ui.add_space(6.0);
-        if widgets::code_box(ui, &theme, "rsa-priv", &self.priv_pem, 10) {
-            shared.copy(ui.ctx(), self.priv_pem.clone());
+        if let Some(text) = widgets::code_box(ui, &theme, "rsa-priv", &self.priv_pem, 10) {
+            shared.copy(ui.ctx(), text);
         }
     }
 

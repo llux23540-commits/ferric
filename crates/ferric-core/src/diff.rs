@@ -63,7 +63,7 @@ pub fn line_diff(left: &str, right: &str) -> (Vec<DiffLine>, DiffStats) {
                 })
                 .collect();
             if let Some(last) = segs.last_mut() {
-                let t = last.text.trim_end_matches('\n');
+                let t = last.text.trim_end_matches(['\r', '\n']);
                 if t.len() != last.text.len() {
                     last.text = t.to_string();
                 }

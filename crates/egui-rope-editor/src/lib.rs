@@ -96,3 +96,12 @@ impl<'a> CodeEditor<'a> {
 pub fn code_editor(ui: &mut Ui, id_source: &str, text: &mut Rope) -> Response {
     CodeEditor::new(id_source).show(ui, text)
 }
+
+/// Return the nonempty selection as original source text, including folded contents.
+///
+/// `id` must be the [`Response::id`] returned by [`CodeEditor::show`]. Focus is not
+/// required, so this can be used by a copy toolbar button. Returns `None` when no
+/// text is selected or the cached selection no longer matches `text`.
+pub fn selected_text(ctx: &egui::Context, id: egui::Id, text: &Rope) -> Option<String> {
+    editor_core::selected_text(ctx, id, text)
+}

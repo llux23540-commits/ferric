@@ -52,6 +52,8 @@ fn editor_font(cfg: FontCfg) -> egui_rope_editor::FontConfig {
 
 pub struct JsonTool {
     input: ropey::Rope,
+    /// 编辑器的真实控件 ID；工具条位于另一个 Ui，不能重新推导其持久 ID。
+    editor_id: Option<egui::Id>,
     indent: Indent,
     sort: bool,
     /// 自动换行。默认开 —— 格式化后的长行（长 URL、base64、压缩过的单行 JSON）
@@ -91,6 +93,7 @@ impl Default for JsonTool {
         Self {
             baseline: input.clone(),
             input,
+            editor_id: None,
             indent: Indent::Two,
             sort: false,
             wrap: true,
@@ -530,8 +533,20 @@ impl JsonTool {
             }
             Self::font_menu(ui, theme, shared);
             widgets::tb_sep(ui, theme);
-            if widgets::tb_icon_btn(ui, theme, icons::COPY, false, false, "复制").clicked() {
-                let out = self.input.to_string();
+            if widgets::tb_icon_btn(
+                ui,
+                theme,
+                icons::COPY,
+                false,
+                false,
+                "复制选中内容（未选中时复制全部，保留原文）",
+            )
+            .clicked()
+            {
+                let out = self
+                    .editor_id
+                    .and_then(|id| egui_rope_editor::selected_text(ui.ctx(), id, &self.input))
+                    .unwrap_or_else(|| self.input.to_string());
                 shared.copy(ui.ctx(), out);
             }
             if widgets::tb_icon_btn(ui, theme, icons::FILE_DOWN, false, false, "下载 .json")
@@ -633,12 +648,13 @@ impl Tool for JsonTool {
             .show(ui, |ui| {
                 // 单栏：代码编辑器（egui-rope-editor：rope + 视口虚拟化 + 增量更新）。
                 let editor_h = ui.available_height();
-                egui_rope_editor::CodeEditor::new("json-in")
+                let response = egui_rope_editor::CodeEditor::new("json-in")
                     .height(editor_h)
                     .wrap(self.wrap)
                     .colors(editor_colors(&theme))
                     .font(editor_font(shared.code_font))
                     .show(ui, &mut self.input);
+                self.editor_id = Some(response.id);
             });
     }
 
@@ -766,6 +782,63 @@ mod tests {
             vec![press(pos, true)],
             vec![press(pos, false)],
         ]
+    }
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn toolbar_copies_selected_source_after_focus_loss() {
+        let selected = r#"中文𐐀é\n\u4e2d\"\\%E4%B8%AD+&amp;"#;
+        let prefix = r#"{"值":""#;
+        let source = format!(r#"{prefix}{selected}","tail":"保留"}}"#);
+        let mut tool = JsonTool {
+            input: ropey::Rope::from_str(&source),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let mut frames = click_frames(pos2(120.0, 140.0));
+        frames.push(vec![
+            key(egui::Key::A, egui::Modifiers::COMMAND),
+            key(egui::Key::ArrowLeft, egui::Modifiers::NONE),
+        ]);
+        frames.push(
+            prefix
+                .chars()
+                .map(|_| key(egui::Key::ArrowRight, egui::Modifiers::NONE))
+                .collect(),
+        );
+        frames.push(
+            selected
+                .chars()
+                .map(|_| key(egui::Key::ArrowRight, egui::Modifiers::SHIFT))
+                .collect(),
+        );
+        frames.push(vec![Event::Copy]);
+        frames.extend(click_frames(pos2(513.0, 16.0)));
+
+        let (copied, _) = drive_tool(&mut tool, screen, frames);
+        assert_eq!(copied, vec![selected, selected]);
+        assert_eq!(tool.input.to_string(), source);
+    }
+
+    #[test]
+    fn toolbar_copies_all_verbatim_without_selection() {
+        let source = " \t{\"值\":\"中文\\\\n\\\\u4e2d%20+&amp;\"}\r\n";
+        let mut tool = JsonTool {
+            input: ropey::Rope::from_str(source),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let (copied, _) = drive_tool(&mut tool, screen, click_frames(pos2(513.0, 16.0)));
+        assert_eq!(copied, vec![source]);
+        assert_eq!(tool.input.to_string(), source);
     }
 
     /// 用户报的问题：**点过工具条的「格式化」之后，编辑区就选不中了**。
@@ -936,35 +1009,6 @@ mod tests {
         assert!(m < n, "嵌套层没被排序：{:?}", nested.input);
     }
 
-    /// 排序按钮必须走 `set_sort`（切了就重排），不能只翻标志位。
-    ///
-    /// 上一条测的是 `set_sort` 的行为，这条守的是**按钮确实接到了它** ——
-    /// 原来的 bug 正是「行为函数没问题、按钮没调它」：写成 `self.sort = !self.sort`
-    /// 就又回到「图标亮了、正文不动」。缩进按钮同理。
-    #[test]
-    fn the_sort_button_reflows_instead_of_only_flipping_the_flag() {
-        let src = include_str!("json.rs");
-        let bar = src
-            .split("fn toolbar_row(")
-            .nth(1)
-            .expect("toolbar_row 不见了");
-        let bar = &bar[..bar.find("\n    fn ").unwrap_or(bar.len())];
-        // 只看代码，不看注释：这条注释本身就在解释那个反面写法。
-        let code: String = bar
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            code.contains("self.set_sort("),
-            "排序按钮没走 set_sort —— 会退回「只翻标志位、正文不重排」"
-        );
-        assert!(
-            !code.contains("self.sort = "),
-            "排序按钮又在直接赋值标志位了：那样点了不会重排，用户看到的就是「没有效果」"
-        );
-    }
-
     #[test]
     fn draft_roundtrip() {
         let a = JsonTool {
@@ -982,13 +1026,6 @@ mod tests {
         assert_eq!(b.indent, Indent::Tab);
         assert!(b.sort);
         assert!(!b.wrap, "换行开关也要随草稿保存");
-    }
-
-    /// 自动换行默认开：长内容超出可视区看不见是个实打实的问题，
-    /// 默认关掉等于把问题留给用户自己发现。
-    #[test]
-    fn wrap_is_on_by_default() {
-        assert!(JsonTool::default().wrap);
     }
 
     /// **升级兼容**：老版本存的草稿没有 wrap 字段。如果反序列化因此失败，

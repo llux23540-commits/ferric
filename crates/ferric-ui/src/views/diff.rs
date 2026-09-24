@@ -116,6 +116,7 @@ impl DiffTool {
             let path = file.path();
             match std::fs::read_to_string(path) {
                 Ok(text) => {
+                    let text = text.replace("\r\n", "\n");
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -161,7 +162,9 @@ fn pick_file() -> Result<Option<(String, String)>, String> {
     else {
         return Ok(None);
     };
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let text = std::fs::read_to_string(&path)
+        .map(|s| s.replace("\r\n", "\n"))
+        .map_err(|e| e.to_string())?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

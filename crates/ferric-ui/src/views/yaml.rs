@@ -81,8 +81,12 @@ impl Tool for YamlTool {
                     self.input.clear();
                     self.convert();
                 }
-                if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制 YAML").clicked() {
-                    shared.copy(ui.ctx(), self.output.clone());
+                if widgets::subtle_button(ui, &theme, Some(icons::COPY), "复制 YAML")
+                    .on_hover_text("复制选中内容（未选中时复制全部，保留原文）")
+                    .clicked()
+                {
+                    let out = widgets::selected_or_all(ui.ctx(), "yaml-out", &self.output);
+                    shared.copy(ui.ctx(), out);
                 }
             });
         });
@@ -194,5 +198,179 @@ impl Tool for YamlTool {
             self.input = d.input;
             self.convert();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RunUiExt;
+
+    #[test]
+    fn yaml_copy_button_prefers_selection_or_copies_all() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let mut shared = Shared::new(crate::theme::Theme::dark());
+        let mut tool = YamlTool {
+            input: "{\"name\":\"测试𐐀\",\"items\":[1,2,3]}".to_owned(),
+            ..Default::default()
+        };
+        tool.convert();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+
+        let mut copy_btn_pos = None;
+        let _ = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+        for shape in &ctx
+            .run_ui_cleared(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    tool.ui(ui, &mut shared);
+                },
+            )
+            .shapes
+        {
+            if let egui::Shape::Text(text) = &shape.shape {
+                if text.galley.text().contains("复制 YAML") {
+                    copy_btn_pos = Some(text.pos + text.galley.size() / 2.0);
+                }
+            }
+        }
+        let copy_btn_pos = copy_btn_pos.expect("找到复制 YAML 按钮");
+
+        // 1. 无选区：点击复制按钮复制全文
+        let out = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(copy_btn_pos),
+                    egui::Event::PointerButton {
+                        pos: copy_btn_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+                time: Some(0.1),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+        let out2 = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerButton {
+                    pos: copy_btn_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                time: Some(0.2),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+        let mut full_copied = None;
+        for cmd in out
+            .platform_output
+            .commands
+            .into_iter()
+            .chain(out2.platform_output.commands)
+        {
+            if let egui::output::OutputCommand::CopyText(s) = cmd {
+                full_copied = Some(s);
+            }
+        }
+        assert_eq!(full_copied, Some(tool.output.clone()));
+
+        // 2. 在 yaml-out 中选取包含中文的键值对 "name: 测试𐐀"
+        let selected_part = "name: 测试𐐀";
+        let start_byte = tool.output.find(selected_part).unwrap();
+        let start_char = tool.output[..start_byte].chars().count();
+        let end_char = start_char + selected_part.chars().count();
+
+        let mut state = egui::text_edit::TextEditState::load(&ctx, egui::Id::new("yaml-out"))
+            .expect("存在 yaml-out 状态");
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(start_char),
+                egui::text::CCursor::new(end_char),
+            )));
+        state.store(&ctx, egui::Id::new("yaml-out"));
+
+        // 渲染一帧建立选区记忆
+        let _ = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+
+        // 再次点击复制按钮：应复制选区 "name: 测试𐐀"
+        let out = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(copy_btn_pos),
+                    egui::Event::PointerButton {
+                        pos: copy_btn_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+                time: Some(0.3),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+        let out2 = ctx.run_ui_cleared(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerButton {
+                    pos: copy_btn_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                time: Some(0.4),
+                ..Default::default()
+            },
+            |ui| {
+                tool.ui(ui, &mut shared);
+            },
+        );
+        let mut part_copied = None;
+        for cmd in out
+            .platform_output
+            .commands
+            .into_iter()
+            .chain(out2.platform_output.commands)
+        {
+            if let egui::output::OutputCommand::CopyText(s) = cmd {
+                part_copied = Some(s);
+            }
+        }
+        assert_eq!(part_copied, Some(selected_part.to_owned()));
     }
 }
