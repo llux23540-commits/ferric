@@ -13,13 +13,7 @@ path = "src/main.rs"
 ferric-ui = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
-# eframe 只用 wgpu 的默认后端集，未开 Windows 的 DX12 后端。
-# 显式启用 dx12（feature 合并到 eframe 共用的 wgpu 构建），
-# 否则在无 Vulkan 驱动 / GL 仅 1.1 的环境（如 QEMU 虚拟机的 WARP 软件渲染）下找不到适配器。
-# 版本必须与 eframe 0.36 所用 wgpu（30.x）一致。
-wgpu = { version = "30", default-features = false, features = ["dx12"] }
-# 软渲染后端：纯 CPU 光栅化 egui 的图形，softbuffer 把位图贴到窗口，
-# 完全绕过 GPU API —— 虚拟机 / 无 GPU 环境下进程内存从 ~650MB 降到 ~150MB。
+# CPU 渲染：OpenGL 打不开时的兜底。纯 CPU 光栅化，softbuffer 把位图贴到窗口，不碰任何显卡接口。
 ferric-soft-render = { workspace = true }
 
 [build-dependencies]

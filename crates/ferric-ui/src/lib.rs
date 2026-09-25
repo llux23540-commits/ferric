@@ -10,7 +10,6 @@ mod github;
 mod icons;
 pub mod launch;
 mod market;
-mod mem;
 mod mock;
 mod net;
 mod plugin_host;

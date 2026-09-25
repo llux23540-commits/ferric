@@ -144,7 +144,7 @@ impl ApplicationHandler<UserEvent> for SoftApp {
             .map(|a| Box::new(SharedStorage(a.clone())) as Box<dyn eframe::Storage>);
 
         let app = match self.app_creator.take().expect("只创建一次")(
-            &self.egui_ctx.as_ref().unwrap(),
+            self.egui_ctx.as_ref().unwrap(),
             storage,
         ) {
             Ok(app) => app,
@@ -245,7 +245,7 @@ impl SoftApp {
             | (clear_color[2] * 255.0).round() as u32;
 
         let mut frame = eframe::Frame::_new_kittest();
-        let full_output = {
+        let mut full_output = {
             let app = self.app.as_mut().expect("应用已建");
             ctx.run_ui(raw_input, |ui| {
                 app.ui(ui, &mut frame);
@@ -282,7 +282,10 @@ impl SoftApp {
 
         // tessellate 成三角形 → CPU 光栅化 → 贴窗。
         let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-        {
+        // 纹理增量由光栅化器按引用应用；应用完（或这一帧失败）都要清空 ——
+        // epaint 在 debug 构建下会对「未处理就丢弃」的增量直接 panic。
+        let mut textures_delta = std::mem::take(&mut full_output.textures_delta);
+        let presented = (|| {
             let mut buffer = surface
                 .buffer_mut()
                 .map_err(|e| format!("获取软渲染缓冲失败：{e}"))?;
@@ -298,13 +301,15 @@ impl SoftApp {
                 width_px as usize,
                 height_px as usize,
                 &primitives,
-                &full_output.textures_delta,
+                &textures_delta,
                 full_output.pixels_per_point,
             );
             buffer
                 .present()
-                .map_err(|e| format!("呈现软渲染帧失败：{e}"))?;
-        }
+                .map_err(|e| format!("呈现软渲染帧失败：{e}"))
+        })();
+        textures_delta.clear();
+        presented?;
 
         Ok(close_requested)
     }

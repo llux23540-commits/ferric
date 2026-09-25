@@ -23,7 +23,7 @@ egui-rope-editor = { path = "crates/egui-rope-editor" }
 ferric-soft-render = { path = "crates/ferric-soft-render" }
 
 # GUI
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow", "persistence", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["glow", "persistence", "wayland", "x11"] }
 egui = "0.36"
 egui_json_tree = "0.17"
 

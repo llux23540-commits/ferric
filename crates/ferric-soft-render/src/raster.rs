@@ -69,6 +69,7 @@ impl Renderer {
         self.free_textures(textures_delta);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_mesh(
         &self,
         fb: &mut [[u8; 4]],
@@ -89,7 +90,7 @@ impl Renderer {
             })
             .collect();
 
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let a = verts[tri[0] as usize];
             let b = verts[tri[1] as usize];
             let c = verts[tri[2] as usize];
@@ -130,6 +131,7 @@ fn orient2d(a: Vec2, b: Vec2, c: Vec2) -> f32 {
     (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rasterize_tri(
     fb: &mut [[u8; 4]],
     width: usize,
@@ -226,7 +228,7 @@ fn egui_blend_u8(src: [u8; 4], mut dst: [u8; 4]) -> [u8; 4] {
         let res = (res8 >> 8) & 0x00FF00FF00FF00FF;
         let res = (res | (res >> 8)) & 0x0000FFFF0000FFFF;
         let res = res | (res >> 16);
-        dst = u32::to_le_bytes((res & 0x00000000FFFF_FFFF) as u32);
+        dst = u32::to_le_bytes((res & 0x0000_0000_FFFF_FFFF) as u32);
     }
 
     [

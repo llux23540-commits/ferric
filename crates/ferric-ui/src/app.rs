@@ -256,16 +256,12 @@ pub struct FerricApp {
     last_frame_at: Option<std::time::Instant>,
     /// 设置窗当前选中的分类（不持久化：每次打开都从「外观」进）。
     settings_tab: SettingsTab,
-    /// 本次运行实际拿到的图形适配器描述（「后端 · 显卡名」），设置页展示。
-    /// None = 非 wgpu 渲染路径（理论上不会发生，防御性处理）。
+    /// 本次运行实际使用的渲染方式，设置页与启动日志展示。
     gpu_desc: Option<String>,
-    /// 实际适配器是 CPU 软件光栅化（WARP / llvmpipe）—— 虚拟机与无驱动环境。
-    /// 设置页据此提示「画面糊 / 卡的根源在这，换后端或开 3D 加速」。
+    /// 开启省资源模式（关动画/阴影/羽化 + 帧率封顶）。两种渲染方式都开：
+    /// 这是个小工具，省 CPU 比那几十毫秒的渐变更重要。
     gpu_software: bool,
-    /// 本次只拿到软件渲染，自愈已为下次启动排好这个后端 —— 顶栏据此显示
-    /// 一条「立即重启试试」的横幅。`None` = 没这回事（绝大多数机器）。
-    slow_render_retry: Option<crate::launch::Backend>,
-    /// 用户在设置里改了渲染后端、尚未重启生效 —— 设置页据此给出「立即重启」。
+    /// 用户在设置里改了渲染方式、尚未重启生效 —— 设置页据此给出「立即重启」。
     pending_restart: Option<crate::launch::Backend>,
     /// 用户点了「立即重启」，等本帧画完由外壳执行（见 `do_restart`）。
     want_restart: bool,
@@ -274,8 +270,6 @@ pub struct FerricApp {
     /// 软渲染后端注入的持久化存储。eframe 路径为 `None`（走 `frame.storage_mut()`），
     /// 软渲染路径由 [`FerricApp::new_soft`] 注入，[`FerricApp::save_soft`] 用它落盘。
     soft_storage: Option<Box<dyn eframe::Storage>>,
-    /// 30 秒内存采样的状态机：None = 不在工作。详见 `crate::mem`。
-    mem_recorder: Option<crate::mem::MemoryRecorder>,
 }
 
 /// 连续画满这么多帧就认定「这次启动是好的」，把当前渲染后端记成 last_good。
@@ -365,32 +359,8 @@ impl FerricApp {
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
 
-        // 记下真实拿到的适配器：设置页「渲染后端」区块要展示「现在实际用的是什么」。
-        // 用户切后端做 A/B 对比时，没有这行就无从确认切换是否真的生效。
-        //
-        // `FERRIC_SOFT_RENDER=1` 强制按软件渲染处理。虚拟机 / 远程桌面的虚拟 GPU
-        // 常被 wgpu 报告成 IntegratedGpu（device_type != Cpu），于是整套软渲染自适应
-        // （关阴影/动画/羽化 + 帧率封顶）一个都不生效 —— 悬停闪动、拖动拖影多半源于此。
-        // 无 GPU 环境下设这个变量，等同于明确告诉应用「别把虚拟 GPU 当真 GPU」。
-        let force_soft = std::env::var_os("FERRIC_SOFT_RENDER").is_some();
-        let (gpu_desc, gpu_software) = match cc.wgpu_render_state.as_ref() {
-            Some(rs) => {
-                let info = rs.adapter.get_info();
-                let backend = match info.backend {
-                    eframe::wgpu::Backend::Dx12 => "DX12",
-                    eframe::wgpu::Backend::Vulkan => "Vulkan",
-                    eframe::wgpu::Backend::Gl => "OpenGL",
-                    eframe::wgpu::Backend::Metal => "Metal",
-                    _ => "其他",
-                };
-                let sw = info.device_type == eframe::wgpu::DeviceType::Cpu || force_soft;
-                (Some(format!("{backend} · {}", info.name)), sw)
-            }
-            // glow 渲染器没有 wgpu 的适配器信息。它主要是给虚拟机 / 无 GPU 环境
-            // 作兑底的，默认按软件渲染处理（关动画/阴影/羽化 + 帧率封顶）。
-            None => (Some("Glow（OpenGL）".to_owned()), true),
-        };
-
+        let gpu_desc = Some("OpenGL".to_owned());
+        let gpu_software = true;
         Self::build(&cc.egui_ctx, persist, gpu_desc, gpu_software)
     }
 
@@ -402,7 +372,7 @@ impl FerricApp {
             .as_ref()
             .and_then(|s| eframe::get_value(s.as_ref(), eframe::APP_KEY))
             .unwrap_or_default();
-        let gpu_desc = Some("CPU 软渲染".to_owned());
+        let gpu_desc = Some("CPU 渲染".to_owned());
         let mut slf = Self::build(ctx, persist, gpu_desc, true);
         slf.soft_storage = storage;
         slf
@@ -431,19 +401,6 @@ impl FerricApp {
         };
         let theme = Theme::from_dark(dark);
         theme.apply(ctx);
-
-        // 同一行写进 startup.log：排「画面糊 / 卡」这类问题时，
-        // 「实际用了哪块适配器」是第一个要回答的问题。
-        if let Some(d) = &gpu_desc {
-            crate::launch::log(&format!(
-                "适配器：{d}{}",
-                if gpu_software {
-                    "（软件渲染）"
-                } else {
-                    ""
-                }
-            ));
-        }
 
         // 清掉上次遗留的更新暂存目录 —— 留在盘上的旧安装包本身就是个可被替换的靶子
         crate::updater::cleanup_stale();
@@ -533,12 +490,10 @@ impl FerricApp {
             settings_tab: SettingsTab::default(),
             gpu_desc,
             gpu_software,
-            slow_render_retry: None,
             pending_restart: None,
             want_restart: false,
             update_dialog_open: false,
             soft_storage: None,
-            mem_recorder: None,
         }
     }
 
@@ -1039,55 +994,6 @@ impl FerricApp {
 
     // ---------- 内容区 ----------
 
-    /// 「当前只有软件渲染，已为下次启动排好别的后端」横幅。
-    ///
-    /// 为什么是常驻横幅而不是 toast：这条消息**要求用户做一件事**（重启），
-    /// 而 toast 三秒就没了 —— 卡的时候用户正忙着跟界面较劲，很可能压根没看见。
-    /// 也不放进设置窗：能想到去翻设置的人本来就不需要提示。
-    ///
-    /// 只在「还有没试过的后端」时出现。全都试过仍是软件渲染的机器上不显示 ——
-    /// 那种情况重启多少次都一样，横幅就成了赶不走的噪音（原因写在设置页里）。
-    fn slow_render_banner(&mut self, ui: &mut egui::Ui) {
-        let Some(next) = self.slow_render_retry else {
-            return;
-        };
-        let theme = self.shared.theme;
-        Panel::top("slow-render-banner")
-            .exact_size(38.0)
-            // 纯色底 + 无阴影：这条横幅恰恰只在软件渲染时出现，
-            // 而半透明/阴影正是那种环境下「一片糊」的来源。
-            .frame(
-                Frame::NONE
-                    .fill(theme.code_bg)
-                    .inner_margin(Margin::symmetric(16, 0)),
-            )
-            .show_separator_line(true)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(icons::text(icons::INFO, 13.0, theme.danger));
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "当前没有 GPU 加速（{}），界面会明显发卡 · 已为下次启动排好「{}」",
-                            self.gpu_desc.as_deref().unwrap_or("软件渲染"),
-                            next.label()
-                        ))
-                        .size(12.0)
-                        .color(theme.danger),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::subtle_button(ui, &theme, None, "以后再说").clicked() {
-                            self.slow_render_retry = None;
-                        }
-                        ui.add_space(6.0);
-                        if widgets::primary_button(ui, &theme, "立即重启").clicked() {
-                            self.restart_now();
-                        }
-                    });
-                });
-            });
-    }
-
     /// 请求重启。**只置位**，真正的动作在 [`FerricApp::do_restart`] ——
     /// 那里才拿得到 `eframe::Frame`，而重启前必须先把草稿落盘（理由见彼处）。
     /// 与插件热加载同一套「置位、由外壳在帧末统一处理」的写法。
@@ -1154,7 +1060,6 @@ impl FerricApp {
         match crate::launch::relaunch() {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(e) => {
-                self.slow_render_retry = None;
                 self.shared
                     .toast(format!("自动重启失败，请手动重开 Ferric · {e}"));
             }
@@ -1638,32 +1543,6 @@ impl FerricApp {
                 );
             }
         });
-        // 内存采样：按需触发 30 秒录制，写到 `memory.log`（同数据目录）。
-        // 默认不工作——点按钮才采，采完落盘 + toast。详见 `crate::mem`。
-        ui.horizontal(|ui| {
-            match self.mem_recorder.as_ref() {
-                None => {
-                    if widgets::ghost_button(ui, &theme, "记录 30 秒内存").clicked() {
-                        self.start_mem_recording();
-                    }
-                }
-                Some(rec) => {
-                    // 录制中：按钮变占位文本，进度提示在右。
-                    ui.add_enabled_ui(false, |ui| {
-                        let _ = widgets::ghost_button(ui, &theme, "记录 30 秒内存");
-                    });
-                    ui.label(
-                        RichText::new(format!(
-                            "正在记录… {} / {} 秒",
-                            rec.elapsed_secs(),
-                            rec.duration_secs()
-                        ))
-                        .size(11.5)
-                        .color(theme.muted),
-                    );
-                }
-            }
-        });
     }
 
     /// 设置窗的**应用内回退形态**：软件渲染环境专用（见 [`Self::settings_ui`]）。
@@ -1797,52 +1676,36 @@ impl FerricApp {
         *font = font.clamped();
     }
 
-    /// 设置弹窗里的「渲染后端」区块。
+    /// 设置弹窗里的「渲染方式」区块：OpenGL / CPU 渲染二选一，重启后生效。
     ///
-    /// 为什么要把这个开关暴露给用户：同一份二进制在不同机器上走的图形路径完全不同 ——
-    /// 有独显的走 DX12/Vulkan，虚拟机与精简系统会退化到 WARP 软件光栅化，
-    /// 远程桌面又是另一套。**画面撕裂 / 闪屏 / 白框**这类毛病高度依赖驱动实现，
-    /// 换一个后端往往立刻就好，而这件事没有任何自动判据可言（画面对不对只有人眼知道）。
-    /// 所以：给一个开关、记住选择、下次启动直接用。
-    ///
-    /// 改动写进 launch.json（eframe 状态目录里），由 `main` 在建窗之前读 ——
-    /// 因此必须重启才生效，文案要说清楚。
+    /// 改动写进 launch.json，由 `main` 在建窗之前读，所以要配一个「立即重启」。
     fn renderer_settings_ui(&mut self, ui: &mut egui::Ui) {
         use crate::launch::Backend;
         let theme = self.shared.theme;
+        const ALL: [Backend; 2] = [Backend::Glow, Backend::Soft];
 
         ui.horizontal(|ui| {
-            widgets::field_label(ui, &theme, "渲染后端");
+            widgets::field_label(ui, &theme, "渲染方式");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // seg 在 right_to_left 里会倒着排：按自然顺序定义，绘制前反转，
                 // 拿到下标再反转回来（与「界面缩放」那一处同一套写法）。
-                let names: Vec<&str> = Backend::ALL.iter().rev().map(|b| b.label()).collect();
-                let nat = Backend::ALL
-                    .iter()
-                    .position(|b| *b == self.launch_cfg.backend)
-                    .unwrap_or(0);
-                if let Some(n) = widgets::seg(ui, &theme, &names, Backend::ALL.len() - 1 - nat) {
-                    let want = Backend::ALL[Backend::ALL.len() - 1 - n];
-                    if want != self.launch_cfg.backend {
-                        // 经 set_backend 走一遍磁盘：内存里这份是启动时读的，
-                        // 之后 mark_running 改过盘上的内容，直接存回去会把它抹掉。
-                        self.launch_cfg = crate::launch::set_backend(want);
+                let names: Vec<&str> = ALL.iter().rev().map(|b| b.label()).collect();
+                let cur = self.launch_cfg.backend();
+                let nat = ALL.iter().position(|b| *b == cur).unwrap_or(0);
+                if let Some(n) = widgets::seg(ui, &theme, &names, ALL.len() - 1 - nat) {
+                    let want = ALL[ALL.len() - 1 - n];
+                    if want != cur {
+                        self.launch_cfg = crate::launch::set_soft(want == Backend::Soft);
                         self.pending_restart = Some(want);
                     }
                 }
             });
         });
         ui.label(
-            RichText::new("画面闪烁 / 撕裂 / 卡顿 / 打不开时换一个试试；「自动」由系统挑")
+            RichText::new("默认 OpenGL；打不开时自动改用 CPU 渲染。画面异常时可手动切换")
                 .size(11.0)
                 .color(theme.faint),
         );
-        // 「重启后生效」必须配一个能当场重启的按钮。
-        //
-        // 后端只能在建窗**之前**决定（WGPU_BACKEND 是构造 NativeOptions 时读的），
-        // 换后端天然要重启 —— 但只丢一句「重启后生效」等于把活儿推回给用户：
-        // 他得自己关掉窗口再去开始菜单点开。而换后端本来就是个**试**的动作，
-        // 试一次要手动重启一次，几乎没人会真的试完四个。
         if let Some(want) = self.pending_restart {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1856,66 +1719,16 @@ impl FerricApp {
                 }
             });
         }
-        // 当前**实际**在用的适配器：切后端做 A/B 对比时，这行是「切换真的生效了」
-        // 的唯一证据 —— 锁定 Vulkan 但机器上没有，兜底照样会落回别的后端。
         if let Some(desc) = &self.gpu_desc {
             ui.label(
-                RichText::new(format!("当前实际使用：{desc}"))
+                RichText::new(format!("当前使用：{desc}"))
                     .family(FontFamily::Monospace)
                     .size(10.5)
                     .color(theme.fg_soft),
             );
-            if self.gpu_software {
-                ui.label(
-                    RichText::new(
-                        "正在软件渲染（无 GPU 加速）—— 画面发糊、拖动卡顿多半源于此：\
-                         虚拟机请开启 3D 加速，物理机请安装显卡驱动；也可切换后端对比",
-                    )
-                    .size(10.5)
-                    .color(theme.danger),
-                );
-                // 无 GPU 时每帧开销 ∝ 窗口像素数，这是唯一真正见效的软件侧手段。
-                ui.label(
-                    RichText::new(
-                        "提速最有效的一招：把窗口拖小。软件渲染下开销与窗口像素数成正比，\
-                         边长减半 ≈ 快 4 倍，尺寸会被记住。",
-                    )
-                    .size(10.5)
-                    .color(theme.muted),
-                );
-            }
         }
-        // Alt+Tab 卡顿缓解（仅 Windows/DX12 有意义）：把此前只能用 PowerShell 环境
-        // 变量做的 A/B（WGPU_DX12_USE_FRAME_LATENCY_WAITABLE_OBJECT=none）收进设置，
-        // 两次点击 + 重启即可对比。
-        if cfg!(target_os = "windows") {
-            ui.add_space(4.0);
-            let on = self.launch_cfg.dx12_no_latency_wait;
-            if widgets::pill_toggle(ui, &theme, on, "Alt+Tab 卡顿缓解（DX12，重启后生效）")
-            {
-                self.launch_cfg = crate::launch::set_dx12_no_latency_wait(!on);
-                self.shared.toast(if !on {
-                    "已开启：重启 Ferric 后生效；若无改善可再关掉对比"
-                } else {
-                    "已关闭：重启 Ferric 后恢复默认呈现节奏"
-                });
-            }
-        }
-        if let Some(b) = self.launch_cfg.last_good {
-            ui.label(
-                RichText::new(format!("上次成功启动使用：{}", b.label()))
-                    .family(FontFamily::Monospace)
-                    .size(10.5)
-                    .color(theme.faint),
-            );
-        }
-        // 上次启动失败的原因要给用户看见 —— 这是他判断该换成哪个的唯一依据。
         if let Some(e) = &self.launch_cfg.last_error {
-            ui.label(
-                RichText::new(format!("上次启动失败：{e}"))
-                    .size(10.5)
-                    .color(theme.danger),
-            );
+            ui.label(RichText::new(e).size(10.5).color(theme.danger));
         }
     }
 
@@ -2706,33 +2519,13 @@ impl eframe::App for FerricApp {
         if self.frames < STABLE_FRAMES {
             self.frames += 1;
             if self.frames == STABLE_FRAMES {
-                let out = crate::launch::mark_running(self.gpu_software);
-                if out != crate::launch::Outcome::default() {
-                    self.launch_cfg = crate::launch::load();
-                }
-                // 锁定的后端被证明不可用时会被改回「自动」—— 必须让用户知道，
-                // 否则设置里显示的选项和实际行为对不上。
-                if let Some(b) = out.lock_dropped {
-                    self.shared.toast(format!(
-                        "渲染后端 {} 在本机不可用，已改回「自动」",
-                        b.label()
-                    ));
-                }
-                // 只拿到软件渲染、且还有没试过的后端 —— 自愈已经排好了下一个，
-                // 但它要等重启才生效。用户现在正卡着，得给他一个当场能点的去处，
-                // 而不是让他自己琢磨「要不要重启一下试试」。
-                if let Some(next) = out.will_retry_with {
-                    self.slow_render_retry = Some(next);
-                }
+                crate::launch::mark_running();
                 // 启动诊断：稳定出帧后一次性把可量化的内部状态写到 startup.log。
                 // 「600M+」是观察值，根因在 wgpu runtime / 字体 atlas / 撤销栈 / persistence
                 // 哪一坨要靠这份拆分去对 —— 一行数对得齐，就知道下一刀该砍谁。
                 startup_diag(self);
             }
         }
-        // 30 秒内存采样：每帧轮询，到点落盘并提示用户。
-        // 与 startup_diag 同一个上下文：可以拿到 Persist 的字节视图。
-        self.poll_mem_recorder(ctx);
         self.debug_screenshot(ctx);
         // 跟随系统模式下与操作系统深浅色保持同步（含启动首帧与运行中切换）。
         self.sync_theme(ctx);
@@ -2796,8 +2589,6 @@ impl eframe::App for FerricApp {
                 .show(ui, |ui| {
                     chrome::title_bar_content(ui, &theme);
                 });
-
-            self.slow_render_banner(ui);
 
             let rail_resp = Panel::left("rail")
                 .resizable(true)
@@ -2991,56 +2782,6 @@ fn startup_diag(app: &FerricApp) {
         fmt_bytes(cjk_bytes),
         app.gpu_desc.as_deref().unwrap_or("?"),
     ));
-}
-
-impl FerricApp {
-    /// 用户在「关于」页点"记录 30 秒内存"后启动录制。
-    /// data_dir 拿不到（极冷启动场景）就静默失败——按 mem.rs 的契约，
-    /// 拿不到路径就不开采样，不让按钮变成"点了没反应"。
-    fn start_mem_recording(&mut self) {
-        if self.mem_recorder.is_some() {
-            return; // 录制中重复点不重启，提示在 UI 上显示。
-        }
-        let Some(dir) = crate::launch::data_dir() else {
-            self.shared.toast("无法定位数据目录，录制未开始");
-            return;
-        };
-        let backend = self.launch_cfg.backend.label();
-        self.mem_recorder = Some(crate::mem::MemoryRecorder::start(&dir, backend));
-    }
-
-    /// 30 秒内存采样的轮询钩子：每帧检查 recorder 的到期状态。
-    /// 落到点就把 `memory.log` 写出去、toast 通知用户、清除 recorder。
-    fn poll_mem_recorder(&mut self, _ctx: &egui::Context) {
-        use crate::mem::TickOutcome;
-        // 先取走需要的快照数据，避免与下面 mem_recorder 的可变借用重叠。
-        let (persist_bytes, drafts_bytes) = persist_size_split(&self.persist());
-        let Some(rec) = self.mem_recorder.as_mut() else {
-            return;
-        };
-        match rec.tick(persist_bytes, drafts_bytes) {
-            TickOutcome::Pending | TickOutcome::Sampled(_) => {
-                // 录制中无需重绘提示——UI 上按钮已经显示「正在记录… X / 30」。
-            }
-            TickOutcome::Finished(_) => {
-                // take() 把 recorder 拿掉，避免下一次录制开始前多调一次 finish。
-                if let Some(rec) = self.mem_recorder.take() {
-                    match rec.finish() {
-                        Ok(()) => self.shared.toast("已保存 memory.log（30 秒采样）"),
-                        Err(e) => self.shared.toast(format!("保存 memory.log 失败：{e}")),
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// `(persist 序列化字节, drafts 总字节)`：和 `startup_diag` 同口径，
-/// 抽取出来给 `poll_mem_recorder` 复用，避免 `tick()` 里再写一遍序列化。
-fn persist_size_split(p: &Persist) -> (u64, u64) {
-    let persist_bytes = serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0) as u64;
-    let drafts_bytes = p.drafts.values().map(|v| v.len()).sum::<usize>() as u64;
-    (persist_bytes, drafts_bytes)
 }
 
 /// 把字节数压成对人友好的形式（512 / 1.2K / 4.7M），固定到 1 位小数。
