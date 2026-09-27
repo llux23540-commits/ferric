@@ -1419,6 +1419,7 @@ impl FerricApp {
                 .with_resizable(true),
             |ui, _class| {
                 let ctx = ui.ctx().clone();
+                crate::halfwidth::normalize_typed_input(&ctx);
                 // 关窗按钮 / 系统关闭请求
                 if ctx.input(|i| i.viewport().close_requested()) {
                     open = false;
@@ -2700,6 +2701,8 @@ impl eframe::App for FerricApp {
         let t_frame_start = std::time::Instant::now();
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
+        // 全角字母 / 数字键入归一成半角：必须赶在任何控件读输入之前。
+        crate::halfwidth::normalize_typed_input(ctx);
         self.present_hygiene(ctx, frame);
         // 稳定出帧 = 本次启动成功。把当前渲染后端记成 last_good 并清掉「正在尝试」
         // 标记，否则下次启动会以为上次是崩在启动路上的（见 launch::plan）。

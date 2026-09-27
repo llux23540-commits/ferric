@@ -11,13 +11,13 @@ use egui::{
 /// 标题栏高度。
 ///
 /// 从 46 收到 36：这条栏里只有左端一个应用名和右端三个窗口按钮，中间整段是死区，
-/// 高度越大死区越显眼。36 仍然容得下 24px 的按钮块并留出上下呼吸，
-/// 同时把内容区往上让了 10px。
+/// 高度越大死区越显眼。窗口按钮撑满这 36px 的整条高度。
 pub const TITLE_BAR_HEIGHT: f32 = 36.0;
 
-/// 窗口按钮的视觉块尺寸。**刻意比标题栏矮**：整条撑满的矩形（原先 44×46）
-/// 悬停时是一大块生硬的方色带，而缩成带圆角的小块之后，悬停反馈看着像个按钮。
-const WIN_BTN: (f32, f32) = (28.0, 24.0);
+/// 窗口按钮尺寸：Windows 标准标题栏按钮的样式 —— 46 宽、撑满标题栏高度、直角、
+/// 彼此无缝、关闭键贴死右上角。此前 28×24 的圆角小块悬停时是一根浮在栏中间的红色竖条，
+/// 既不像系统按钮，也让「甩到右上角点关闭」落空。
+const WIN_BTN: (f32, f32) = (46.0, TITLE_BAR_HEIGHT);
 
 const CLOSE_HOVER: Color32 = Color32::from_rgb(0xe5, 0x48, 0x4d);
 
@@ -79,9 +79,7 @@ fn win_btn(ui: &mut Ui, theme: &Theme, glyph: char, danger: bool) -> egui::Respo
     let hovered = resp.hovered();
     if hovered {
         let fill = if danger { CLOSE_HOVER } else { theme.border };
-        // 圆角与侧栏导航项、图标按钮同一族（7~9），别在这条栏里另起一套直角
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(7), fill);
+        ui.painter().rect_filled(rect, 0.0, fill);
     }
     let color = if danger && hovered {
         Color32::WHITE
@@ -130,12 +128,10 @@ pub fn title_bar_content(ui: &mut Ui, theme: &Theme) {
         theme.muted,
     );
 
-    // 右侧窗口控制按钮：成组、贴右边留 6px，彼此 2px —— 三块等距铺开时
-    // 看着像三个孤立的方块，收拢成一组才像窗口控件。
+    // 右侧窗口控制按钮：与系统标题栏一致，三块无缝相连、关闭键贴死右上角。
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
             if win_btn(ui, theme, icons::X, true).clicked() {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
