@@ -76,6 +76,7 @@ pub fn run_soft(options: SoftOptions, app_creator: AppCreator) -> Result<(), Str
         surface: None,
         egui_winit: None,
         renderer: Renderer::new(),
+        viewport_info: egui::ViewportInfo::default(),
         app: None,
     };
 
@@ -94,6 +95,11 @@ struct SoftApp {
     surface: Option<softbuffer::Surface<OwnedDisplayHandle, Arc<Window>>>,
     egui_winit: Option<egui_winit::State>,
     renderer: Renderer,
+    /// 窗口状态（最大化 / 聚焦 / 位置 / 缩放比）。eframe 每帧用
+    /// `egui_winit::update_viewport_info` 填进 `RawInput::viewports`，这里必须照做 ——
+    /// 缺了它 `viewport().maximized` 恒为 `None`：最大化时边缘缩放区仍然生效，压住
+    /// 右上角关闭键；最大化按钮也永远只会发「最大化」，还原不回来。
+    viewport_info: egui::ViewportInfo,
     app: Option<Box<dyn eframe::App>>,
 }
 
@@ -155,6 +161,12 @@ impl ApplicationHandler<UserEvent> for SoftApp {
             }
         };
 
+        egui_winit::update_viewport_info(
+            &mut self.viewport_info,
+            self.egui_ctx.as_ref().unwrap(),
+            &window,
+            true,
+        );
         self.window = Some(window);
         self.surface = Some(surface);
         self.egui_winit = Some(egui_winit);
@@ -225,13 +237,17 @@ impl SoftApp {
             .resize(width, height)
             .map_err(|e| format!("调整软渲染表面失败：{e}"))?;
 
-        let raw_input = self
+        let ctx = self.egui_ctx.clone().expect("egui 上下文已建");
+        let mut raw_input = self
             .egui_winit
             .as_mut()
             .expect("egui 状态已建")
             .take_egui_input(&window);
+        egui_winit::update_viewport_info(&mut self.viewport_info, &ctx, &window, false);
+        raw_input
+            .viewports
+            .insert(egui::ViewportId::ROOT, self.viewport_info.clone());
 
-        let ctx = self.egui_ctx.clone().expect("egui 上下文已建");
         // 清屏色沿用应用声明（否则 resize 瞬间、或 egui 没画到的边缘会露黑）。
         let theme = ctx.system_theme().unwrap_or(egui::Theme::Dark);
         let style = ctx.style_of(theme);
